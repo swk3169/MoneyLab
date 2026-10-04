@@ -66,7 +66,7 @@ class HttpClient:
         base_url: str,
         timeout: float = 10.0,
         retries: int = 2,
-        user_agent: str = "MoneyLab/0.2",
+        user_agent: str = "MoneyLab/0.3",
         session: requests.Session | None = None,
     ):
         self.base_url = base_url.rstrip("/")
