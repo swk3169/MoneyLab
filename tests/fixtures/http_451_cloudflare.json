@@ -1,0 +1,20 @@
+{
+  "_source": "REAL capture, 2026-10-04 12:01:54 GMT, curl GET https://gamma-api.polymarket.com/markets?limit=1",
+  "status_code": 451,
+  "reason": "Unavailable For Legal Reasons",
+  "headers": {
+    "Date": "Sun, 04 Oct 2026 12:01:54 GMT",
+    "Content-Type": "text/plain; charset=UTF-8",
+    "Content-Length": "17",
+    "Connection": "keep-alive",
+    "Cache-Control": "private, max-age=0, no-store, no-cache, must-revalidate, post-check=0, pre-check=0",
+    "Expires": "Thu, 01 Jan 1970 00:00:01 GMT",
+    "Referrer-Policy": "same-origin",
+    "X-Frame-Options": "SAMEORIGIN",
+    "Strict-Transport-Security": "max-age=7776000; includeSubDomains",
+    "Speculation-Rules": "\"/cdn-cgi/speculation\"",
+    "Server": "cloudflare",
+    "CF-RAY": "a45408de2b441ef9-ICN"
+  },
+  "body": "error code: 1026"
+}

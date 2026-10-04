@@ -1,0 +1,15 @@
+# Runtime dependencies (pinned, verified on Python 3.14.8).
+# Ranges are declared in pyproject.toml; this file is the reproducible lock.
+requests==2.34.2
+rich==15.0.0
+python-dotenv==1.2.4
+
+# transitive
+certifi==2026.7.22
+charset-normalizer==3.5.2
+idna==3.20
+urllib3==2.8.0
+markdown-it-py==4.2.0
+mdurl==0.1.2
+Pygments==2.21.0
+colorama==0.4.6
