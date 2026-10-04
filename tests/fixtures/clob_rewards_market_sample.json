@@ -1,0 +1,40 @@
+{
+ "limit": 100,
+ "count": 1,
+ "next_cursor": "LTE=",
+ "data": [
+  {
+   "condition_id": "0xSYNTHETIC-CONDITION-0001",
+   "question": "Synthetic: will the test event happen?",
+   "market_slug": "synthetic-test-event",
+   "event_slug": "synthetic-test-event",
+   "image": "",
+   "rewards_max_spread": 3,
+   "rewards_min_size": 50,
+   "market_competitiveness": 0.5,
+   "tokens": [
+    {
+     "token_id": "111111111111111111110001",
+     "outcome": "YES",
+     "price": 0.5
+    },
+    {
+     "token_id": "111111111111111111110002",
+     "outcome": "NO",
+     "price": 0.5
+    }
+   ],
+   "rewards_config": [
+    {
+     "id": 1,
+     "asset_address": "0xSYNTHETIC-ASSET",
+     "start_date": "2026-10-01",
+     "end_date": "2026-10-31",
+     "rate_per_day": 20,
+     "total_rewards": 620,
+     "total_days": 31
+    }
+   ]
+  }
+ ]
+}

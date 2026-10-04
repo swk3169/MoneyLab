@@ -37,7 +37,7 @@ class Settings:
     http_retries: int = 2
     data_dir: Path = Path("data")
     log_level: str = "INFO"
-    user_agent: str = "MoneyLab/0.1 (+research; read-only)"
+    user_agent: str = "MoneyLab/0.2 (+research; read-only)"
 
     @property
     def raw_dir(self) -> Path:

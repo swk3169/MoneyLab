@@ -114,3 +114,98 @@ def vwap_fill(levels: Sequence[tuple[float, float]], size: float) -> float | Non
         if remaining <= 1e-12:
             return cost / size
     return None
+
+
+# --- order-book microstructure (v0.2) -------------------------------------------
+# `levels` are [(price, size), ...] or objects with .price/.size, sorted best-first.
+
+
+def _ps(level) -> tuple[float, float]:
+    return (level.price, level.size) if hasattr(level, "price") else (level[0], level[1])
+
+
+def spread_ticks(best_bid: float | None, best_ask: float | None, tick_size: float) -> float | None:
+    s = spread(best_bid, best_ask)
+    if s is None or tick_size <= 0:
+        return None
+    return round(s / tick_size, 6)
+
+
+def microprice(best_bid: float | None, bid_size: float, best_ask: float | None, ask_size: float) -> float | None:
+    """Size-weighted mid: leans toward the side with *less* resting size.
+
+    microprice = (bid * ask_size + ask * bid_size) / (bid_size + ask_size)
+    """
+    if best_bid is None or best_ask is None:
+        return None
+    total = bid_size + ask_size
+    if total <= 0:
+        return (best_bid + best_ask) / 2
+    return (best_bid * ask_size + best_ask * bid_size) / total
+
+
+def depth_within(levels: Sequence, reference: float, distance: float) -> tuple[float, float]:
+    """(shares, notional) resting within `distance` of `reference` (inclusive)."""
+    shares = notional = 0.0
+    for lvl in levels:
+        price, size = _ps(lvl)
+        if abs(price - reference) <= distance + 1e-12:
+            shares += size
+            notional += price * size
+    return shares, notional
+
+
+def book_imbalance(bid_depth: float, ask_depth: float) -> float | None:
+    """(bid - ask) / (bid + ask) in [-1, 1]. Positive = more resting buy interest."""
+    total = bid_depth + ask_depth
+    return (bid_depth - ask_depth) / total if total > 0 else None
+
+
+def walk_book(levels: Sequence, size: float, limit_price: float | None = None, side: str = "buy") -> list[tuple[float, float]]:
+    """Fills [(price, shares), ...] for a taker consuming `size` shares best-first.
+
+    Stops at `limit_price` (buy: price <= limit, sell: price >= limit). May return less than
+    `size` if the book is thin.
+    """
+    fills: list[tuple[float, float]] = []
+    remaining = size
+    for lvl in levels:
+        if remaining <= 1e-12:
+            break
+        price, available = _ps(lvl)
+        if limit_price is not None and ((side == "buy" and price > limit_price + 1e-12) or (side == "sell" and price < limit_price - 1e-12)):
+            break
+        take = min(remaining, available)
+        if take > 0:
+            fills.append((price, take))
+            remaining -= take
+    return fills
+
+
+def price_impact(levels: Sequence, size: float, side: str = "buy") -> float | None:
+    """Adverse VWAP distance from the best price for a taker of `size` shares (>= 0)."""
+    vwap = vwap_fill([_ps(lvl) for lvl in levels], size)
+    if vwap is None or not levels:
+        return None
+    best = _ps(levels[0])[0]
+    return vwap - best if side == "buy" else best - vwap
+
+
+def drawdown_series(equity: Sequence[float]) -> list[float]:
+    """Drawdown from running peak at each point, as a fraction of the peak (0.1 = -10%)."""
+    out: list[float] = []
+    peak = float("-inf")
+    for v in equity:
+        peak = max(peak, v)
+        out.append((peak - v) / peak if peak > 0 else 0.0)
+    return out
+
+
+def max_drawdown_abs(equity: Sequence[float]) -> float:
+    """Largest peak-to-trough decline in currency units."""
+    peak = float("-inf")
+    mdd = 0.0
+    for v in equity:
+        peak = max(peak, v)
+        mdd = max(mdd, peak - v)
+    return mdd

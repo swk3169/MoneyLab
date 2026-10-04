@@ -1,5 +1,5 @@
-"""Market data providers. Everything above this layer depends only on MarketDataProvider."""
+"""Market data providers. Everything above this layer depends only on the base interfaces."""
 
-from moneylab.providers.base import MarketDataProvider, MarketQuery
+from moneylab.providers.base import MarketDataProvider, MarketQuery, OrderBookProvider
 
-__all__ = ["MarketDataProvider", "MarketQuery"]
+__all__ = ["MarketDataProvider", "MarketQuery", "OrderBookProvider"]

@@ -1,1 +1,1 @@
-"""Profitability and execution-cost metrics (pure functions, no I/O)."""
+"""Profitability, cost, reward and EV models (pure functions, no I/O)."""

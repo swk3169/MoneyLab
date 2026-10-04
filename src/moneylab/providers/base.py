@@ -11,7 +11,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+from moneylab.domain.market_params import MarketParams
 from moneylab.domain.models import Market
+from moneylab.domain.orderbook import OrderBook
 
 
 @dataclass(frozen=True)
@@ -33,3 +35,21 @@ class MarketDataProvider(ABC):
 
     def close(self) -> None:  # noqa: B027 - optional hook
         """Release resources (sessions, files)."""
+
+
+class OrderBookProvider(ABC):
+    """Read-only order-book and market-parameter access. Raises only ProviderError."""
+
+    name: str = "abstract"
+
+    @abstractmethod
+    def get_order_book(self, token_id: str) -> OrderBook: ...
+
+    def get_order_books(self, token_ids: list[str]) -> dict[str, OrderBook]:
+        return {t: self.get_order_book(t) for t in token_ids}
+
+    @abstractmethod
+    def get_market_params(self, condition_id: str) -> MarketParams: ...
+
+    def close(self) -> None:  # noqa: B027 - optional hook
+        """Release resources."""

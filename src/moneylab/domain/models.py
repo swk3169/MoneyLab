@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from moneylab.domain.market_params import FeeSchedule, RewardConfig
+
 
 @dataclass(frozen=True)
 class Outcome:
@@ -36,6 +38,8 @@ class Market:
     slug: str | None = None
     condition_id: str | None = None
     url: str | None = None
+    fee_schedule: FeeSchedule | None = None  # None = unknown, not "free"
+    reward_config: RewardConfig | None = None
     extra: dict = field(default_factory=dict, compare=False, repr=False)
 
     # --- binary helpers -------------------------------------------------

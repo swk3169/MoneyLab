@@ -5,10 +5,10 @@
 최종 목표는 **검증된 수익성을 가진 자동매매 시스템**이며, 다음 순서로 단계적으로 진행한다.
 
 ```
-Scanner (v0.1) → 데이터 축적(SQLite) → Strategy → Backtest → Paper Trading → Risk/Sizing → Live Execution
+Scanner (v0.1) → 호가창 전략 연구·오프라인 시뮬레이션 (v0.2) → 데이터 축적 → Paper Trading(실데이터) → Live Execution
 ```
 
-> **현재 버전(v0.1)은 읽기 전용이다.** 실제 주문, 지갑 연결, 개인키 사용, 자동매매, 실거래 자금 사용 기능은 없다.
+> **현재 버전(v0.2)은 읽기 전용이다.** 실제 주문, 지갑 연결, 개인키 사용, 자동매매, 실거래 자금 사용 기능은 없다.
 
 ---
 
@@ -34,6 +34,50 @@ Polymarket 이용약관과 거주 지역 규정을 직접 확인할 것.
 
 ---
 
+## v0.2: 호가창 기반 전략 연구 (오프라인 시뮬레이션)
+
+Polymarket CLOB V2(2026-04-28부터 운영)의 공개 읽기 전용 엔드포인트를 기준으로 만들었다.
+HTTP 451 상태에서도 fixture timeline으로 전체 전략을 오프라인에서 시뮬레이션한다.
+
+| 모듈 | 파일 |
+|---|---|
+| CLOB order-book reader (`/book`, `/books`, `/clob-markets/{id}`, `/rewards/markets/{id}`) | `providers/polymarket/clob_*.py` |
+| spread, microprice, depth, imbalance, price impact | `analytics/metrics.py` |
+| taker fee `C·rate·p(1−p)` (소수 5자리 반올림), maker fee 0 | `analytics/costs.py` |
+| maker rebate **추정치** (`rebate_rate × fee_equivalent`) | `analytics/costs.py` |
+| liquidity reward 점수 `S, Q_one, Q_two, Q_min`, 보상 **추정치** | `analytics/rewards.py` |
+| taker/maker EV (거래 EV와 인센티브 분리) | `analytics/ev.py` |
+| market-making 인터페이스 + `SymmetricMarketMaker` | `strategy/market_making.py` |
+| mispricing 인터페이스 + `ComplementArbitrage`, `FairValueDeviation` | `strategy/mispricing.py` |
+| inventory risk (net delta, 최악 손실, reservation price) | `risk/inventory.py` |
+| fractional Kelly (기본 0.25) + 6가지 cap | `sizing/position.py` |
+| paper execution engine (taker VWAP, 보수적 trade-through maker fill) | `paper/engine.py`, `paper/fill_models.py` |
+| PnL 분해, equity, drawdown, 채택 규칙 | `pnl/ledger.py`, `pnl/report.py` |
+| kill switch (7가지 조건, 발동 시 주문 전량 취소) | `risk/kill_switch.py` |
+| 실거래 adapter | **설계 문서만 있음**: [docs/live_execution_design.md](docs/live_execution_design.md) |
+
+### PnL 분해
+
+```
+gross_trading_pnl          = spread_captured − slippage + inventory_pnl   (= 현금흐름 + 포지션×평가가, 테스트로 검증)
+net_trading_pnl_after_cost = gross_trading_pnl − taker_fees − maker_fees
+all_in_realized_pnl        = net_trading_pnl_after_cost + realized_maker_rebate + realized_liquidity_reward
+```
+
+`estimated_maker_rebate`와 `estimated_liquidity_reward`는 모델이 계산한 값이다. 실제 지급이 확인되기 전에는
+실현 PnL에 넣지 않는다. 경쟁자의 유동성을 알 수 없으므로 reward를 확정값으로 계산하지 않는다.
+
+**채택 규칙**: 인센티브를 뺀 `net_trading_pnl_after_cost`가 0 이하인 전략은 `REJECT`한다.
+합성 데이터이거나 거래 수가 부족하면 결과가 양수여도 `INSUFFICIENT_EVIDENCE`로 판정한다.
+
+### 실제 데이터로 교체하기
+
+timeline JSON은 실제 CLOB 응답 형식을 그대로 담는다 (`snapshots[].books[]` = `GET /book` 응답).
+API에 합법적으로 접근할 수 있게 되면 `/books` 응답을 같은 형식으로 기록하고 `simulate --timeline <파일>`로 실행한다.
+실시간 페이퍼 트레이딩은 `paper/book_stream.PollingBookStream`이 `OrderBookProvider`를 polling하는 방식으로 이어진다.
+
+---
+
 ## 설치
 
 Python 3.12 이상이 필요하다 (개발과 검증은 3.14.8에서 진행).
@@ -56,6 +100,13 @@ python -m moneylab scan --source fixture                  # 오프라인 (샘플
 python -m moneylab scan --source fixture --fixture data\raw\polymarket\<file>.json
 python -m moneylab diagnose                               # 연결/HTTP 오류 진단
 python -m moneylab diagnose --url https://gamma-api.polymarket.com/events?limit=1
+
+python -m moneylab book                                   # fixture 호가창: spread, microprice, depth
+python -m moneylab book --source polymarket --token <token_id>
+python -m moneylab simulate --strategy mm                 # market-making 오프라인 시뮬레이션
+python -m moneylab simulate --strategy mispricing         # 차익 + fair-value 오프라인 시뮬레이션
+python -m moneylab simulate --strategy fair-value --resolution no   # 결과 민감도 확인
+python -m moneylab simulate --timeline data\raw\polymarket\clob\<recorded>.json --kelly 0.1 --save
 ```
 
 종료 코드는 다음과 같다.
@@ -89,13 +140,16 @@ src/moneylab/
 │   ├── base.py             MarketDataProvider 인터페이스
 │   └── polymarket/         Gamma client(API/파일), 파서, provider 어댑터
 ├── scanner/                공급자 독립 스캐너 (필터, 정렬, 플래그)
-├── analytics/metrics.py    net return, win rate, EV, profit factor, MDD, 비용, spread, slippage, VWAP
+├── analytics/              metrics(MDD, spread, microprice, depth), costs(fee/rebate), rewards, ev
 ├── storage/                data/raw JSON, data/processed CSV  (예정: SQLite)
 ├── display/                rich 콘솔 출력
-├── strategy/   (인터페이스)  Strategy → Signal
-├── risk/       (인터페이스)  RiskCheck → RiskDecision
-├── execution/  (인터페이스만, 실거래 구현 없음)
-├── sizing/ backtest/ paper/ pnl/   (예정)
+├── strategy/               Strategy→Signal, MarketMakingStrategy→Quote, MispricingStrategy→TradeIntent
+├── risk/                   inventory risk, kill switch, RiskCheck
+├── sizing/                 capped fractional Kelly
+├── paper/                  paper engine, maker fill model, book stream, simulation runner
+├── pnl/                    ledger (PnL 분해), report (채택 규칙)
+├── execution/  (인터페이스만, 실거래 구현 없음 - docs/live_execution_design.md)
+├── backtest/   (예정)
 tests/                      오프라인 단위 테스트 + fixtures
 data/raw, data/processed    생성 데이터 (git 제외)
 ```
@@ -123,7 +177,8 @@ strategy / risk / backtest / paper / execution → domain, analytics   (공급�
 | 단계 | 내용 |
 |---|---|
 | v0.1 | Scanner, 진단, 오프라인 테스트 ✅ |
-| v0.2 | SQLite 스냅샷 저장(시계열), 실제 응답 기반 fixture 갱신, CLOB 호가(`/book`)로 실제 spread와 VWAP 계산 |
+| v0.2 | CLOB 호가 reader, 비용·리베이트·리워드 모델, MM/mispricing 전략, paper engine, PnL 분해, kill switch (fixture 기반 오프라인) ✅ |
+| v0.2.x | 실제 호가 기록(합법적 접근 시)으로 fixture 교체, SQLite 스냅샷, queue-position fill 모델 |
 | v0.3 | Strategy engine, 비용 모델(수수료, spread, slippage), 백테스트 |
 | v0.4 | Paper trading, PnL tracking, 지표 리포트 |
 | v0.5 | Risk management, position sizing, kill switch |

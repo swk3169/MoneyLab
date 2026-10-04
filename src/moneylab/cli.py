@@ -3,6 +3,8 @@
     python -m moneylab scan                         # live Polymarket scan
     python -m moneylab scan --source fixture        # offline, from a saved response
     python -m moneylab diagnose                     # connectivity / HTTP error report
+    python -m moneylab book --source fixture        # order book, spread, depth (offline)
+    python -m moneylab simulate --strategy mm       # offline paper simulation from a fixture timeline
 
 Exit codes: 0 ok, 3 data source unavailable (handled), 1 unexpected error (handled), 2 usage.
 """
@@ -10,8 +12,10 @@ Exit codes: 0 ok, 3 data source unavailable (handled), 1 unexpected error (handl
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import traceback
+from dataclasses import replace
 from pathlib import Path
 
 from moneylab import __version__
@@ -20,16 +24,45 @@ from moneylab.core.diagnostics import run_diagnostics
 from moneylab.core.http import HttpClient
 from moneylab.core.logging_setup import setup_logging
 from moneylab.core.redaction import redact_text
-from moneylab.display.console import console, render_diagnostics, render_scan
+from moneylab.core.exceptions import ProviderError
+from moneylab.display.console import (
+    console,
+    render_book,
+    render_diagnostics,
+    render_http_diagnostics,
+    render_scan,
+    render_simulation,
+)
+from moneylab.paper.book_stream import TimelineBookStream
+from moneylab.paper.runner import SimulationConfig, SimulationRunner
 from moneylab.providers.base import MarketDataProvider, MarketQuery
-from moneylab.providers.polymarket import GammaApiSource, GammaFileSource, PolymarketProvider
+from moneylab.providers.polymarket import (
+    ClobApiSource,
+    ClobFileSource,
+    GammaApiSource,
+    GammaFileSource,
+    PolymarketClobProvider,
+    PolymarketProvider,
+    load_timeline,
+)
 from moneylab.scanner import MarketScanner, ScanCriteria
+from moneylab.sizing.position import SizingLimits
+from moneylab.strategy.market_making import SymmetricMarketMaker
+from moneylab.strategy.mispricing import CombinedMispricing, ComplementArbitrage, FairValueDeviation
 from moneylab.storage.files import RawStore, save_json, save_markets_csv
 
 log = logging.getLogger("moneylab")
 
 EXIT_OK, EXIT_ERROR, EXIT_UNAVAILABLE = 0, 1, 3
-DEFAULT_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "gamma_markets_sample.json"
+FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
+DEFAULT_FIXTURE = FIXTURES / "gamma_markets_sample.json"
+DEFAULT_BOOKS = FIXTURES / "clob_books_sample.json"
+DEFAULT_TIMELINES = {
+    "mm": FIXTURES / "clob_timeline_mm.json",
+    "mispricing": FIXTURES / "clob_timeline_mispricing.json",
+    "arb": FIXTURES / "clob_timeline_mispricing.json",
+    "fair-value": FIXTURES / "clob_timeline_mispricing.json",
+}
 
 
 def build_provider(args: argparse.Namespace, settings: Settings) -> MarketDataProvider:
@@ -82,6 +115,83 @@ def cmd_diagnose(args: argparse.Namespace, settings: Settings) -> int:
     return EXIT_OK if all(c.ok for c in report.checks) else EXIT_UNAVAILABLE
 
 
+def _first_fixture_token(path: Path) -> str | None:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    first = payload[0] if isinstance(payload, list) and payload else payload
+    return str(first["asset_id"]) if isinstance(first, dict) and first.get("asset_id") else None
+
+
+def cmd_book(args: argparse.Namespace, settings: Settings) -> int:
+    token = args.token
+    if args.source == "fixture":
+        provider = PolymarketClobProvider(ClobFileSource(args.fixture))
+        token = token or _first_fixture_token(args.fixture)
+    else:
+        http = HttpClient(settings.clob_url, settings.http_timeout, settings.http_retries, settings.user_agent)
+        sink = None if args.no_save else RawStore(settings.raw_dir, "polymarket")
+        provider = PolymarketClobProvider(ClobApiSource(http, raw_sink=sink))
+    if not token:
+        console.print("[red]--token is required (no token found in the fixture)[/red]")
+        return EXIT_ERROR
+    try:
+        book = provider.get_order_book(token)
+    except ProviderError as exc:
+        console.print(f"[red]Order book unavailable:[/red] {exc}")
+        if exc.diagnostics is not None:
+            render_http_diagnostics(exc.diagnostics)
+        return EXIT_UNAVAILABLE
+    finally:
+        provider.close()
+    render_book(book, depth_cents=args.depth_cents)
+    return EXIT_OK
+
+
+def build_strategy(name: str):
+    if name == "mm":
+        return SymmetricMarketMaker()
+    if name == "arb":
+        return ComplementArbitrage()
+    if name == "fair-value":
+        return FairValueDeviation()
+    return CombinedMispricing((ComplementArbitrage(), FairValueDeviation()))
+
+
+def cmd_simulate(args: argparse.Namespace, settings: Settings) -> int:
+    path = args.timeline or DEFAULT_TIMELINES[args.strategy]
+    try:
+        timeline = load_timeline(path)
+    except ProviderError as exc:
+        console.print(f"[red]Cannot load timeline:[/red] {exc}")
+        return EXIT_UNAVAILABLE
+    resolution = timeline.resolution
+    if args.resolution in ("yes", "no"):
+        yes, no = timeline.params.yes_token, timeline.params.no_token
+        resolution = {yes: 1.0, no: 0.0} if args.resolution == "yes" else {yes: 0.0, no: 1.0}
+    elif args.resolution == "none":
+        resolution = None
+    config = SimulationConfig(
+        starting_cash=args.starting_cash,
+        sizing=replace(SizingLimits(), kelly_fraction=args.kelly),
+        estimate_rewards=not args.no_reward_estimate,
+    )
+    runner = SimulationRunner(timeline.params, build_strategy(args.strategy), config, synthetic=timeline.synthetic)
+    result = runner.run(TimelineBookStream(timeline), resolution)
+    render_simulation(result, timeline.description)
+    if args.save:
+        out = save_json(settings.processed_dir / "simulations" / f"{args.strategy}.json", {
+            "strategy": result.strategy, "timeline": str(path), "resolution": resolution,
+            "breakdown": result.breakdown.to_dict(), "trade_pnls": result.trade_pnls,
+            "max_drawdown": result.max_drawdown, "win_rate": result.win_rate,
+            "profit_factor": result.profit_factor, "verdict": result.verdict.status,
+            "equity_curve": result.equity_curve,
+        })
+        console.print(f"[dim]Saved -> {out}[/dim]")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="moneylab", description="MoneyLab - prediction market research (read-only)")
     p.add_argument("--version", action="version", version=f"moneylab {__version__}")
@@ -107,6 +217,25 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--no-control", action="store_true", help="skip control endpoint check")
     d.add_argument("--no-save", action="store_true")
     d.set_defaults(func=cmd_diagnose)
+
+    b = sub.add_parser("book", help="show a CLOB order book with spread/microprice/depth (read-only)")
+    b.add_argument("--source", choices=["polymarket", "fixture"], default="fixture")
+    b.add_argument("--fixture", type=Path, default=DEFAULT_BOOKS, help="saved /book or /books JSON")
+    b.add_argument("--token", help="token (asset) id; default: first book in the fixture")
+    b.add_argument("--depth-cents", type=float, default=2.0)
+    b.add_argument("--no-save", action="store_true")
+    b.set_defaults(func=cmd_book)
+
+    m = sub.add_parser("simulate", help="offline paper simulation on a replay timeline (no orders, no funds)")
+    m.add_argument("--strategy", choices=["mm", "mispricing", "arb", "fair-value"], default="mm")
+    m.add_argument("--timeline", type=Path, default=None, help="timeline JSON (fixture or recorded data)")
+    m.add_argument("--starting-cash", type=float, default=1000.0)
+    m.add_argument("--kelly", type=float, default=0.25, help="Kelly fraction (default 0.25)")
+    m.add_argument("--resolution", choices=["fixture", "yes", "no", "none"], default="fixture",
+                   help="override the timeline's resolution (sensitivity check)")
+    m.add_argument("--no-reward-estimate", action="store_true")
+    m.add_argument("--save", action="store_true", help="write result JSON to data/processed/simulations/")
+    m.set_defaults(func=cmd_simulate)
     return p
 
 

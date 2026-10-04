@@ -1,6 +1,5 @@
-"""Position sizing (planned): e.g. fixed-fraction, capped fractional Kelly.
+"""Position sizing: capped fractional Kelly (default 0.25 Kelly) - see sizing.position."""
 
-Kelly for a binary share bought at price p with estimated probability q:
-    f* = (q - p) / (1 - p)
-Use a fraction of f* and cap it; estimates of q are noisy.
-"""
+from moneylab.sizing.position import PortfolioState, SizingDecision, SizingLimits, size_capped, size_directional
+
+__all__ = ["PortfolioState", "SizingDecision", "SizingLimits", "size_capped", "size_directional"]

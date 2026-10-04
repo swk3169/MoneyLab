@@ -4,7 +4,7 @@ AI 코딩 에이전트를 위한 MoneyLab 작업 지침.
 
 ## 프로젝트
 
-예측시장/투자 전략 연구용 Python 프로젝트. 최종 목표는 수익성이 검증된 자동매매이고, 현재는 v0.1 읽기 전용 Scanner 단계다.
+예측시장/투자 전략 연구용 Python 프로젝트. 최종 목표는 수익성이 검증된 자동매매이고, 현재는 v0.2 단계(읽기 전용 Scanner + fixture 기반 오프라인 전략 시뮬레이션)다. 실거래 adapter는 설계 문서(`docs/live_execution_design.md`)만 있다.
 자세한 내용은 README.md를 참고한다.
 
 ## 환경
@@ -12,7 +12,7 @@ AI 코딩 에이전트를 위한 MoneyLab 작업 지침.
 - Windows, Python 3.14 (`C:\MoneyLab\.venv`). 실행할 때는 항상 `.\.venv\Scripts\python.exe`를 쓴다.
 - 패키지는 `pip install -e . --no-deps`로 설치되어 있다 (src layout).
 - 테스트는 `.\.venv\Scripts\python.exe -m pytest`로 돌린다. 오프라인으로 실행되며 모두 통과해야 한다.
-- 실행: `python -m moneylab scan [--source fixture]`, `python -m moneylab diagnose`
+- 실행: `python -m moneylab scan [--source fixture]`, `diagnose`, `book`, `simulate --strategy mm|mispricing`
 - 의존성을 추가하면 `pyproject.toml`(범위)과 `requirements*.txt`(고정 버전)를 함께 갱신하고, Python 3.14 호환성을 확인한다.
 
 ## 절대 규칙
@@ -27,10 +27,11 @@ AI 코딩 에이전트를 위한 MoneyLab 작업 지침.
 
 ## 아키텍처 규칙
 
-- `scanner/`, `strategy/`, `risk/`, `backtest/`, `paper/`, `analytics/`는 `providers.polymarket`를 import하지 않는다. `domain.Market`과 `MarketDataProvider`에만 의존한다.
+- `scanner/`, `strategy/`, `risk/`, `backtest/`, `paper/`, `analytics/`, `pnl/`, `sizing/`은 `providers.polymarket`를 import하지 않는다 (`tests/test_architecture_and_cli.py`가 검사). `domain`과 `providers.base`(`MarketDataProvider`, `OrderBookProvider`)에만 의존한다.
 - Provider는 실패할 때 `ProviderError`만 던진다. Scanner는 이를 `ScanResult.error`로 반환하고 프로그램을 종료시키지 않는다.
 - 수익성 지표는 `analytics/metrics.py`의 순수 함수로 계산한다. 백테스트, 페이퍼, 라이브가 같은 함수를 쓴다.
 - 비용(수수료, spread, slippage)을 뺀 순수익(net) 기준으로 평가한다. 총수익(gross) 엣지만으로 전략을 채택하지 않는다.
+- maker rebate와 liquidity reward는 `estimated_*`와 `realized_*`로 분리한다. 추정치는 실현 PnL과 채택 판단에 넣지 않는다.
 - 원본 데이터는 `data/raw/<provider>/`, 가공 데이터는 `data/processed/`에 둔다. 둘 다 git에서 제외한다.
 
 ## 작업 방식
