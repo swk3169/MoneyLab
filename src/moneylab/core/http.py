@@ -66,7 +66,7 @@ class HttpClient:
         base_url: str,
         timeout: float = 10.0,
         retries: int = 2,
-        user_agent: str = "MoneyLab/0.1",
+        user_agent: str = "MoneyLab/0.3",
         session: requests.Session | None = None,
     ):
         self.base_url = base_url.rstrip("/")
@@ -87,12 +87,15 @@ class HttpClient:
             self.session.mount("https://", adapter)
             self.session.mount("http://", adapter)
 
-    def request(self, method: str, path: str, params: dict[str, Any] | None = None) -> requests.Response:
+    def request(
+        self, method: str, path: str, params: dict[str, Any] | None = None, json_body: Any = None
+    ) -> requests.Response:
         """Send a request and return the raw response (any status). Raises NetworkError only."""
         url = path if path.startswith("http") else f"{self.base_url}/{path.lstrip('/')}"
+        extra = {} if json_body is None else {"json": json_body}
         start = time.perf_counter()
         try:
-            resp = self.session.request(method, url, params=params, timeout=self.timeout)
+            resp = self.session.request(method, url, params=params, timeout=self.timeout, **extra)
         except requests.Timeout as exc:
             raise NetworkError(f"Timeout after {self.timeout}s: {method} {url}") from exc
         except requests.ConnectionError as exc:
@@ -104,17 +107,27 @@ class HttpClient:
         return resp
 
     def get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        resp = self.request("GET", path, params=params)
+        return self._json(self.request("GET", path, params=params), "GET")
+
+    def post_json(self, path: str, body: Any) -> Any:
+        """POST a JSON body to a *read-only* query endpoint (e.g. CLOB POST /books).
+
+        Not retried (POST is outside the retry policy). Never use for order placement.
+        """
+        return self._json(self.request("POST", path, json_body=body), "POST")
+
+    @staticmethod
+    def _json(resp: requests.Response, method: str) -> Any:
         elapsed = getattr(resp, "elapsed_ms", 0.0)
         if not resp.ok:
             diag = HttpDiagnostics.from_response(resp, elapsed)
-            raise ApiError(f"HTTP {resp.status_code} {resp.reason}: GET {resp.url}", diag)
+            raise ApiError(f"HTTP {resp.status_code} {resp.reason}: {method} {resp.url}", diag)
         try:
             return resp.json()
         except ValueError as exc:
             diag = HttpDiagnostics.from_response(resp, elapsed)
             diag.error = "Response body is not valid JSON"
-            raise ApiError(f"Invalid JSON from GET {resp.url}", diag) from exc
+            raise ApiError(f"Invalid JSON from {method} {resp.url}", diag) from exc
 
     def close(self) -> None:
         self.session.close()

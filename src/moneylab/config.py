@@ -37,11 +37,21 @@ class Settings:
     http_retries: int = 2
     data_dir: Path = Path("data")
     log_level: str = "INFO"
-    user_agent: str = "MoneyLab/0.1 (+research; read-only)"
+    user_agent: str = "MoneyLab/0.3 (+research; read-only)"
+    # Recorder (v0.3). Switching fixture -> live recording is a settings change only.
+    recorder_source: str = "polymarket"  # polymarket | fixture
+    recorder_condition_ids: tuple[str, ...] = ()
+    recorder_interval: float = 60.0
+    recorder_metadata_refresh: float = 3600.0
+    recorder_max_failures: int = 30
 
     @property
     def raw_dir(self) -> Path:
         return self.data_dir / "raw"
+
+    @property
+    def recordings_dir(self) -> Path:
+        return self.raw_dir / "polymarket" / "recordings"
 
     @property
     def processed_dir(self) -> Path:
@@ -58,4 +68,11 @@ def load_settings() -> Settings:
         http_retries=_env_int("MONEYLAB_HTTP_RETRIES", Settings.http_retries),
         data_dir=Path(os.getenv("MONEYLAB_DATA_DIR", str(Settings.data_dir))),
         log_level=os.getenv("MONEYLAB_LOG_LEVEL", Settings.log_level).upper(),
+        recorder_source=os.getenv("MONEYLAB_RECORDER_SOURCE", Settings.recorder_source).strip().lower(),
+        recorder_condition_ids=tuple(
+            c.strip() for c in os.getenv("MONEYLAB_RECORDER_CONDITION_IDS", "").split(",") if c.strip()
+        ),
+        recorder_interval=_env_float("MONEYLAB_RECORDER_INTERVAL", Settings.recorder_interval),
+        recorder_metadata_refresh=_env_float("MONEYLAB_RECORDER_METADATA_REFRESH", Settings.recorder_metadata_refresh),
+        recorder_max_failures=_env_int("MONEYLAB_RECORDER_MAX_FAILURES", Settings.recorder_max_failures),
     )

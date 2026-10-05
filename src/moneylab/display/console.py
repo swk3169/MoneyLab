@@ -8,8 +8,11 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
+from moneylab.analytics import metrics
 from moneylab.core.diagnostics import DiagnosticReport, EndpointCheck
 from moneylab.core.http import HttpDiagnostics
+from moneylab.domain.orderbook import OrderBook
+from moneylab.paper.runner import SimulationResult
 from moneylab.scanner.market_scanner import ScanResult
 
 console = Console()
@@ -135,3 +138,108 @@ def render_diagnostics(report: DiagnosticReport) -> None:
                 border_style="yellow",
             )
         )
+
+
+def render_book(book: OrderBook, depth_cents: float = 2.0, levels: int = 5) -> None:
+    table = Table(title=f"Order book {book.token_id}", box=box.SIMPLE_HEAVY)
+    table.add_column("Bid size", justify="right")
+    table.add_column("Bid", justify="right", style="green")
+    table.add_column("Ask", justify="right", style="red")
+    table.add_column("Ask size", justify="right")
+    for i in range(min(levels, max(len(book.bids), len(book.asks)))):
+        b = book.bids[i] if i < len(book.bids) else None
+        a = book.asks[i] if i < len(book.asks) else None
+        table.add_row(
+            f"{b.size:,.0f}" if b else "", fmt_price(b.price) if b else "",
+            fmt_price(a.price) if a else "", f"{a.size:,.0f}" if a else "",
+        )
+    console.print(table)
+    mid = book.mid
+    micro = metrics.microprice(book.best_bid, book.best_bid_size, book.best_ask, book.best_ask_size)
+    dist = depth_cents / 100
+    bid_sh, bid_usd = metrics.depth_within(book.bids, mid, dist) if mid is not None else (0.0, 0.0)
+    ask_sh, ask_usd = metrics.depth_within(book.asks, mid, dist) if mid is not None else (0.0, 0.0)
+    ticks = metrics.spread_ticks(book.best_bid, book.best_ask, book.tick_size)
+    console.print(
+        f"mid {fmt_price(mid)}  microprice {fmt_price(micro)}  spread {fmt_price(book.spread)} ({ticks} ticks)  "
+        f"tick {book.tick_size}  min size {book.min_order_size}\n"
+        f"depth within +/-{depth_cents:g}c: bids {bid_sh:,.0f} sh (${bid_usd:,.2f})  asks {ask_sh:,.0f} sh (${ask_usd:,.2f})  "
+        f"imbalance {fmt_price(metrics.book_imbalance(bid_sh, ask_sh))}"
+    )
+
+
+def _num(v: float | None, pct: bool = False) -> str:
+    if v is None:
+        return "-"
+    if v == float("inf"):
+        return "inf"
+    return f"{v:.2%}" if pct else f"{v:,.4f}"
+
+
+def render_simulation(result: SimulationResult, description: str = "") -> None:
+    title = f"Simulation: {result.strategy}" + ("  [SYNTHETIC DATA]" if result.synthetic else "")
+    table = Table(title=title, box=box.SIMPLE_HEAVY)
+    table.add_column("Component")
+    table.add_column("USDC", justify="right")
+    for name, value in result.breakdown.rows():
+        style = "bold" if name in ("gross_trading_pnl", "net_trading_pnl_after_cost", "all_in_realized_pnl") else None
+        if name.startswith("estimated") or name.startswith("all_in_estimated"):
+            style = "dim"
+        table.add_row(name, f"{round(value, 9) + 0.0:,.4f}", style=style)
+    console.print(table)
+    if description:
+        console.print(f"[dim]{escape(description)}[/dim]")
+    b = result.breakdown
+    console.print(
+        f"fills: maker {result.maker_fills}, taker {result.taker_fills}  rejected orders {len(result.rejections)}\n"
+        f"trades {len(result.trade_pnls)} (open, marked at final mid: {result.open_trades_marked})  "
+        f"win rate {_num(result.win_rate, True)}  profit factor {_num(result.profit_factor)}\n"
+        f"max drawdown {_num(result.max_drawdown, True)} ({_num(result.max_drawdown_abs)} USDC)  "
+        f"costs: fees {_num(b.trading_costs + 0.0)}, slippage {_num(b.slippage + 0.0)}\n"
+        f"accounting identity {'OK' if b.identity_holds else 'MISMATCH'}  final positions {result.final_positions}"
+    )
+    if result.kill_switch_reasons:
+        console.print(f"[red]Kill switch tripped at {result.kill_switch_tripped_at}: {escape('; '.join(result.kill_switch_reasons))}[/red]")
+    color = {"REJECT": "red", "INSUFFICIENT_EVIDENCE": "yellow", "CANDIDATE": "green"}[result.verdict.status]
+    console.print(f"[{color}]Adoption: {result.verdict.status}[/{color}] - {escape('; '.join(result.verdict.reasons))}")
+    console.print("[dim]Estimated incentives are model outputs and are excluded from realized PnL and adoption.[/dim]")
+
+
+def render_recorder_report(report) -> None:
+    """RecorderReport (providers.polymarket.recorder) - duck-typed to keep display provider-free."""
+    status = str(report.status)
+    color = "green" if report.ok else "red"
+    table = Table(title=f"Recorder: {report.recorder}", box=box.SIMPLE_HEAVY)
+    table.add_column("Item")
+    table.add_column("Value", justify="right")
+    for name in ("polls", "books_written", "unchanged_written", "duplicates_skipped", "errors", "rate_limited"):
+        table.add_row(name, str(getattr(report, name)))
+    console.print(table)
+    console.print(f"[{color}]status: {escape(status)}[/{color}]")
+    for cid, path in report.datasets.items():
+        console.print(f"[dim]{escape(cid)} -> {escape(str(path))}[/dim]")
+    for w in report.warnings:
+        console.print(f"[yellow]warning:[/yellow] {escape(w)}")
+    if report.last_error:
+        err = report.last_error
+        console.print(f"[red]last error ({escape(str(err.get('category')))}):[/red] {escape(str(err.get('message')))}")
+        diag = err.get("diagnostics") or {}
+        if diag.get("body_excerpt"):
+            console.print(Panel(escape(str(diag["body_excerpt"])[:800]), title="response body (redacted excerpt)"))
+        if diag.get("note"):
+            console.print(f"[yellow]{escape(diag['note'])}[/yellow]")
+
+
+def render_integrity(report) -> None:
+    """IntegrityReport (providers.polymarket.recorder) - duck-typed."""
+    color = "green" if report.ok else "red"
+    console.print(f"[{color}]Integrity {'OK' if report.ok else 'FAILED'}[/{color}]  {escape(str(report.path))}")
+    console.print(f"status {report.status}  synthetic {report.synthetic}  counts {report.counts}")
+    if report.first_ts is not None:
+        console.print(f"span {report.first_ts:.0f} -> {report.last_ts:.0f} ({report.last_ts - report.first_ts:,.0f}s)")
+    for e in report.errors:
+        console.print(f"[red]error:[/red] {escape(e)}")
+    for w in report.warnings[:30]:
+        console.print(f"[yellow]warning:[/yellow] {escape(w)}")
+    if len(report.warnings) > 30:
+        console.print(f"[dim]... {len(report.warnings) - 30} more warnings[/dim]")

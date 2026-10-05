@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
+from moneylab.domain.market_params import FeeSchedule, RewardAllocation, RewardConfig
 from moneylab.domain.models import Market, Outcome
 
 log = logging.getLogger(__name__)
@@ -67,6 +68,49 @@ def parse_datetime(value: Any) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
+def parse_date(value: Any) -> date | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def parse_gamma_fee_schedule(raw: dict[str, Any]) -> FeeSchedule | None:
+    """Gamma `feesEnabled` + `feeSchedule` -> FeeSchedule. None when absent (= unknown)."""
+    sched = raw.get("feeSchedule")
+    enabled = to_bool(raw.get("feesEnabled"))
+    if not isinstance(sched, dict):
+        return FeeSchedule.free() if enabled is False else None
+    rate = to_float(sched.get("rate")) or 0.0
+    return FeeSchedule(
+        rate=rate,
+        exponent=to_float(sched.get("exponent")) or 1.0,
+        taker_only=bool(to_bool(sched.get("takerOnly"), True)),
+        rebate_rate=to_float(sched.get("rebateRate")) or 0.0,
+        enabled=bool(enabled if enabled is not None else rate > 0) and rate > 0,
+    )
+
+
+def parse_gamma_reward_config(raw: dict[str, Any]) -> RewardConfig | None:
+    """Gamma `rewardsMaxSpread`, `rewardsMinSize`, `clobRewards[]` -> RewardConfig."""
+    max_spread = to_float(raw.get("rewardsMaxSpread"))
+    min_size = to_float(raw.get("rewardsMinSize"))
+    if max_spread is None or min_size is None:
+        return None
+    allocations = tuple(
+        RewardAllocation(
+            daily_rate=to_float(c.get("rewardsDailyRate")) or 0.0,
+            start_date=parse_date(c.get("startDate")),
+            end_date=parse_date(c.get("endDate")),
+        )
+        for c in raw.get("clobRewards") or []
+        if isinstance(c, dict)
+    )
+    return RewardConfig(max_spread_cents=max_spread, min_size=min_size, allocations=allocations)
+
+
 def parse_gamma_market(raw: dict[str, Any]) -> Market | None:
     market_id = raw.get("id") or raw.get("conditionId")
     question = raw.get("question") or raw.get("title")
@@ -107,5 +151,7 @@ def parse_gamma_market(raw: dict[str, Any]) -> Market | None:
         slug=raw.get("slug"),
         condition_id=raw.get("conditionId"),
         url=EVENT_URL.format(slug=event_slug) if event_slug else None,
+        fee_schedule=parse_gamma_fee_schedule(raw),
+        reward_config=parse_gamma_reward_config(raw),
         extra={"spread_reported": to_float(raw.get("spread"))},
     )
