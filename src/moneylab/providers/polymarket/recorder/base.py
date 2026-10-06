@@ -25,34 +25,24 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
-from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from moneylab.core.exceptions import ApiError, NetworkError
 from moneylab.core.redaction import redact_text
 from moneylab.providers.polymarket.recorder.store import RecordingStore
+# Re-exported: these used to be defined here and are now shared by every recorder.
+from moneylab.recording.core import (  # noqa: F401
+    FATAL_STATUSES,
+    Failure,
+    RecorderStatus,
+    SourceExhausted,
+    backoff_delay,
+    classify,
+    parse_retry_after,
+)
+from moneylab.recording.core import header as _header  # noqa: F401
 
 log = logging.getLogger(__name__)
-
-
-class RecorderStatus(StrEnum):
-    IDLE = "idle"
-    RUNNING = "running"
-    COMPLETED = "completed"  # reached max_polls / duration
-    STOPPED = "stopped"  # stop() or Ctrl+C
-    SOURCE_EXHAUSTED = "source_exhausted"  # replay/fixture source has no more data
-    BLOCKED_HTTP_451 = "blocked_http_451"
-    ACCESS_DENIED = "access_denied"  # 401 / 403
-    FAILED = "failed"  # too many consecutive failures, or unusable configuration
-
-
-FATAL_STATUSES = frozenset({RecorderStatus.BLOCKED_HTTP_451, RecorderStatus.ACCESS_DENIED, RecorderStatus.FAILED})
-
-
-class SourceExhausted(Exception):
-    """Raised by finite (fixture/replay) sources when there is no more data."""
 
 
 @dataclass(frozen=True)
@@ -95,88 +85,6 @@ class RecorderReport:
     @property
     def ok(self) -> bool:
         return self.status not in FATAL_STATUSES
-
-
-@dataclass(frozen=True)
-class Failure:
-    """A classified poll failure."""
-
-    category: str  # http_451 | access_denied | rate_limited | http | network | bad_payload
-    message: str
-    status_code: int | None = None
-    retry_after: float | None = None
-    diagnostics: dict[str, Any] | None = None
-
-    @property
-    def fatal_status(self) -> RecorderStatus | None:
-        if self.category == "http_451":
-            return RecorderStatus.BLOCKED_HTTP_451
-        if self.category == "access_denied":
-            return RecorderStatus.ACCESS_DENIED
-        return None
-
-    def to_record(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"category": self.category, "status_code": self.status_code, "message": self.message}
-        if self.retry_after is not None:
-            out["retry_after"] = self.retry_after
-        if self.diagnostics is not None:
-            out["diagnostics"] = self.diagnostics
-        return out
-
-
-def _header(headers: dict[str, str], name: str) -> str | None:
-    low = name.lower()
-    return next((v for k, v in headers.items() if k.lower() == low), None)
-
-
-def parse_retry_after(value: str | None, now: float) -> float | None:
-    """Retry-After is either delta-seconds or an HTTP-date (RFC 9110)."""
-    if not value:
-        return None
-    value = value.strip()
-    try:
-        return max(0.0, float(value))
-    except ValueError:
-        pass
-    try:
-        when = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    return max(0.0, when.timestamp() - now)
-
-
-def classify(exc: Exception, now: float) -> Failure:
-    if isinstance(exc, ApiError):
-        d = exc.diagnostics
-        code = d.status_code
-        if code == 451:
-            # Facts only: status, reason, the (already redacted) body and the headers the
-            # server sent. No conclusion about why access is restricted.
-            return Failure("http_451", f"HTTP 451 {d.reason or ''}: {d.method} {d.url}".strip(), 451, diagnostics={
-                "status_code": code, "reason": d.reason, "url": d.url, "headers": d.headers,
-                "body_excerpt": d.body_excerpt,
-                "note": "HTTP 451 received. The server did not state which client attribute caused it; "
-                        "MoneyLab does not infer one. Recorder stopped without retrying.",
-            })
-        if code in (401, 403):
-            return Failure("access_denied", f"HTTP {code} {d.reason or ''}: {d.method} {d.url}".strip(), code,
-                           diagnostics={"status_code": code, "reason": d.reason, "url": d.url,
-                                        "body_excerpt": d.body_excerpt})
-        if code == 429:
-            return Failure("rate_limited", str(exc), 429,
-                           retry_after=parse_retry_after(_header(d.headers, "Retry-After"), now))
-        if code is None:
-            return Failure("bad_payload", f"{exc} ({d.error or 'unusable body'})",
-                           diagnostics={"body_excerpt": d.body_excerpt})
-        if 200 <= code < 300:  # 2xx with a body that is not JSON
-            return Failure("bad_payload", f"{exc}: {d.error or ''}".strip(), code,
-                           diagnostics={"body_excerpt": d.body_excerpt})
-        return Failure("http", str(exc), code)
-    if isinstance(exc, NetworkError):
-        return Failure("network", str(exc))
-    return Failure("bad_payload", redact_text(f"{type(exc).__name__}: {exc}"))
 
 
 class PolymarketRecorder(ABC):
@@ -307,11 +215,8 @@ class PolymarketRecorder(ABC):
 
     def _backoff_delay(self, failure: Failure) -> float:
         c = self.config
-        exp = min(c.backoff_max, c.backoff_base * 2 ** max(0, self.consecutive_failures - 1))
-        delay = exp * (0.5 + self.rng.random() / 2)  # "equal jitter"
-        if failure.retry_after is not None:  # the server's Retry-After always wins, even above backoff_max
-            delay = max(delay, failure.retry_after)
-        return max(delay, c.interval)
+        return backoff_delay(self.consecutive_failures, c.backoff_base, c.backoff_max, self.rng,
+                             failure.retry_after, floor=c.interval)
 
     def _wait(self, seconds: float) -> None:
         if seconds > 0 and not self._stop_requested:

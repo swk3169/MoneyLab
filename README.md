@@ -5,7 +5,7 @@
 최종 목표는 **검증된 수익성을 가진 자동매매 시스템**이며, 다음 순서로 단계적으로 진행한다.
 
 ```
-Scanner (v0.1) → 호가창 전략 연구·오프라인 시뮬레이션 (v0.2) → 실데이터 Recorder·Replay (v0.3) → Paper Trading(실데이터) → Live Execution
+Scanner (v0.1) → 호가창 전략 연구·오프라인 시뮬레이션 (v0.2) → 실데이터 Recorder·Replay (v0.3, Upbit v0.3.1) → Paper Trading(실데이터) → Live Execution
 ```
 
 > **현재 버전(v0.3)은 읽기 전용이다.** 실제 주문, 지갑 연결, 개인키 사용, 자동매매, 실거래 자금 사용 기능은 없다.
@@ -160,6 +160,112 @@ maker rebate 비율은 CLOB가 제공하지 않는다. `--rebate-rate`로 지정
 
 ---
 
+## v0.3.1: Upbit Public WebSocket Recorder + Replay
+
+Upbit 공개 WebSocket으로 실제 KRW-BTC의 orderbook(30호가)과 trade를 받아 저장하고 replay한다.
+**공개 시세만 사용한다.** API Key, Secret, JWT, 계좌, 주문, 입출금 코드는 없다.
+기존 전략(MM, mispricing)은 예측시장 전제(가격 0~1, YES/NO 보완, 결산가 1.0)라서 Upbit 데이터에 **연결하지 않는다**
+(`simulate --recording <upbit dataset>`은 거부한다).
+
+```
+Upbit Public WebSocket → parser → UpbitRecorder → data/raw/upbit/recordings/<market>/ (segments, atomic)
+  → UpbitRecordingReader → paper.book_stream.ReplayBookStream
+```
+
+### 공식 문서 (2026-10-06 확인)
+
+| 항목 | 내용 | 출처 |
+|---|---|---|
+| Public endpoint | `wss://api.upbit.com/websocket/v1` | [websocket-guide](https://docs.upbit.com/kr/reference/websocket-guide) |
+| 구독 요청 | `[{"ticket"}, {"type","codes","is_only_snapshot"?,"is_only_realtime"?}, {"format"}]`, format `DEFAULT\|SIMPLE\|JSON_LIST\|SIMPLE_LIST` | websocket-guide |
+| orderbook | `type, code, total_ask_size, total_bid_size, orderbook_units[{ask_price,bid_price,ask_size,bid_size}], timestamp(ms), level, stream_type`. 호가 수는 code 접미사 `.1/.5/.15/.30`, `level` 기본 0(모아보기 없음) | [websocket-orderbook](https://docs.upbit.com/kr/reference/websocket-orderbook) |
+| trade | `type, code, trade_price, trade_volume, ask_bid(ASK=매도/BID=매수), trade_date, trade_time, trade_timestamp, timestamp, sequential_id(체결 번호, unique), prev_closing_price, change, change_price, best_ask/bid_price/size, stream_type` | [websocket-trade](https://docs.upbit.com/kr/reference/websocket-trade) |
+| idle / heartbeat | 120초 동안 데이터 교환이 없으면 서버가 연결 종료. PING frame 또는 `"PING"` 메시지로 유지, `{"status":"UP"}` 응답 | websocket-guide |
+| rate limit | 연결 초당 5회(IP), 메시지 연결당 초당 5회·분당 100회, 429는 다음 초에 재요청, 418은 반복 위반 시 차단(응답에 차단 시간 포함) | [rate-limits](https://docs.upbit.com/kr/reference/rate-limits) |
+| 에러 | `{"error":{"name","message"}}` | websocket-guide |
+| market list (REST) | `GET https://api.upbit.com/v1/market/all?is_details=true`, 초당 10회(IP) | [list-trading-pairs](https://docs.upbit.com/kr/reference/list-trading-pairs) |
+
+MoneyLab은 `DEFAULT` format으로 `KRW-BTC.30` orderbook과 `KRW-BTC` trade를 구독하고 `level`은 보내지 않는다.
+
+| 기능 | 구현 |
+|---|---|
+| 공통 recorder core (상태, 실패 분류, backoff+jitter, checksum) | `recording/core.py` (Polymarket recorder도 사용) |
+| endpoint, 제한값, 문서 출처 | `providers/upbit/endpoints.py` |
+| parser (orderbook, trade, status, error) → `OrderBook`, `TradeTick` | `providers/upbit/parser.py`, `domain/trades.py` |
+| WebSocket transport (`websockets` sync, `proxy=None`, PING frame) | `providers/upbit/ws_client.py` |
+| recorder (재연결, PING 텍스트, stale 감지, 429/418/451, 중복, 연속 실패 제한) | `providers/upbit/recorder/recorder.py` |
+| 저장 (JSONL segment, atomic, resume) | `providers/upbit/recorder/store.py` |
+| replay, 무결성 검사, 원본↔replay 비교 | `recorder/replay.py`, `recorder/integrity.py`, `recorder/verify.py` |
+| 오프라인 scripted session (SYNTHETIC) | `recorder/fixture_source.py`, `tests/fixtures/upbit_ws_timeline_synthetic.json` |
+| market list provider | `providers/upbit/provider.py` (`UpbitMarketDataProvider`) |
+
+### 저장 형식
+
+```
+data/raw/upbit/recordings/<market>/            실제 데이터 (provenance=real, git 제외)
+data/raw/upbit/recordings-fixture/<name>/...   fixture 재생 결과 (provenance=fixture)
+  dataset.json                                 market, provenance, synthetic, origin, orderbook_units, 문서 출처
+  state.json                                   상태, 카운터, 마지막 오류, 실행 이력, 디스크에 확정된 last_seq
+  segments/<YYYYMMDD>/<first_seq>.jsonl        수신한 메시지 1개 = 1줄, 불변, atomic write
+```
+
+- 각 줄에는 `raw`(서버가 보낸 원문 텍스트 그대로), `event_type`, `market`, `exchange_timestamp`(메시지 `timestamp`, ms),
+  `received_timestamp`(수신 직후 로컬 UTC epoch 초), `connection_id`, `local_sequence`, `provenance`, `checksum`이 있다.
+  orderbook 줄에는 `best_bid, best_ask, spread, bid_depth, ask_depth`(+ levels, total sizes, level, stream_type),
+  trade 줄에는 `sequential_id, trade_price, trade_volume, ask_bid, trade_timestamp`가 추가된다.
+  원문을 보존하므로 `116409000.00000000` 같은 표현과 2^53을 넘는 `sequential_id`도 손실 없이 남는다.
+- orderbook과 trade 사이에는 거래소 공통 sequence가 없으므로 만들지 않는다. replay 기본 정렬은
+  `(exchange_timestamp, received_timestamp, local_sequence)`이고, `order="received"`로 도착 순서 재생도 가능하다.
+- 중복 메시지도 저장하되 `duplicate: true`로 표시하고 replay에서 제외한다. trade는 `sequential_id` 기준이다.
+  orderbook은 **timestamp와 내용이 모두 같을 때만** 중복으로 본다. 내용이 같고 timestamp가 다른 정상 호가는 지우지 않는다.
+- 연결, 끊김, 실패도 줄로 남기므로 replay에서 error event(공백 구간)로 보인다.
+- 버퍼는 2초 또는 500줄마다 segment로 flush한다. 크래시가 나면 flush 전 버퍼(최대 약 2초)를 잃지만, 디스크의 파일은 항상 완전하다.
+  재시작하면 `.tmp`를 지우고 디스크의 마지막 `local_sequence`부터 이어서 쓰며, 최근 `sequential_id`를 다시 읽어 중복을 막는다.
+- real과 fixture, origin, orderbook 단위가 다른 데이터는 같은 dataset에 섞지 않는다(`DatasetMismatch`).
+
+### 연결과 오류 처리
+
+| 상황 | 동작 |
+|---|---|
+| keep-alive | WebSocket PING frame 30초마다(`websockets`), `"PING"` 텍스트 기본 60초마다(`--ping-interval`, 120초 미만) |
+| 시장 데이터 없음 60초 | stale로 보고 재연결 |
+| HTTP 451 / 401 / 403 (handshake) | 즉시 중단, 재시도 없음, 원인 추정 없음 |
+| HTTP 429 | `Retry-After` 또는 최소 1초 대기 |
+| HTTP 418 | `Retry-After`가 있으면 그 시간, 없으면 60초 대기. `max_ban_wait`(600초)보다 길면 `banned_http_418`으로 중단 |
+| 끊김, 네트워크 오류, 서버 error 메시지 | 지수 backoff + jitter(1초~60초), 연결 간격 최소 1초. 시장 데이터 없이 연속 10회 실패하면 `failed` |
+| 메시지 전송 | 연결당 초당 5회, 분당 100회 이하로 제한 (`core/ratelimit.py`) |
+
+### 사용법
+
+```powershell
+python -m moneylab record --provider upbit --duration 60                   # 실제 KRW-BTC (Ctrl+C로 중단, 다시 실행하면 이어서 기록)
+python -m moneylab record --provider upbit --market KRW-BTC --market KRW-ETH --duration 3600
+python -m moneylab record --provider upbit --source fixture                # 오프라인 SYNTHETIC session
+python -m moneylab record-verify data\raw\upbit\recordings\KRW-BTC
+python -m moneylab replay-check data\raw\upbit\recordings\KRW-BTC          # 원본 ↔ 저장 요약 ↔ replay 비교, latency
+python -m pytest -m network tests/test_upbit_live_smoke.py                 # 실제 연결 smoke test (60초)
+```
+
+기본 market은 `MONEYLAB_UPBIT_MARKETS`(기본 `KRW-BTC`), 호가 수는 `MONEYLAB_UPBIT_ORDERBOOK_UNITS`(기본 30)로 바꾼다.
+
+### 실제 데이터로 확인한 것 (2026-10-06, KRW-BTC 90초)
+
+- 메시지는 UTF-8 JSON **binary frame**으로 왔다. 서버가 `permessage-deflate`를 제안했다.
+- orderbook 720건 모두 30 units, `level` 0. REALTIME 메시지도 30 units 전체였다(delta가 아님).
+- trade의 `sequential_id`는 17자리 정수였다. 같은 스트림 안에서 exchange timestamp 역전은 없었다.
+- `"PING"` 텍스트 4회를 보내는 동안 `{"status":"UP"}`를 7번 받았다(첫 수신 후 10초 간격).
+
+### 미검증 사항
+
+- `ask_bid`가 aggressor(taker) 방향인지는 문서에 명시되어 있지 않다. 그래서 `ASK→sell`, `BID→buy`로만 바꾼다.
+- `sequential_id`가 단조 증가하는지는 문서에 없다(문서에는 unique라고만 되어 있다). 중복 판정에만 사용한다.
+- 418 응답에서 차단 시간이 표시되는 형식(헤더인지 본문인지)은 문서에 없다. 표준 `Retry-After`만 해석하고, 응답은 마스킹해서 기록한다.
+- `"PING"` 텍스트가 메시지 rate limit에 포함되는지는 문서에 없다. 포함된다고 가정하고 제한한다.
+- `{"status":"UP"}`의 수신 주기가 PING 텍스트와 PING frame 중 어느 쪽과 연결되는지는 확인하지 못했다.
+- `received − exchange` 차이에는 로컬 시계와 거래소 시계의 오프셋이 포함된다. 순수 네트워크 지연이 아니다.
+
+---
+
 ## 설치
 
 Python 3.12 이상이 필요하다 (개발과 검증은 3.14.8에서 진행).
@@ -206,6 +312,7 @@ python -m moneylab simulate --timeline data\raw\polymarket\clob\<recorded>.json 
 
 ```powershell
 python -m pytest            # 오프라인 테스트 (네트워크 불필요)
+python -m pytest -m network # 실제 네트워크 테스트 (Upbit 공개 WebSocket, 약 60초)
 ```
 
 ---
@@ -216,11 +323,13 @@ python -m pytest            # 오프라인 테스트 (네트워크 불필요)
 src/moneylab/
 ├── config.py               환경변수 설정 (비밀정보 없음)
 ├── cli.py, __main__.py     CLI 진입점
-├── core/                   HTTP(timeout, 재시도, 진단), 예외, 비밀정보 마스킹, 로깅
-├── domain/models.py        공급자 중립 Market/Outcome 모델
+├── core/                   HTTP(timeout, 재시도, 진단), 예외, 비밀정보 마스킹, 로깅, rate limiter
+├── domain/                 공급자 중립 Market/Outcome, OrderBook, TradeTick
+├── recording/              공급자 중립 recorder core (상태, 실패 분류, backoff, checksum)
 ├── providers/
-│   ├── base.py             MarketDataProvider 인터페이스
-│   └── polymarket/         Gamma/CLOB client, 파서, provider 어댑터, recorder/ (기록·무결성·replay)
+│   ├── base.py             MarketDataProvider, RecordedBookSource 인터페이스
+│   ├── polymarket/         Gamma/CLOB client, 파서, provider 어댑터, recorder/ (기록·무결성·replay)
+│   └── upbit/              공개 WebSocket transport, 파서, market list provider, recorder/ (기록·무결성·replay)
 ├── scanner/                공급자 독립 스캐너 (필터, 정렬, 플래그)
 ├── analytics/              metrics(MDD, spread, microprice, depth), costs(fee/rebate), rewards, ev
 ├── storage/                data/raw JSON, data/processed CSV, atomic write
@@ -239,9 +348,10 @@ data/raw, data/processed    생성 데이터 (git 제외)
 ### 의존성 방향
 
 ```
-cli → scanner → providers.base (MarketDataProvider) ← providers.polymarket
-         ↘ domain.models ↙
+cli → scanner → providers.base (MarketDataProvider) ← providers.polymarket, providers.upbit
+         ↘ domain ↙
 strategy / risk / backtest / paper / execution → domain, analytics   (공급자 import 금지)
+providers.* → recording (공통 core). providers.upbit와 providers.polymarket은 서로 import하지 않는다
 ```
 
 새 데이터 소스를 추가할 때는 `MarketDataProvider`를 구현해서 `Market`을 반환하게 하면 된다.
@@ -261,7 +371,8 @@ strategy / risk / backtest / paper / execution → domain, analytics   (공급�
 | v0.1 | Scanner, 진단, 오프라인 테스트 ✅ |
 | v0.2 | CLOB 호가 reader, 비용·리베이트·리워드 모델, MM/mispricing 전략, paper engine, PnL 분해, kill switch (fixture 기반 오프라인) ✅ |
 | v0.3 | Real Market Data Recorder (REST), atomic 저장, resume, 451 중단, 무결성 검사, ReplayBookStream ✅ (실제 수집은 접근 가능해진 뒤) |
-| v0.3.x | WebSocket recorder, 일 단위 압축, 실제 기록으로 fixture 교체, queue-position fill 모델 |
+| v0.3.1 | Upbit 공개 WebSocket recorder (KRW-BTC orderbook 30호가 + trade), 공통 recording core, replay 검증 ✅ (실제 데이터로 확인) |
+| v0.3.x | Polymarket WebSocket recorder, 일 단위 압축, 실제 기록으로 fixture 교체, queue-position fill 모델, 현물 시장용 비용 모델·전략 |
 | v0.4 | Paper trading, PnL tracking, 지표 리포트 |
 | v0.5 | Risk management, position sizing, kill switch |
 | v1.0 | Live execution. 별도 검토, 명시적 opt-in, 소액 한도를 전제로 하며, 합법적으로 접근 가능한 환경에서만 진행 |

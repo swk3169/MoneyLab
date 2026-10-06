@@ -243,3 +243,59 @@ def render_integrity(report) -> None:
         console.print(f"[yellow]warning:[/yellow] {escape(w)}")
     if len(report.warnings) > 30:
         console.print(f"[dim]... {len(report.warnings) - 30} more warnings[/dim]")
+
+
+def render_stream_recorder_report(report) -> None:
+    """Streaming recorder report (e.g. providers.upbit UpbitRecorderReport) - duck-typed."""
+    color = "green" if report.ok else "red"
+    table = Table(title=f"Recorder: {report.recorder}", box=box.SIMPLE_HEAVY)
+    table.add_column("Item")
+    table.add_column("Value", justify="right")
+    for name, value in report.counters().items():
+        table.add_row(name, str(value))
+    console.print(table)
+    console.print(f"[{color}]status: {escape(str(report.status))}[/{color}]")
+    for key, path in report.datasets.items():
+        console.print(f"[dim]{escape(key)} -> {escape(str(path))}[/dim]")
+    for w in report.warnings[:30]:
+        console.print(f"[yellow]warning:[/yellow] {escape(w)}")
+    if report.last_error:
+        err = report.last_error
+        console.print(f"[red]last error ({escape(str(err.get('category')))}):[/red] {escape(str(err.get('message')))}")
+        diag = err.get("diagnostics") or {}
+        if diag.get("body_excerpt"):
+            console.print(Panel(escape(str(diag["body_excerpt"])[:800]), title="response body (redacted excerpt)"))
+        if diag.get("note"):
+            console.print(f"[yellow]{escape(diag['note'])}[/yellow]")
+
+
+def _utc(ts: float | None) -> str:
+    if ts is None:
+        return "-"
+    from datetime import UTC, datetime
+
+    return datetime.fromtimestamp(ts, UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def render_replay_check(report) -> None:
+    """Recorder -> replay comparison (providers.upbit ReplayCheckReport) - duck-typed."""
+    color = "green" if report.ok else "red"
+    label = "SYNTHETIC/FIXTURE" if report.synthetic else "REAL"
+    console.print(f"[{color}]Replay check {'OK' if report.ok else 'FAILED'}[/{color}]  [bold]{label}[/bold] "
+                  f"provenance={report.provenance} market={report.market}  {escape(str(report.path))}")
+    console.print(f"counts {report.counts}")
+    first_ex = None if report.first_exchange_ms is None else report.first_exchange_ms / 1000
+    last_ex = None if report.last_exchange_ms is None else report.last_exchange_ms / 1000
+    console.print(f"exchange_timestamp {_utc(first_ex)} -> {_utc(last_ex)}")
+    console.print(f"received_timestamp {_utc(report.first_received)} -> {_utc(report.last_received)}")
+    for kind, st in report.latency_ms.items():
+        if st:
+            console.print(f"receive latency {kind:9s} n={st['n']} mean={st['mean']:.1f}ms median={st['median']:.1f}ms "
+                          f"p95={st['p95']:.1f}ms min={st['min']:.1f}ms max={st['max']:.1f}ms")
+    console.print(f"orderbook units per message {report.units_histogram}  stream types {report.stream_types}")
+    console.print(f"replay {report.replay_stats}  reader {report.reader_stats}")
+    for key, ex in report.examples.items():
+        console.print(f"[dim]{key}: {escape(json.dumps(ex, default=str))}[/dim]")
+    console.print(f"dataset size {report.size_bytes:,} bytes")
+    for m in report.mismatches[:30]:
+        console.print(f"[red]mismatch:[/red] {escape(m)}")

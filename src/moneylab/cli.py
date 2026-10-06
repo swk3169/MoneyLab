@@ -9,6 +9,9 @@
     python -m moneylab record --source fixture      # offline recorder run over a fixture timeline
     python -m moneylab record-verify <dataset dir>  # integrity check of a recording
     python -m moneylab simulate --recording <dir>   # paper simulation on recorded data
+    python -m moneylab record --provider upbit --duration 60          # real Upbit KRW-BTC WebSocket (public)
+    python -m moneylab record --provider upbit --source fixture       # offline, scripted synthetic session
+    python -m moneylab replay-check <upbit dataset dir>               # recorder -> replay consistency
 
 Exit codes: 0 ok, 3 data source unavailable (handled), 1 unexpected error (handled), 2 usage.
 """
@@ -36,8 +39,10 @@ from moneylab.display.console import (
     render_http_diagnostics,
     render_integrity,
     render_recorder_report,
+    render_replay_check,
     render_scan,
     render_simulation,
+    render_stream_recorder_report,
 )
 from moneylab.paper.book_stream import ReplayBookStream, TimelineBookStream
 from moneylab.paper.runner import SimulationConfig, SimulationRunner
@@ -59,6 +64,15 @@ from moneylab.providers.polymarket.recorder import (
     open_recording,
     verify_recording,
 )
+from moneylab.providers.upbit import WS_PUBLIC_URL, websockets_connector
+from moneylab.providers.upbit.recorder import (
+    ScriptedWsSource,
+    UpbitRecorder,
+    UpbitRecorderConfig,
+    is_upbit_recording,
+    replay_check,
+    verify_upbit_recording,
+)
 from moneylab.scanner import MarketScanner, ScanCriteria
 from moneylab.sizing.position import SizingLimits
 from moneylab.strategy.market_making import SymmetricMarketMaker
@@ -71,6 +85,7 @@ EXIT_OK, EXIT_ERROR, EXIT_UNAVAILABLE = 0, 1, 3
 FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
 DEFAULT_FIXTURE = FIXTURES / "gamma_markets_sample.json"
 DEFAULT_BOOKS = FIXTURES / "clob_books_sample.json"
+DEFAULT_UPBIT_FIXTURE = FIXTURES / "upbit_ws_timeline_synthetic.json"
 DEFAULT_TIMELINES = {
     "mm": FIXTURES / "clob_timeline_mm.json",
     "mispricing": FIXTURES / "clob_timeline_mispricing.json",
@@ -177,6 +192,11 @@ def cmd_simulate(args: argparse.Namespace, settings: Settings) -> int:
     if args.recording and args.timeline:
         console.print("[red]--recording and --timeline are mutually exclusive[/red]")
         return EXIT_ERROR
+    if args.recording and is_upbit_recording(args.recording):
+        console.print("[red]Upbit recordings are spot order books, not prediction markets; the simulation "
+                      "strategies assume binary outcome prices and are not connected to Upbit data. "
+                      "Use `moneylab replay-check` to replay it.[/red]")
+        return EXIT_ERROR
     path = args.recording or args.timeline or DEFAULT_TIMELINES[args.strategy]
     try:
         if args.recording:
@@ -256,8 +276,56 @@ def build_recorder(args: argparse.Namespace, settings: Settings) -> tuple[RestBo
     return RestBookRecorder(src, out, config, **kwargs), src
 
 
+def cmd_record_upbit(args: argparse.Namespace, settings: Settings) -> int:
+    """Public Upbit WebSocket (live) or a scripted synthetic session (fixture). Read-only."""
+    source = args.source or "live"
+    if source not in ("live", "fixture"):
+        console.print(f"[red]--provider upbit supports --source live | fixture, not {source!r}[/red]")
+        return EXIT_ERROR
+    try:
+        config = UpbitRecorderConfig(
+            markets=tuple(m.upper() for m in (args.market or settings.upbit_markets)),
+            orderbook_units=args.orderbook_units or settings.upbit_orderbook_units,
+            duration=args.duration, max_market_events=args.max_events,
+            ping_text_interval=args.ping_interval, max_consecutive_failures=settings.upbit_max_failures,
+        )
+        if source == "fixture":
+            src = ScriptedWsSource(args.fixture or DEFAULT_UPBIT_FIXTURE)
+            if not src.synthetic:
+                raise ValueError(f"{src.path} is not marked synthetic; fixtures must never pose as real data")
+            out = args.out or settings.upbit_fixture_recordings_dir / src.path.stem
+            recorder = UpbitRecorder(src, WS_PUBLIC_URL, out, config, provenance="fixture",
+                                     origin=f"fixture:{src.path.name}", clock=src.clock, sleep=src.sleep)
+        else:
+            out = args.out or settings.upbit_recordings_dir
+            recorder = UpbitRecorder(websockets_connector(), WS_PUBLIC_URL, out, config, provenance="real")
+    except (OSError, KeyError, ValueError) as exc:
+        console.print(f"[red]Cannot start recorder:[/red] {exc}")
+        return EXIT_ERROR
+    label = "SYNTHETIC fixture session" if source == "fixture" else WS_PUBLIC_URL
+    console.print(f"[dim]Recording Upbit {', '.join(config.markets)} orderbook({config.orderbook_units}) + trade "
+                  f"from {label} (public, read-only). Ctrl+C stops and saves.[/dim]")
+    report = recorder.run()
+    render_stream_recorder_report(report)
+    if report.status in (RecorderStatus.BLOCKED_HTTP_451, RecorderStatus.ACCESS_DENIED,
+                         RecorderStatus.BANNED_HTTP_418):
+        return EXIT_UNAVAILABLE
+    if report.status == RecorderStatus.FAILED:
+        storage = (report.last_error or {}).get("category") == "storage"
+        return EXIT_ERROR if storage else EXIT_UNAVAILABLE
+    return EXIT_OK
+
+
 def cmd_record(args: argparse.Namespace, settings: Settings) -> int:
+    if args.provider == "upbit":
+        return cmd_record_upbit(args, settings)
+    if args.market or args.max_events is not None or args.orderbook_units:
+        console.print("[red]--market/--max-events/--orderbook-units are Upbit options (--provider upbit)[/red]")
+        return EXIT_ERROR
     args.source = args.source or settings.recorder_source
+    if args.source == "live":
+        args.source = "polymarket"
+    args.fixture = args.fixture or DEFAULT_TIMELINES["mm"]
     if args.source not in ("polymarket", "fixture"):
         console.print(f"[red]unknown recorder source {args.source!r} (polymarket | fixture)[/red]")
         return EXIT_ERROR
@@ -285,11 +353,28 @@ def cmd_record(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def cmd_record_verify(args: argparse.Namespace, settings: Settings) -> int:
-    report = verify_recording(args.dataset)
+    upbit = is_upbit_recording(args.dataset)
+    report = verify_upbit_recording(args.dataset) if upbit else verify_recording(args.dataset)
     if args.json:
         console.print_json(json.dumps(report.to_dict()))
     else:
         render_integrity(report)
+    return EXIT_OK if report.ok else EXIT_ERROR
+
+
+def cmd_replay_check(args: argparse.Namespace, settings: Settings) -> int:
+    if not is_upbit_recording(args.dataset):
+        console.print(f"[red]{args.dataset} is not an Upbit recording[/red]")
+        return EXIT_ERROR
+    try:
+        report = replay_check(args.dataset)
+    except ProviderError as exc:
+        console.print(f"[red]Replay failed:[/red] {exc}")
+        return EXIT_UNAVAILABLE
+    if args.json:
+        console.print_json(json.dumps(report.to_dict(), default=str))
+    else:
+        render_replay_check(report)
     return EXIT_OK if report.ok else EXIT_ERROR
 
 
@@ -341,11 +426,17 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--save", action="store_true", help="write result JSON to data/processed/simulations/")
     m.set_defaults(func=cmd_simulate)
 
-    r = sub.add_parser("record", help="record CLOB order books + market metadata to data/raw (read-only)")
-    r.add_argument("--source", choices=["polymarket", "fixture"], default=None,
-                   help="default: MONEYLAB_RECORDER_SOURCE or polymarket")
-    r.add_argument("--condition-id", action="append", help="market condition id (repeatable)")
-    r.add_argument("--fixture", type=Path, default=DEFAULT_TIMELINES["mm"], help="timeline JSON for --source fixture")
+    r = sub.add_parser("record", help="record public market data to data/raw (read-only)")
+    r.add_argument("--provider", choices=["polymarket", "upbit"], default="polymarket")
+    r.add_argument("--source", choices=["polymarket", "live", "fixture"], default=None,
+                   help="polymarket: default MONEYLAB_RECORDER_SOURCE or polymarket; upbit: live (default) | fixture")
+    r.add_argument("--condition-id", action="append", help="Polymarket market condition id (repeatable)")
+    r.add_argument("--market", action="append", help="Upbit pair code, e.g. KRW-BTC (repeatable)")
+    r.add_argument("--orderbook-units", type=int, default=None, help="Upbit orderbook units: 1, 5, 15 or 30")
+    r.add_argument("--max-events", type=int, default=None, help="Upbit: stop after N orderbook+trade messages")
+    r.add_argument("--ping-interval", type=float, default=60.0, help="Upbit: seconds between PING text keep-alives")
+    r.add_argument("--fixture", type=Path, default=None,
+                   help="fixture for --source fixture (Polymarket timeline JSON / Upbit scripted session JSON)")
     r.add_argument("--out", type=Path, default=None, help="dataset root directory")
     r.add_argument("--interval", type=float, default=None, help="seconds between polls")
     r.add_argument("--max-polls", type=int, default=None)
@@ -358,6 +449,11 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("dataset", type=Path, help="dataset directory (.../recordings/<condition_id>)")
     v.add_argument("--json", action="store_true")
     v.set_defaults(func=cmd_record_verify)
+
+    c = sub.add_parser("replay-check", help="Upbit recording: compare raw messages with their replay (offline)")
+    c.add_argument("dataset", type=Path, help="dataset directory (.../upbit/recordings/<market>)")
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(func=cmd_replay_check)
     return p
 
 

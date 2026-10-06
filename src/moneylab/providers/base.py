@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from moneylab.domain.market_params import MarketParams
 from moneylab.domain.models import Market
 from moneylab.domain.orderbook import BookSnapshot, OrderBook
+from moneylab.domain.trades import TradeTick
 
 
 @dataclass(frozen=True)
@@ -58,11 +59,18 @@ class OrderBookProvider(ABC):
 
 @dataclass(frozen=True)
 class RecordedEvent:
-    """One entry of a recorded dataset: a book snapshot, or a recorded data-source failure."""
+    """One entry of a recorded dataset: a book snapshot, trades, or a recorded data-source failure.
+
+    `received_timestamp` / `local_sequence` are set by recorders that keep them (streaming
+    sources); they let consumers analyse latency and order events deterministically.
+    """
 
     timestamp: float
     snapshot: BookSnapshot | None = None
     error: str | None = None
+    trades: tuple[TradeTick, ...] = ()
+    received_timestamp: float | None = None
+    local_sequence: int | None = None
 
 
 class RecordedBookSource(ABC):

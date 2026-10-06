@@ -44,6 +44,11 @@ class Settings:
     recorder_interval: float = 60.0
     recorder_metadata_refresh: float = 3600.0
     recorder_max_failures: int = 30
+    # Upbit public WebSocket recorder. The endpoint is fixed to the documented public URL
+    # (providers/upbit/endpoints.py) and is deliberately not configurable.
+    upbit_markets: tuple[str, ...] = ("KRW-BTC",)
+    upbit_orderbook_units: int = 30
+    upbit_max_failures: int = 10
 
     @property
     def raw_dir(self) -> Path:
@@ -52,6 +57,14 @@ class Settings:
     @property
     def recordings_dir(self) -> Path:
         return self.raw_dir / "polymarket" / "recordings"
+
+    @property
+    def upbit_recordings_dir(self) -> Path:
+        return self.raw_dir / "upbit" / "recordings"
+
+    @property
+    def upbit_fixture_recordings_dir(self) -> Path:
+        return self.raw_dir / "upbit" / "recordings-fixture"
 
     @property
     def processed_dir(self) -> Path:
@@ -75,4 +88,9 @@ def load_settings() -> Settings:
         recorder_interval=_env_float("MONEYLAB_RECORDER_INTERVAL", Settings.recorder_interval),
         recorder_metadata_refresh=_env_float("MONEYLAB_RECORDER_METADATA_REFRESH", Settings.recorder_metadata_refresh),
         recorder_max_failures=_env_int("MONEYLAB_RECORDER_MAX_FAILURES", Settings.recorder_max_failures),
+        upbit_markets=tuple(
+            m.strip().upper() for m in os.getenv("MONEYLAB_UPBIT_MARKETS", "KRW-BTC").split(",") if m.strip()
+        ) or Settings.upbit_markets,
+        upbit_orderbook_units=_env_int("MONEYLAB_UPBIT_ORDERBOOK_UNITS", Settings.upbit_orderbook_units),
+        upbit_max_failures=_env_int("MONEYLAB_UPBIT_MAX_FAILURES", Settings.upbit_max_failures),
     )

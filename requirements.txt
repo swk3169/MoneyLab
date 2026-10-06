@@ -3,6 +3,7 @@
 requests==2.34.2
 rich==15.0.0
 python-dotenv==1.2.4
+websockets==17.2  # no transitive dependencies
 
 # transitive
 certifi==2026.7.22

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from moneylab.core.exceptions import ProviderError
 from moneylab.domain.orderbook import BookSnapshot, MarketTimeline
+from moneylab.domain.trades import TradeTick
 from moneylab.providers.base import OrderBookProvider, RecordedBookSource
 
 log = logging.getLogger(__name__)
@@ -28,6 +29,9 @@ class StreamEvent:
     timestamp: float
     snapshot: BookSnapshot | None = None
     error: str | None = None
+    trades: tuple[TradeTick, ...] = ()
+    received_timestamp: float | None = None
+    local_sequence: int | None = None
 
 
 class TimelineBookStream:
@@ -69,6 +73,7 @@ class PollingBookStream:
 class ReplayStats:
     snapshots: int = 0
     errors: int = 0
+    trade_events: int = 0
     skipped_out_of_order: int = 0
     skipped_outside_window: int = 0
 
@@ -80,6 +85,7 @@ class ReplayBookStream:
     * Recorded failures become error events (the kill switch counts them as in live polling);
       `include_errors=False` drops them.
     * Events whose timestamp goes backwards are skipped and counted, never reordered.
+    * Trade-only events (streaming recorders) are passed through with their trades.
     """
 
     def __init__(
@@ -103,11 +109,15 @@ class ReplayBookStream:
                 self.stats.skipped_out_of_order += 1
                 continue
             last = ev.timestamp
-            if ev.snapshot is None:
+            meta = {"received_timestamp": ev.received_timestamp, "local_sequence": ev.local_sequence}
+            if ev.snapshot is None and not ev.trades:
                 if not self.include_errors:
                     continue
                 self.stats.errors += 1
-                yield StreamEvent(ev.timestamp, error=ev.error or "recorded data-source failure")
+                yield StreamEvent(ev.timestamp, error=ev.error or "recorded data-source failure", **meta)
                 continue
-            self.stats.snapshots += 1
-            yield StreamEvent(ev.timestamp, snapshot=ev.snapshot)
+            if ev.snapshot is not None:
+                self.stats.snapshots += 1
+            if ev.trades:
+                self.stats.trade_events += 1
+            yield StreamEvent(ev.timestamp, snapshot=ev.snapshot, trades=ev.trades, **meta)
