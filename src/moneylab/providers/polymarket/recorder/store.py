@@ -42,6 +42,7 @@ from moneylab.providers.polymarket.clob_parser import (
     parse_rewards,
     parse_timestamp,
 )
+from moneylab.recording.core import checksum_ok, iso, with_checksum  # noqa: F401 - re-exported
 from moneylab.storage.atomic import atomic_write_json, cleanup_tmp, sha256_of
 
 log = logging.getLogger(__name__)
@@ -65,10 +66,6 @@ class DatasetMismatch(ValueError):
 
 def dataset_dirname(condition_id: str) -> str:
     return _SAFE.sub("_", condition_id)[:120] or "unknown"
-
-
-def iso(ts: float) -> str:
-    return datetime.fromtimestamp(ts, UTC).isoformat().replace("+00:00", "Z")
 
 
 def _stamp(ts: float) -> str:
@@ -142,16 +139,6 @@ def summarize_metadata(
             ],
         },
     }
-
-
-def with_checksum(record: dict[str, Any]) -> dict[str, Any]:
-    body = {k: v for k, v in record.items() if k != "checksum"}
-    return {**body, "checksum": sha256_of(body)}
-
-
-def checksum_ok(record: dict[str, Any]) -> bool:
-    body = {k: v for k, v in record.items() if k != "checksum"}
-    return record.get("checksum") == sha256_of(body)
 
 
 # --- reading -------------------------------------------------------------------------------

@@ -259,6 +259,8 @@ class SimulationRunner:
         for ev in events:
             last_ts = ev.timestamp
             if ev.snapshot is None:
+                if ev.trades and ev.error is None:  # trade prints only: no book to act on, not a failure
+                    continue
                 self.kill.record_error(ev.timestamp)
                 continue
             self.kill.record_success()

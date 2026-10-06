@@ -12,6 +12,7 @@ dependencies = [
     "requests>=2.32",
     "rich>=13.7",
     "python-dotenv>=1.0",
+    "websockets>=17.2",  # sync client: `proxy=None` and `legacy=True` are used (verified on 17.2)
 ]
 
 [project.optional-dependencies]

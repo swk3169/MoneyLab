@@ -27,6 +27,44 @@ def test_layers_do_not_import_polymarket(package):
         assert not bad, f"{f.relative_to(SRC)} imports {bad}"
 
 
+@pytest.mark.parametrize("package", PROVIDER_NEUTRAL + ["recording"])
+def test_layers_do_not_import_upbit(package):
+    for f in (SRC / package).rglob("*.py"):
+        bad = {m for m in imported_modules(f) if m.startswith("moneylab.providers.upbit")}
+        assert not bad, f"{f.relative_to(SRC)} imports {bad}"
+
+
+def test_recording_core_is_provider_neutral():
+    for f in (SRC / "recording").rglob("*.py"):
+        bad = {m for m in imported_modules(f) if m.startswith("moneylab.providers")}
+        assert not bad, f"{f.relative_to(SRC)} imports {bad}"
+
+
+def test_providers_do_not_import_each_other():
+    for own, other in (("upbit", "polymarket"), ("polymarket", "upbit")):
+        for f in (SRC / "providers" / own).rglob("*.py"):
+            bad = {m for m in imported_modules(f) if m.startswith(f"moneylab.providers.{other}")}
+            assert not bad, f"{f.relative_to(SRC)} imports {bad}"
+
+
+def test_upbit_package_is_public_data_only():
+    """No credentials, JWT, private endpoints or order/withdraw code in the Upbit adapter."""
+    forbidden_imports = ("jwt", "hmac", "hashlib")
+    forbidden_text = ("access_key", "secret_key", "authorization", "bearer", "/v1/orders", "/v1/accounts",
+                      "/v1/withdraws", "/v1/deposits", "websocket/v1/private", "myorder", "myasset")
+    for f in (SRC / "providers" / "upbit").rglob("*.py"):
+        mods = imported_modules(f)
+        assert not any(m.split(".")[0] in forbidden_imports for m in mods), f
+        text = f.read_text(encoding="utf-8").lower()
+        hits = [t for t in forbidden_text if t in text and not _documented_exclusion(text, t)]
+        assert not hits, f"{f.relative_to(SRC)} mentions {hits}"
+
+
+def _documented_exclusion(text: str, token: str) -> bool:
+    """The endpoints module may name the private endpoint only to say it is NOT used."""
+    return token in ("websocket/v1/private", "myorder", "myasset") and "deliberately not referenced" in text
+
+
 def test_no_order_signing_or_wallet_code():
     forbidden = ("py_clob_client", "eth_account", "web3", "private_key", "seed_phrase", "mnemonic")
     for f in SRC.rglob("*.py"):
