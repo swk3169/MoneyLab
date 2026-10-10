@@ -37,6 +37,16 @@ data/processed/*
 logs/
 *.log
 
+# --- Backups, registry exports, merge leftovers ---
+*.bak
+*.backup
+*.orig
+*.rej
+*.reg
+
+# --- Claude Code: personal settings stay local (.claude/settings.json is shared) ---
+.claude/settings.local.json
+
 # --- IDE / OS ---
 .vscode/
 .idea/
