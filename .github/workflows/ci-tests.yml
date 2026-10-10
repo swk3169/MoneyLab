@@ -1,5 +1,5 @@
 # Offline test suite. Mirrors the local setup in CLAUDE.md: Windows, Python 3.14,
-# pinned requirements*.txt, editable install without deps, `python -m pytest`.
+# repo-root .venv, pinned requirements*.txt, editable install without deps, `python -m pytest`.
 # pyproject.toml adds `-m 'not network'`, so tests that hit real APIs are skipped.
 # No secrets, no write permissions, no research data (data/ is not in git).
 name: ci-tests
@@ -9,6 +9,7 @@ on:
   push:
     branches:
       - chore/ci-tests
+      - chore/ci-venv
 
 permissions:
   contents: read
@@ -26,12 +27,18 @@ jobs:
         with:
           python-version: "3.14.8" # requirements.txt: "verified on Python 3.14.8"
 
+      # The repo-root .venv matches CLAUDE.md, and .claude/settings.json runs the guard hook with
+      # ${CLAUDE_PROJECT_DIR}/.venv/Scripts/python.exe. .venv/ is git-ignored.
+      - name: Create .venv
+        run: python -m venv .venv
+
       # One command per step: the default pwsh shell only checks the exit code of the last command.
       - name: Install pinned dependencies
-        run: python -m pip install -r requirements-dev.txt
+        run: '& .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt'
 
       - name: Install moneylab (editable, no deps)
-        run: python -m pip install -e . --no-deps
+        run: '& .\.venv\Scripts\python.exe -m pip install -e . --no-deps'
 
+      # -rsx prints skip and xfail reasons, so silently skipped tests show up in the log.
       - name: Run tests
-        run: python -m pytest
+        run: '& .\.venv\Scripts\python.exe -m pytest -rsx'
