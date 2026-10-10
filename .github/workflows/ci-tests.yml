@@ -1,0 +1,37 @@
+# Offline test suite. Mirrors the local setup in CLAUDE.md: Windows, Python 3.14,
+# pinned requirements*.txt, editable install without deps, `python -m pytest`.
+# pyproject.toml adds `-m 'not network'`, so tests that hit real APIs are skipped.
+# No secrets, no write permissions, no research data (data/ is not in git).
+name: ci-tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - chore/ci-tests
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14.8" # requirements.txt: "verified on Python 3.14.8"
+
+      # One command per step: the default pwsh shell only checks the exit code of the last command.
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Install moneylab (editable, no deps)
+        run: python -m pip install -e . --no-deps
+
+      - name: Run tests
+        run: python -m pytest
