@@ -6,7 +6,8 @@ import pytest
 from moneylab.cli import main
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "moneylab"
-PROVIDER_NEUTRAL = ["scanner", "strategy", "risk", "backtest", "paper", "analytics", "pnl", "sizing", "domain"]
+PROVIDER_NEUTRAL = ["scanner", "strategy", "risk", "backtest", "paper", "analytics", "pnl", "sizing", "domain",
+                    "research"]
 
 
 def imported_modules(path: Path) -> set[str]:
@@ -31,6 +32,12 @@ def test_layers_do_not_import_polymarket(package):
 def test_layers_do_not_import_upbit(package):
     for f in (SRC / package).rglob("*.py"):
         bad = {m for m in imported_modules(f) if m.startswith("moneylab.providers.upbit")}
+        assert not bad, f"{f.relative_to(SRC)} imports {bad}"
+
+
+def test_research_layer_imports_no_provider():
+    for f in (SRC / "research").rglob("*.py"):
+        bad = {m for m in imported_modules(f) if m.startswith("moneylab.providers")}
         assert not bad, f"{f.relative_to(SRC)} imports {bad}"
 
 

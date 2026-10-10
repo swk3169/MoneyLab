@@ -32,4 +32,11 @@ the golden values in `tests/test_simulation_e2e.py`.
 `tests/upbit_helpers.py` and the Upbit tests build further **synthetic** messages inline. **Real Upbit captures are never
 copied into `tests/fixtures/`**: they stay under `data/raw/upbit/recordings/` (git-ignored, `provenance = real`).
 
+## v0.4 research
+
+The research tests (`tests/test_research_*.py`, `tests/research_helpers.py`) add **no fixture files**. They build
+**synthetic** `MarketEvent` sequences inline (deterministic sine-wave mids on a 1,000 KRW tick, invented sizes, trades
+and reconnects) and **synthetic** scripted Upbit sessions through `ScriptedWsSource` (`provenance = fixture`). Pipeline
+results on them are `NOT_EVIDENCE` or `INSUFFICIENT_EVIDENCE` and never a research result.
+
 Fixtures must never contain secrets, private keys or personal IP addresses.

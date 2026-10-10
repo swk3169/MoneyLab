@@ -12,7 +12,7 @@ AI 코딩 에이전트를 위한 MoneyLab 작업 지침.
 - Windows, Python 3.14 (`C:\MoneyLab\.venv`). 실행할 때는 항상 `.\.venv\Scripts\python.exe`를 쓴다.
 - 패키지는 `pip install -e . --no-deps`로 설치되어 있다 (src layout).
 - 테스트는 `.\.venv\Scripts\python.exe -m pytest`로 돌린다. 오프라인으로 실행되며 모두 통과해야 한다.
-- 실행: `python -m moneylab scan [--source fixture]`, `diagnose`, `book`, `simulate --strategy mm|mispricing [--recording <dir>]`, `record [--source fixture]`, `record --provider upbit [--source fixture] [--duration N]`, `record-verify <dir>`, `replay-check <upbit dir>`
+- 실행: `python -m moneylab scan [--source fixture]`, `diagnose`, `book`, `simulate --strategy mm|mispricing [--recording <dir>]`, `record [--source fixture]`, `record --provider upbit [--source fixture] [--duration N]`, `record-verify <dir>`, `replay-check <upbit dir>`, `clock-monitor`, `research-build <upbit dir> [--dry-run]`, `research-stats <run>`, `research-final <run>`
 - 의존성을 추가하면 `pyproject.toml`(범위)과 `requirements*.txt`(고정 버전)를 함께 갱신하고, Python 3.14 호환성을 확인한다.
 
 ## 절대 규칙
@@ -34,6 +34,7 @@ AI 코딩 에이전트를 위한 MoneyLab 작업 지침.
 - 비용(수수료, spread, slippage)을 뺀 순수익(net) 기준으로 평가한다. 총수익(gross) 엣지만으로 전략을 채택하지 않는다.
 - maker rebate와 liquidity reward는 `estimated_*`와 `realized_*`로 분리한다. 추정치는 실현 PnL과 채택 판단에 넣지 않는다.
 - 원본 데이터는 `data/raw/<provider>/`, 가공 데이터는 `data/processed/`에 둔다. 둘 다 git에서 제외한다.
+- `research/`는 provider를 import하지 않는다. 사전등록(`docs/research_v04_preregistration.md`, `configs/research_v04.toml`)을 바꾸면 새 study다. test split은 `research-final`로만, run당 한 번 연다.
 
 ## 작업 방식
 

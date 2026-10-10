@@ -52,13 +52,17 @@ from pathlib import Path
 from typing import Any
 
 from moneylab.recording.core import checksum_ok, iso, with_checksum
-from moneylab.storage.atomic import atomic_write_json, atomic_write_text, cleanup_tmp, sha256_of
+from moneylab.storage.atomic import atomic_write_json, atomic_write_text, cleanup_tmp, sha256_file, sha256_of
 
 log = logging.getLogger(__name__)
 
 SCHEMA_DATASET = "moneylab.upbit.recording.dataset/1"
 SCHEMA_STATE = "moneylab.upbit.recording.state/1"
 SCHEMA_LINE = "moneylab.upbit.recording.event/1"
+SCHEMA_RAW_MANIFEST = "moneylab.upbit.raw_manifest/1"
+# Recorder-owned metadata next to the raw data (not part of the raw manifest itself):
+CAPTURE_MANIFEST = "capture_manifest.json"  # per-run termination reason, disk, clock, counters, raw hashes
+CLOCK_LOG = "clock_monitor.jsonl"  # core.clock_monitor measurements (quality metadata only)
 PROVENANCES = ("real", "fixture")
 MARKET_EVENTS = ("orderbook", "trade")
 LOCAL_EVENTS = ("connection", "disconnect", "failure")
@@ -285,11 +289,12 @@ class UpbitStore:
         self.state.pop("blocked", None)
         self.update_state(now, status="running")
 
-    def end_run(self, now: float, status: str) -> None:
+    def end_run(self, now: float, status: str, termination_reason: str | None = None) -> None:
         runs = self.state.get("runs") or []
         if runs:
-            runs[-1].update(stopped_at=iso(now), status=status, last_seq=self.cursor.last_seq)
-        self.update_state(now, status=status)
+            runs[-1].update(stopped_at=iso(now), status=status, last_seq=self.cursor.last_seq,
+                            termination_reason=termination_reason)
+        self.update_state(now, status=status, termination_reason=termination_reason)
 
     def update_state(self, now: float, **fields: Any) -> None:
         """Checkpoint. `last_seq` is what is durable on disk, not what is still buffered."""
@@ -301,3 +306,15 @@ class UpbitStore:
 
 def line_ok(line: dict[str, Any]) -> bool:
     return checksum_ok(line)
+
+
+def raw_file_manifest(dataset_dir: Path) -> dict[str, Any]:
+    """sha256 + size of every raw file (dataset.json, state.json, segments). Read-only."""
+    root = Path(dataset_dir)
+    files = [root / "dataset.json", root / "state.json", *segment_paths(root)]
+    entries = [{"path": p.relative_to(root).as_posix(), "bytes": p.stat().st_size, "sha256": sha256_file(p)}
+               for p in files if p.exists()]
+    ds = read_json(root / "dataset.json")
+    body = {"schema": SCHEMA_RAW_MANIFEST, "market": ds.get("market"), "provenance": ds.get("provenance"),
+            "synthetic": ds.get("synthetic"), "origin": ds.get("origin"), "files": entries}
+    return {**body, "manifest_sha256": sha256_of(body)}

@@ -12,6 +12,10 @@
     python -m moneylab record --provider upbit --duration 60          # real Upbit KRW-BTC WebSocket (public)
     python -m moneylab record --provider upbit --source fixture       # offline, scripted synthetic session
     python -m moneylab replay-check <upbit dataset dir>               # recorder -> replay consistency
+    python -m moneylab clock-monitor --duration 1800                  # read-only local clock offset log (w32tm)
+    python -m moneylab research-build <upbit dataset dir> [--dry-run]  # raw -> events -> grid -> labels -> split
+    python -m moneylab research-stats <run dir>                       # train/validation leaderboard (test locked)
+    python -m moneylab research-final <run dir>                       # test split, exactly once
 
 Exit codes: 0 ok, 3 data source unavailable (handled), 1 unexpected error (handled), 2 usage.
 """
@@ -21,12 +25,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import time
 import traceback
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 from moneylab import __version__
 from moneylab.config import Settings, load_settings
+from moneylab.core.clock_monitor import ClockMonitor, ClockThresholds
 from moneylab.core.diagnostics import run_diagnostics
 from moneylab.core.http import HttpClient
 from moneylab.core.logging_setup import setup_logging
@@ -35,11 +42,14 @@ from moneylab.core.exceptions import ProviderError
 from moneylab.display.console import (
     console,
     render_book,
+    render_clock_summary,
     render_diagnostics,
     render_http_diagnostics,
     render_integrity,
+    render_leaderboard,
     render_recorder_report,
     render_replay_check,
+    render_research_build,
     render_scan,
     render_simulation,
     render_stream_recorder_report,
@@ -73,10 +83,20 @@ from moneylab.providers.upbit.recorder import (
     replay_check,
     verify_upbit_recording,
 )
+from moneylab.providers.upbit.recorder.quality import quality_report
+from moneylab.providers.upbit.recorder.store import CAPTURE_MANIFEST, CLOCK_LOG, dataset_dirname, read_json
+from moneylab.recording.shutdown import install_stop_signals
+from moneylab.providers.upbit.research_export import ExportParams, export_events, raw_manifest, write_raw_manifest
+from moneylab.research import pipeline as research
+from moneylab.research.config import DEFAULT_CONFIG, load_config
+from moneylab.core.clock_monitor import read_log as read_clock_log
+from moneylab.core.clock_monitor import summarize as summarize_clock
+from moneylab.research.split import InsufficientDataError, SplitLockedError
 from moneylab.scanner import MarketScanner, ScanCriteria
 from moneylab.sizing.position import SizingLimits
 from moneylab.strategy.market_making import SymmetricMarketMaker
 from moneylab.strategy.mispricing import CombinedMispricing, ComplementArbitrage, FairValueDeviation
+from moneylab.storage.atomic import atomic_write_json
 from moneylab.storage.files import RawStore, save_json, save_markets_csv
 
 log = logging.getLogger("moneylab")
@@ -288,6 +308,8 @@ def cmd_record_upbit(args: argparse.Namespace, settings: Settings) -> int:
             orderbook_units=args.orderbook_units or settings.upbit_orderbook_units,
             duration=args.duration, max_market_events=args.max_events,
             ping_text_interval=args.ping_interval, max_consecutive_failures=settings.upbit_max_failures,
+            status_interval=args.status_interval, disk_check_interval=args.disk_check_interval,
+            min_free_bytes=int(args.min_free_gb * 1e9), stop_on_clock_unstable=args.stop_on_clock_unstable,
         )
         if source == "fixture":
             src = ScriptedWsSource(args.fixture or DEFAULT_UPBIT_FIXTURE)
@@ -298,14 +320,25 @@ def cmd_record_upbit(args: argparse.Namespace, settings: Settings) -> int:
                                      origin=f"fixture:{src.path.name}", clock=src.clock, sleep=src.sleep)
         else:
             out = args.out or settings.upbit_recordings_dir
-            recorder = UpbitRecorder(websockets_connector(), WS_PUBLIC_URL, out, config, provenance="real")
+            monitor = None
+            if not args.no_clock_monitor:  # read-only; logs next to the (first) market's raw data
+                monitor = ClockMonitor(Path(out) / dataset_dirname(config.markets[0]) / CLOCK_LOG,
+                                       server=args.clock_server, interval=args.clock_interval)
+            recorder = UpbitRecorder(websockets_connector(), WS_PUBLIC_URL, out, config, provenance="real",
+                                     clock_monitor=monitor)
     except (OSError, KeyError, ValueError) as exc:
         console.print(f"[red]Cannot start recorder:[/red] {exc}")
         return EXIT_ERROR
     label = "SYNTHETIC fixture session" if source == "fixture" else WS_PUBLIC_URL
     console.print(f"[dim]Recording Upbit {', '.join(config.markets)} orderbook({config.orderbook_units}) + trade "
-                  f"from {label} (public, read-only). Ctrl+C stops and saves.[/dim]")
-    report = recorder.run()
+                  f"from {label} (public, read-only). Ctrl+C / Ctrl+Break stops and saves.[/dim]")
+    if recorder.clock_monitor is not None:
+        recorder.clock_monitor.start()
+    restore = install_stop_signals(recorder.stop)
+    try:
+        report = recorder.run()
+    finally:
+        restore()
     render_stream_recorder_report(report)
     if report.status in (RecorderStatus.BLOCKED_HTTP_451, RecorderStatus.ACCESS_DENIED,
                          RecorderStatus.BANNED_HTTP_418):
@@ -378,6 +411,132 @@ def cmd_replay_check(args: argparse.Namespace, settings: Settings) -> int:
     return EXIT_OK if report.ok else EXIT_ERROR
 
 
+def cmd_clock_monitor(args: argparse.Namespace, settings: Settings) -> int:
+    """Standalone read-only clock log (never changes the system clock)."""
+    mon = ClockMonitor(args.out, server=args.server, interval=args.interval, samples_per_measurement=args.samples)
+    console.print(f"[dim]Clock monitor -> {args.out} every {args.interval:g}s for {args.duration:g}s "
+                  f"(w32tm /stripchart, read-only). Ctrl+C stops.[/dim]")
+    end = time.time() + args.duration
+    try:
+        while True:
+            s = mon.measure_once()
+            console.print(f"{s.timestamp_iso} {s.measurement_status} offset="
+                          f"{'-' if s.measured_offset_ms is None else f'{s.measured_offset_ms:.1f}ms'}  "
+                          f"status={mon.status}")
+            if time.time() + args.interval > end:
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        console.print("[yellow]stopped[/yellow]")
+    render_clock_summary(mon.summary())
+    return EXIT_OK
+
+
+def _clock_metadata(dataset: Path, cfg) -> dict | None:
+    """Clock log next to the raw data, re-classified with the pre-registered thresholds."""
+    samples = read_clock_log(dataset / CLOCK_LOG)
+    if not samples:
+        return None
+    return summarize_clock(samples, ClockThresholds(cfg.clock_warn_ms, cfg.clock_unstable_ms,
+                                                    cfg.clock_unstable_seconds, cfg.clock_unstable_min_measurements,
+                                                    cfg.clock_stale_seconds))
+
+
+def cmd_research_build(args: argparse.Namespace, settings: Settings) -> int:
+    """Upbit raw dataset (read-only) -> processed events -> research run (grid, features, labels, split)."""
+    dataset = Path(args.dataset)
+    if not is_upbit_recording(dataset):
+        console.print(f"[red]{dataset} is not an Upbit recording[/red]")
+        return EXIT_ERROR
+    overrides = {}
+    if args.embargo_seconds is not None:
+        if not args.dry_run:
+            console.print("[red]--embargo-seconds changes the pre-registered split; only allowed with --dry-run[/red]")
+            return EXIT_ERROR
+        overrides["embargo_seconds"] = args.embargo_seconds
+    try:
+        cfg = load_config(args.config, **overrides)
+    except (OSError, KeyError, ValueError) as exc:
+        console.print(f"[red]Bad research config:[/red] {exc}")
+        return EXIT_ERROR
+    integrity = verify_upbit_recording(dataset)
+    if not integrity.ok:
+        render_integrity(integrity)
+        console.print("[red]Integrity check failed; refusing to build research data from this dataset[/red]")
+        return EXIT_ERROR
+    ds = read_json(dataset / "dataset.json")
+    if ds.get("provenance") != "real" and not args.allow_fixture:
+        console.print(f"[red]provenance={ds.get('provenance')!r}: research needs real data "
+                      "(--allow-fixture for pipeline tests; results are NOT_EVIDENCE)[/red]")
+        return EXIT_ERROR
+    session_id = args.session_id or dataset.resolve().parent.name
+    root = args.out or settings.processed_dir
+    proc = root / "upbit" / session_id / ds["market"]
+    before = raw_manifest(dataset)
+    write_raw_manifest(dataset, proc / "raw_manifest.json")
+    params = ExportParams(cfg.warmup_seconds, cfg.stale_book_seconds)
+    quality = quality_report(dataset, params, cfg.gap_seconds).to_dict()
+    atomic_write_json(proc / "quality.json", quality)
+    events_path = proc / "events.jsonl.gz"
+    export_events(dataset, events_path, params)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    run_dir = root / "research" / f"{session_id}__{'DRYRUN__' if args.dry_run else ''}{stamp}"
+    source = {"provenance": ds.get("provenance"), "market": ds.get("market"), "raw_dataset": str(dataset),
+              "raw_manifest_sha256": before["manifest_sha256"], "integrity_ok": integrity.ok,
+              "integrity_warnings": integrity.counts.get("warnings_total", 0), "processed_dir": str(proc),
+              "quality": quality, "clock": _clock_metadata(dataset, cfg),
+              "capture": _capture_summary(dataset)}
+    try:
+        manifest = research.build(events_path, run_dir, cfg, session_id=session_id, source=source,
+                                  dry_run=args.dry_run, allow_fixture=args.allow_fixture)
+    except (research.ProvenanceError, InsufficientDataError, ValueError) as exc:
+        console.print(f"[red]research-build refused:[/red] {exc}")
+        return EXIT_ERROR
+    if raw_manifest(dataset)["manifest_sha256"] != before["manifest_sha256"]:
+        console.print("[red]raw dataset changed during research-build (it must be immutable)[/red]")
+        return EXIT_ERROR
+    render_research_build(manifest)
+    console.print(f"run dir: {run_dir}")
+    return EXIT_OK
+
+
+def _capture_summary(dataset: Path) -> dict | None:
+    path = dataset / CAPTURE_MANIFEST
+    if not path.exists():
+        return None
+    doc = read_json(path)
+    runs = doc.get("runs") or []
+    return {"runs": len(runs), "termination_reasons": [r.get("termination_reason") for r in runs],
+            "all_final": all(r.get("final") for r in runs), "raw_manifest_sha256": doc.get("raw_manifest_sha256"),
+            "disk_free_start_bytes": runs[0].get("disk_free_start_bytes") if runs else None,
+            "disk_free_end_bytes": runs[-1].get("disk_free_end_bytes") if runs else None}
+
+
+def cmd_research_stats(args: argparse.Namespace, settings: Settings) -> int:
+    try:
+        cfg = research.config_for_run(args.run_dir, args.config)
+        result = research.stats(args.run_dir, cfg)
+    except (OSError, KeyError, ValueError, SplitLockedError) as exc:
+        console.print(f"[red]research-stats refused:[/red] {exc}")
+        return EXIT_ERROR
+    m = result["manifest"]
+    render_leaderboard(result["leaderboard"], m["evidence"], f"{m['kind']} validation (test LOCKED)", args.top)
+    console.print(f"leaderboard: {Path(args.run_dir) / research.STATS_DIR / 'leaderboard.csv'}")
+    return EXIT_OK
+
+
+def cmd_research_final(args: argparse.Namespace, settings: Settings) -> int:
+    try:
+        cfg = research.config_for_run(args.run_dir, args.config)
+        result = research.final(args.run_dir, cfg)
+    except (OSError, KeyError, ValueError, SplitLockedError) as exc:
+        console.print(f"[red]research-final refused:[/red] {exc}")
+        return EXIT_ERROR
+    m = result["manifest"]
+    render_leaderboard(result["leaderboard"], m["evidence"], f"{m['kind']} FINAL (test opened once)", args.top)
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="moneylab", description="MoneyLab - prediction market research (read-only)")
     p.add_argument("--version", action="version", version=f"moneylab {__version__}")
@@ -443,7 +602,23 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--duration", type=float, default=None, help="stop after N seconds")
     r.add_argument("--rebate-rate", type=float, default=None,
                    help="maker rebate share for this market (not served by the CLOB)")
+    r.add_argument("--status-interval", type=float, default=300.0, help="Upbit: heartbeat seconds")
+    r.add_argument("--disk-check-interval", type=float, default=600.0, help="Upbit: free-space check seconds")
+    r.add_argument("--min-free-gb", type=float, default=5.0, help="Upbit: stop gracefully below this free space")
+    r.add_argument("--no-clock-monitor", action="store_true", help="Upbit live: do not log the clock offset")
+    r.add_argument("--clock-interval", type=float, default=120.0, help="Upbit live: seconds between clock checks")
+    r.add_argument("--clock-server", default="time.windows.com", help="Upbit live: NTP server for w32tm")
+    r.add_argument("--stop-on-clock-unstable", action="store_true",
+                   help="Upbit live: stop gracefully when clock quality becomes CLOCK_UNSTABLE")
     r.set_defaults(func=cmd_record)
+
+    cm = sub.add_parser("clock-monitor", help="read-only local clock offset log (w32tm /stripchart)")
+    cm.add_argument("--out", type=Path, default=Path("data/raw/clock/clock_monitor.jsonl"))
+    cm.add_argument("--duration", type=float, default=1800.0)
+    cm.add_argument("--interval", type=float, default=120.0)
+    cm.add_argument("--samples", type=int, default=3)
+    cm.add_argument("--server", default="time.windows.com")
+    cm.set_defaults(func=cmd_clock_monitor)
 
     v = sub.add_parser("record-verify", help="integrity check of a recorded dataset (offline)")
     v.add_argument("dataset", type=Path, help="dataset directory (.../recordings/<condition_id>)")
@@ -454,6 +629,28 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("dataset", type=Path, help="dataset directory (.../upbit/recordings/<market>)")
     c.add_argument("--json", action="store_true")
     c.set_defaults(func=cmd_replay_check)
+
+    rb = sub.add_parser("research-build", help="v0.4: raw Upbit dataset -> grid/features/labels/split (offline)")
+    rb.add_argument("dataset", type=Path, help="Upbit dataset directory (.../<session>/KRW-BTC)")
+    rb.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="pre-registered study config")
+    rb.add_argument("--session-id", default=None, help="default: name of the dataset's parent directory")
+    rb.add_argument("--out", type=Path, default=None, help="processed root (default data/processed)")
+    rb.add_argument("--dry-run", action="store_true", help="pipeline check; results are DRY_RUN/INSUFFICIENT_EVIDENCE")
+    rb.add_argument("--embargo-seconds", type=float, default=None, help="dry run only: shorter embargo")
+    rb.add_argument("--allow-fixture", action="store_true", help="accept fixture data (results are NOT_EVIDENCE)")
+    rb.set_defaults(func=cmd_research_build)
+
+    rs = sub.add_parser("research-stats", help="v0.4: train/validation statistics and leaderboard (test locked)")
+    rs.add_argument("run_dir", type=Path)
+    rs.add_argument("--config", type=Path, default=None, help="default: the config the run was built with")
+    rs.add_argument("--top", type=int, default=20)
+    rs.set_defaults(func=cmd_research_stats)
+
+    rf = sub.add_parser("research-final", help="v0.4: evaluate the locked test split exactly once")
+    rf.add_argument("run_dir", type=Path)
+    rf.add_argument("--config", type=Path, default=None)
+    rf.add_argument("--top", type=int, default=20)
+    rf.set_defaults(func=cmd_research_final)
     return p
 
 

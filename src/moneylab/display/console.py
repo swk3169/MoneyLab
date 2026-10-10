@@ -254,7 +254,14 @@ def render_stream_recorder_report(report) -> None:
     for name, value in report.counters().items():
         table.add_row(name, str(value))
     console.print(table)
-    console.print(f"[{color}]status: {escape(str(report.status))}[/{color}]")
+    console.print(f"[{color}]status: {escape(str(report.status))}[/{color}]  termination reason: "
+                  f"{escape(str(getattr(report, 'termination_reason', None)))}")
+    free0, free1 = getattr(report, "disk_free_start", None), getattr(report, "disk_free_end", None)
+    if free0 is not None or free1 is not None:
+        console.print(f"disk free start {(free0 or 0) / 1e9:.2f} GB  end {(free1 or 0) / 1e9:.2f} GB")
+    clock = getattr(report, "clock", None)
+    if clock:
+        render_clock_summary(clock)
     for key, path in report.datasets.items():
         console.print(f"[dim]{escape(key)} -> {escape(str(path))}[/dim]")
     for w in report.warnings[:30]:
@@ -267,6 +274,18 @@ def render_stream_recorder_report(report) -> None:
             console.print(Panel(escape(str(diag["body_excerpt"])[:800]), title="response body (redacted excerpt)"))
         if diag.get("note"):
             console.print(f"[yellow]{escape(diag['note'])}[/yellow]")
+
+
+def render_clock_summary(c: dict) -> None:
+    def ms(v):
+        return "-" if v is None else f"{v:.1f}ms"
+    drift = c.get("clock_drift_ppm")
+    color = {"OK": "green", "WARNING": "yellow"}.get(c.get("clock_quality_status"), "red")
+    console.print(f"clock [{color}]{c.get('clock_quality_status')}[/{color}]  start {ms(c.get('clock_offset_start_ms'))} "
+                  f"end {ms(c.get('clock_offset_end_ms'))} min {ms(c.get('clock_offset_min_ms'))} "
+                  f"max {ms(c.get('clock_offset_max_ms'))} median {ms(c.get('clock_offset_median_ms'))}  "
+                  f"measurements {c.get('clock_measurements_ok')}/{c.get('clock_measurements')}  "
+                  f"drift {'-' if drift is None else f'{drift:.1f} ppm'}  [dim]({c.get('clock_sign_convention')})[/dim]")
 
 
 def _utc(ts: float | None) -> str:
@@ -299,3 +318,62 @@ def render_replay_check(report) -> None:
     console.print(f"dataset size {report.size_bytes:,} bytes")
     for m in report.mismatches[:30]:
         console.print(f"[red]mismatch:[/red] {escape(m)}")
+
+
+# --- v0.4 research --------------------------------------------------------------------------
+
+def _f(v, digits: int = 2) -> str:
+    if v is None or (isinstance(v, float) and v != v):
+        return "-"
+    return f"{v:.{digits}f}" if isinstance(v, float) else str(v)
+
+
+def _evidence_banner(evidence: str, kind: str = "") -> None:
+    color = "green" if evidence == "EVIDENCE" else "yellow"
+    console.print(Panel(f"[bold {color}]{escape(evidence)}[/bold {color}]  {escape(kind)}\n"
+                        "Decisions are capped at RESEARCH_MORE unless evidence is EVIDENCE, at least the "
+                        "pre-registered number of sessions exist and the test split passed.",
+                        title="Research evidence", box=box.ROUNDED))
+
+
+def render_research_build(m: dict) -> None:
+    _evidence_banner(m["evidence"], m["kind"])
+    c, s, x = m["collection"], m["split"], m["exclusions"]
+    console.print(f"run [bold]{escape(m['run_id'])}[/bold]  session {escape(m['session_id'])}  market {m['market']}  "
+                  f"provenance [bold]{m['provenance']}[/bold]")
+    console.print(f"collection {c['start_iso']} -> {c['end_iso']} ({c['duration_seconds']:.0f}s)")
+    console.print(f"hashes: prereg {str(m['preregistration_sha256'])[:12]}  config {str(m['config_sha256'])[:12]}  "
+                  f"raw manifest {str(m['raw_manifest_sha256'])[:12]}  dataset {str(m['dataset_sha256'])[:12]}  "
+                  f"git {str(m['git'].get('commit'))[:12]}{' (dirty)' if m['git'].get('dirty') else ''}")
+    if m.get("config_overrides"):
+        console.print(f"[yellow]config overrides (dry run only): {m['config_overrides']}[/yellow]")
+    console.print(f"grid rows {x['grid_rows']}  clean {x['clean_rows']}  excluded {x['excluded_rows']}  "
+                  f"by reason {x['by_reason']}")
+    console.print(f"embargo rows {x['embargo_rows']}  purged label values {x['label_values_purged']}  "
+                  f"feature values cut at segment start {x['feature_values_cut_at_segment_start']}")
+    console.print(f"split rows {s['rows']}  train_end {_utc(s['train_end'])}  validation "
+                  f"{_utc(s['validation_start'])} -> {_utc(s['validation_end'])}  test {_utc(s['test_start'])} -> "
+                  f"{_utc(s['end'])} [dim](test LOCKED)[/dim]")
+    console.print(f"fee scenarios {m['fee_scenarios_bps']} bp (decision {m['decision_fee_bps']} bp, "
+                  f"account fee confirmed: {m['account_fee_confirmed']})  delays {m['delay_scenarios_ms']} ms")
+
+
+def render_leaderboard(rows: list, evidence: str, kind: str = "", top: int = 20) -> None:
+    _evidence_banner(evidence, kind)
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["decision"]] = counts.get(r["decision"], 0) + 1
+    console.print(f"{len(rows)} feature x horizon tests  decisions {counts}")
+    ranked = sorted(rows, key=lambda r: -abs(r["Spearman_IC"]) if r["Spearman_IC"] == r["Spearman_IC"] else 0)
+    t = Table(box=box.SIMPLE, title=f"Top {min(top, len(rows))} by |validation Spearman IC|")
+    for col in ("feature", "h", "N", "miss", "IC", "CI", "BH_q", "TB bp", "acc", "gross", "cost", "net",
+                "net@fees", "net@delays", "val", "test", "decision"):
+        t.add_column(col)
+    for r in ranked[:top]:
+        fs = "/".join(_f(v, 1) for v in r["fee_sensitivity"].values())
+        ds = "/".join(_f(v, 1) for v in r["delay_sensitivity"].values())
+        t.add_row(r["feature"], str(r["horizon"]), str(r["N"]), _f(r["missing_rate"]), _f(r["Spearman_IC"], 3),
+                  f"[{_f(r['IC_CI_low'], 3)}, {_f(r['IC_CI_high'], 3)}]", _f(r["BH_q"], 3), _f(r["top_bottom_bps"]),
+                  _f(r["directional_accuracy"]), _f(r["gross_edge_bps"]), _f(r["estimated_cost_bps"]),
+                  _f(r["net_edge_bps"]), fs, ds, r["validation_result"], r["test_result"], r["decision"])
+    console.print(t)

@@ -191,6 +191,19 @@ def price_impact(levels: Sequence, size: float, side: str = "buy") -> float | No
     return vwap - best if side == "buy" else best - vwap
 
 
+def return_bps(start_price: float, end_price: float) -> float | None:
+    """Simple return in basis points (1e-4). None when a price is not positive."""
+    if start_price <= 0 or end_price <= 0:
+        return None
+    return 1e4 * (end_price / start_price - 1.0)
+
+
+def net_edge_bps(net_returns_bps: Sequence[float]) -> float | None:
+    """Mean net (after all costs) return per round trip in bp; NaN entries are not trades."""
+    vals = [v for v in net_returns_bps if v == v]
+    return sum(vals) / len(vals) if vals else None
+
+
 def drawdown_series(equity: Sequence[float]) -> list[float]:
     """Drawdown from running peak at each point, as a fraction of the peak (0.1 = -10%)."""
     out: list[float] = []

@@ -58,3 +58,19 @@ def test_cleanup_tmp_removes_interrupted_writes(tmp_path):
 def test_sha256_is_key_order_independent():
     assert sha256_of({"a": 1, "b": [1, 2]}) == sha256_of({"b": [1, 2], "a": 1})
     assert sha256_of({"a": 1}) != sha256_of({"a": 2})
+
+
+def test_atomic_open_streams_and_leaves_nothing_on_error(tmp_path):
+    from moneylab.storage.atomic import atomic_open, sha256_file
+
+    target = tmp_path / "out" / "big.bin"
+    with atomic_open(target) as f:
+        for i in range(100):
+            f.write(bytes([i % 256]) * 1000)
+    assert target.stat().st_size == 100_000 and len(sha256_file(target)) == 64
+    with pytest.raises(RuntimeError):
+        with atomic_open(target) as f:
+            f.write(b"partial")
+            raise RuntimeError("crash mid-write")
+    assert target.stat().st_size == 100_000  # old content intact
+    assert not list(target.parent.glob("*.tmp"))
