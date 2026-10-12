@@ -97,7 +97,7 @@ class Procedure:
 
 @dataclass(frozen=True)
 class Layout:
-    warmup: int = 125               # draft says 120; the first scenario day needs >= 122 (see min_warmup)
+    warmup: int = 122               # draft 8: M120 lookback 120 + 2-day execution lag (see min_warmup)
     confirmatory: int = 2227        # ~6.1 years (listing date unverified)
     holdout: int = 914              # 2024-04-01 .. 2026-10-02 (D9)
     excluded: int = 40              # exposed days up to the freeze date

@@ -139,6 +139,18 @@ def test_run_scenario_refuses_a_warmup_shorter_than_the_lookback():
         MC.run_scenario(MC.Scenario("x", DGP()), cfg)
 
 
+def test_warmup_matches_the_draft_and_the_minimum_lookback():
+    import re
+    from pathlib import Path
+
+    from moneylab.research.v06.synthetic import min_warmup
+
+    draft = (Path(__file__).resolve().parents[1] / "docs" / "research_v06_preregistration_draft.md").read_text(
+        encoding="utf-8")
+    (doc_value,) = re.findall(r"^warmup_days = (\d+)", draft, flags=re.M)
+    assert int(doc_value) == MC.Layout().warmup == min_warmup() == 122
+
+
 def test_tier1_scenarios_cover_nulls_boundary_stress_and_theta_grid():
     names = {s.name for s in MC.tier1_scenarios()}
     assert {"null_flat", "null_drift", "boundary", "selection_stress"} <= names

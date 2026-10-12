@@ -198,7 +198,7 @@ r(a, b]는 a일 종가에서 b일 종가까지의 로그수익률이다. 신호�
 
 | 구간 | 기간 | 증거 수준 | 규칙 |
 |---|---|---|---|
-| warmup | 첫 일봉 ~ +120일 | – | 신호 계산만, 평가 제외 |
+| warmup | 첫 일봉(0일째) ~ 121일째, **122일** | – | 신호 계산만, 평가 제외. M120은 120일 전 종가가 필요해 첫 신호가 120일째에 나오고, 확증 첫 기준일(E0·E1의 g0 − 1일, E2의 g0일)은 2일 전 신호 s[g0 − 2]를 쓰므로 g0 ≥ 122 |
 | 확증 평가 | warmup 끝 ~ 2024-03-31 (약 6년, 상장일 미검증) | L1 | Q·S·E 판정. 보조로 2022-07-01 ~ 2024-03-31 하위 구간 보고 |
 | historical holdout | 2024-04-01 ~ H_end (18절 결정 D9: 2026-10-02 또는 동결일 전날) | L2 | **잠금(19절).** 한 번만 개봉 |
 | 제외 구간 | H_end 다음 날 ~ 동결일 전날 (D9에서 2026-10-02를 고르면 존재) | – | 노출된 날짜(부록 B). 어떤 평가에도 쓰지 않음. lookback에는 사용 가능 |
@@ -621,7 +621,7 @@ revision_recheck_min_delay_days = 7
 threshold_sensitivity_factors = [0.5, 2.0]   # report only
 
 [split]
-warmup_days = 120
+warmup_days = 122                       # 120-day lookback (M120) + 2-day lag to the first scenario day
 confirmatory_end = "2024-03-31"
 confirmatory_sub_start = "2022-07-01"   # report only
 confirmatory_data_end_utc = "2024-04-01T00:00:00Z"  # 8.1: confirmatory reads candles ending <= this
