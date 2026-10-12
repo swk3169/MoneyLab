@@ -25,11 +25,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import time
 import traceback
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from moneylab import __version__
 from moneylab.config import Settings, load_settings
@@ -37,6 +39,7 @@ from moneylab.core.clock_monitor import ClockMonitor, ClockThresholds
 from moneylab.core.diagnostics import run_diagnostics
 from moneylab.core.http import HttpClient
 from moneylab.core.logging_setup import setup_logging
+from moneylab.core.ratelimit import SlidingWindowLimiter
 from moneylab.core.redaction import redact_text
 from moneylab.core.exceptions import ProviderError
 from moneylab.display.console import (
@@ -83,6 +86,25 @@ from moneylab.providers.upbit.recorder import (
     replay_check,
     verify_upbit_recording,
 )
+from moneylab.providers.upbit.candle_fixture import CandleFixture
+from moneylab.providers.upbit.candle_store import (
+    DEFAULT_SUBDIR as CANDLES_SUBDIR,
+    CandleStoreError,
+    pull_to_store,
+    verify_candle_pull,
+)
+from moneylab.providers.upbit.candles import (
+    DEFAULT_LIMITS as CANDLE_LIMITS,
+    INTERVALS as CANDLE_INTERVALS,
+    KST,
+    MAX_COUNT as CANDLE_MAX_COUNT,
+    CandleParseError,
+    UpbitCandleClient,
+    candle_http_client,
+    is_aligned,
+    utc_iso,
+)
+from moneylab.providers.upbit.endpoints import REST_BASE_URL as UPBIT_REST_URL
 from moneylab.providers.upbit.recorder.quality import quality_report
 from moneylab.providers.upbit.recorder.store import CAPTURE_MANIFEST, CLOCK_LOG, dataset_dirname, read_json
 from moneylab.recording.shutdown import install_stop_signals
@@ -106,6 +128,7 @@ FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
 DEFAULT_FIXTURE = FIXTURES / "gamma_markets_sample.json"
 DEFAULT_BOOKS = FIXTURES / "clob_books_sample.json"
 DEFAULT_UPBIT_FIXTURE = FIXTURES / "upbit_ws_timeline_synthetic.json"
+DEFAULT_CANDLE_FIXTURE = FIXTURES / "upbit_candles_synthetic.json"
 DEFAULT_TIMELINES = {
     "mm": FIXTURES / "clob_timeline_mm.json",
     "mispricing": FIXTURES / "clob_timeline_mispricing.json",
@@ -537,6 +560,137 @@ def cmd_research_final(args: argparse.Namespace, settings: Settings) -> int:
     return EXIT_OK
 
 
+def _parse_utc(text: str, name: str) -> datetime:
+    t = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if t.tzinfo is None:
+        raise ValueError(f"{name} needs an explicit timezone, e.g. 2026-10-01T00:00:00Z")
+    return t.astimezone(UTC)
+
+
+def candle_window(interval: str, now: datetime, last: int | None, start: str | None,
+                  end: str | None) -> tuple[datetime, datetime]:
+    """[start, end) in UTC. --last N = the N most recent buckets, the one still in progress included
+    (the pull drops it as incomplete), so N buckets cost one page of N rows."""
+    step = CANDLE_INTERVALS[interval][1]
+    if last is not None:
+        if start or end:
+            raise ValueError("--last cannot be combined with --start/--end")
+        if last < 1:
+            raise ValueError("--last must be >= 1")
+        floor = now.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+        if interval == "day":
+            floor = floor.replace(hour=0)
+        return floor + step - last * step, floor + step
+    if not (start and end):
+        raise ValueError("give --last N, or both --start and --end")
+    s, e = _parse_utc(start, "--start"), _parse_utc(end, "--end")
+    if not (is_aligned(s, interval) and is_aligned(e, interval)):
+        raise ValueError(f"--start/--end must be on {interval} bucket boundaries (UTC)")
+    if s >= e:
+        raise ValueError("--start must be before --end")
+    return s, e
+
+
+def _kst(iso: str | None) -> str:
+    if not iso:
+        return "-"
+    return (_parse_utc(iso, "time") + KST).strftime("%Y-%m-%d %H:%M KST")
+
+
+def render_candle_report(r: dict[str, Any]) -> None:
+    console.print(f"pages {r['pages']}, rows received {r['rows_received']}, candles kept {r['candles']}: "
+                  f"{r['first_start']} .. {r['last_start']} UTC ({_kst(r['first_start'])} .. {_kst(r['last_start'])})",
+                  markup=False)
+    console.print(f"excluded: in progress {r['excluded_incomplete']}, outside range {r['excluded_out_of_range']}; "
+                  f"duplicates: identical {r['duplicates_identical']}, conflicting {len(r['duplicates_conflicting'])}; "
+                  f"missing buckets {r['missing_buckets']}; invalid values {len(r['invalid'])}", markup=False)
+    for g in r["gaps"]:
+        console.print(f"  gap: {g['missing']} bucket(s) after {g['after']} before {g['before']} (not filled)", markup=False)
+    for c in r["duplicates_conflicting"]:
+        console.print(f"  conflicting duplicate at {c} (first received kept)", markup=False)
+    for bad in r["invalid"]:
+        console.print(f"  invalid {bad['start_utc']}: {', '.join(bad['problems'])}", markup=False)
+    for w in r["warnings"]:
+        console.print(f"  warning: {w}", markup=False)
+    console.print("[green]quality ok[/green]" if r["ok"] else "[red]quality NOT ok[/red]")
+
+
+def render_candle_verify(rep: Any) -> None:
+    console.print(f"verify {rep.pull_dir}: provenance {rep.provenance}, status {rep.status}, "
+                  f"pages checked {rep.pages_checked}, candles on replay {rep.candles}", markup=False)
+    for p in rep.problems:
+        console.print(f"  problem: {p}", markup=False)
+    console.print("[green]verify ok: hashes, file set and replay match[/green]" if rep.ok else "[red]verify FAILED[/red]")
+
+
+def cmd_candles_pull(args: argparse.Namespace, settings: Settings) -> int:
+    """v0.6: public Upbit candles -> raw pages + pull.json, then an offline verify. Read-only."""
+    fixture = args.source == "fixture"
+    try:
+        if fixture:
+            fx = CandleFixture.load(args.fixture or DEFAULT_CANDLE_FIXTURE)
+            now, origin, provenance = fx.now, f"fixture:{fx.path.name}", "fixture"
+            out = args.out or settings.raw_dir / "upbit" / "candles_v06-fixture"
+        else:
+            now, origin, provenance = datetime.now(UTC), "live", "real"
+            out = args.out or settings.raw_dir / CANDLES_SUBDIR
+        start, end = candle_window(args.interval, now, args.last, args.start, args.end)
+        buckets = int((end - start) / CANDLE_INTERVALS[args.interval][1])
+        page_count = min(CANDLE_MAX_COUNT, buckets) if args.page_count is None else args.page_count
+        if not 1 <= page_count <= CANDLE_MAX_COUNT:
+            raise ValueError(f"--page-count must be 1..{CANDLE_MAX_COUNT}")
+        max_pages = math.ceil(buckets / page_count) + 1 if args.max_pages is None else args.max_pages
+        if max_pages < 1:
+            raise ValueError("--max-pages must be >= 1")
+        market = args.market.upper()
+    except (OSError, KeyError, ValueError) as exc:
+        console.print(f"[red]candles-pull refused:[/red] {exc}", markup=True)
+        return EXIT_ERROR
+    label = "SYNTHETIC fixture " + origin if fixture else f"LIVE {UPBIT_REST_URL}{CANDLE_INTERVALS[args.interval][0]}"
+    console.print(f"candles-pull {market} {args.interval} from {label} (public market data only)", markup=False)
+    console.print(f"  range [{utc_iso(start)}, {utc_iso(end)}) = {buckets} bucket(s); "
+                  f"{_kst(utc_iso(start))} .. {_kst(utc_iso(end))}", markup=False)
+    console.print(f"  page_count {page_count}, at most {max_pages} page request(s) (each retried at most twice "
+                  f"on 429/5xx/timeout)", markup=False)
+    console.print(f"  output: {out}/{args.interval}_{market}_<UTC stamp>/ (new directory, never overwrites)",
+                  markup=False)
+    if args.dry_run:
+        console.print("dry run: no request sent, nothing written", markup=False)
+        return EXIT_OK
+
+    if fixture:
+        sleep = lambda s: None  # noqa: E731 - scripted session, no real clock to wait for
+        client = UpbitCandleClient(HttpClient(UPBIT_REST_URL, session=fx.session()), sleep=sleep, utcnow=lambda: now,
+                                   limiter=SlidingWindowLimiter(CANDLE_LIMITS, clock=lambda: 0.0, sleep=sleep))
+    else:
+        client = UpbitCandleClient(candle_http_client(settings.http_timeout, settings.user_agent))
+    created: list[Any] = []
+    try:
+        pull, store = pull_to_store(client, out, market, args.interval, start, end, provenance=provenance,
+                                    origin=origin, page_count=page_count, max_pages=max_pages,
+                                    on_created=created.append)
+    except (ProviderError, CandleStoreError, CandleParseError, ValueError) as exc:
+        where = f" (evidence: {created[0].dir})" if created else ""
+        console.print(f"candles-pull failed{where}: {redact_text(f'{type(exc).__name__}: {exc}')}", markup=False)
+        return EXIT_UNAVAILABLE if isinstance(exc, ProviderError) else EXIT_ERROR
+    console.print(f"saved {store.dir}", markup=False)
+    render_candle_report(store.doc["report"])
+    verify = verify_candle_pull(store.dir)
+    render_candle_verify(verify)
+    return EXIT_OK if verify.ok and pull.report.ok else EXIT_ERROR
+
+
+def cmd_candles_verify(args: argparse.Namespace, settings: Settings) -> int:
+    rep = verify_candle_pull(args.pull_dir)
+    if args.json:
+        console.print_json(json.dumps(rep.to_dict()))
+    else:
+        render_candle_verify(rep)
+        if rep.replay:
+            render_candle_report(rep.replay)
+    return EXIT_OK if rep.ok else EXIT_ERROR
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="moneylab", description="MoneyLab - prediction market research (read-only)")
     p.add_argument("--version", action="version", version=f"moneylab {__version__}")
@@ -629,6 +783,28 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("dataset", type=Path, help="dataset directory (.../upbit/recordings/<market>)")
     c.add_argument("--json", action="store_true")
     c.set_defaults(func=cmd_replay_check)
+
+    cp = sub.add_parser("candles-pull", help="v0.6: public Upbit day/60-minute candles to data/raw (read-only)")
+    cp.add_argument("--interval", choices=sorted(CANDLE_INTERVALS), required=True)
+    cp.add_argument("--market", default="KRW-BTC", help="Upbit pair code (default KRW-BTC)")
+    cp.add_argument("--last", type=int, default=None,
+                    help="the N most recent buckets, the in-progress one included (it is dropped as incomplete)")
+    cp.add_argument("--start", default=None, help="UTC bucket boundary, e.g. 2026-10-01T00:00:00Z (with --end)")
+    cp.add_argument("--end", default=None, help="exclusive UTC bucket boundary (with --start)")
+    cp.add_argument("--page-count", type=int, default=None,
+                    help=f"rows per request, 1..{CANDLE_MAX_COUNT} (default: buckets in range, capped)")
+    cp.add_argument("--max-pages", type=int, default=None, help="hard cap on page requests (default: pages needed + 1)")
+    cp.add_argument("--source", choices=["live", "fixture"], default="live")
+    cp.add_argument("--fixture", type=Path, default=None, help="synthetic candle fixture for --source fixture")
+    cp.add_argument("--out", type=Path, default=None,
+                    help="pull root (default data/raw/upbit/candles_v06, fixture: .../candles_v06-fixture)")
+    cp.add_argument("--dry-run", action="store_true", help="print the request plan; no request, no files")
+    cp.set_defaults(func=cmd_candles_pull)
+
+    cv = sub.add_parser("candles-verify", help="v0.6: re-hash and replay a stored candle pull (offline)")
+    cv.add_argument("pull_dir", type=Path, help="pull directory (.../candles_v06/<interval>_<market>_<stamp>)")
+    cv.add_argument("--json", action="store_true")
+    cv.set_defaults(func=cmd_candles_verify)
 
     rb = sub.add_parser("research-build", help="v0.4: raw Upbit dataset -> grid/features/labels/split (offline)")
     rb.add_argument("dataset", type=Path, help="Upbit dataset directory (.../<session>/KRW-BTC)")
