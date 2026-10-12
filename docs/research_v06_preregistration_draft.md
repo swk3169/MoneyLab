@@ -7,7 +7,9 @@
 이 연구는 **읽기 전용**이다. 실제 주문, API key, 계좌 연결, 자동매매, Paper Trading 승격은 범위 밖이다(CLAUDE.md 절대 규칙 1).
 "가정" 또는 "미검증"으로 표시한 수치는 확인된 사실이 아니다.
 
-개정 이력: 2026-10-12 초판 → 2026-10-12 개정(체결 시점, 확증 기간, 통계 정의, 판정 4축 분리, 품질 기준, 비용·운영비 구조).
+개정 이력: 2026-10-12 초판 → 2026-10-12 개정(체결 시점, 확증 기간, 통계 정의, 판정 4축 분리, 품질 기준, 비용·운영비 구조)
+→ 2026-10-12 감사 반영(C1 구간 경계와 holdout 오염, H1 REJECT 기준, H2 forward 판정, H5 잠금 설계와 노출 기록).
+**결정 대기 파라미터**(18절의 θ_min, α_fut, α_F, T_F 등)는 선택지와 근거만 적었고, 사용자가 정하기 전에는 고정할 수 없다.
 
 ## 0. 다른 study와의 관계
 
@@ -55,7 +57,13 @@
 | L2 | historical holdout | 알았음 (공개 가격) | 분석 과적합 | 선택 편향 | 반증 또는 일관성 확인 |
 | L3 | forward (동결 후) | 몰랐음 | 선택 편향 포함 전부 | 짧은 기간의 낮은 검증력 | 양의 기대수익 주장의 유일한 근거 |
 
-PAPER_CANDIDATE는 L3를 요구한다. forward 12개월은 연 Sharpe 약 2.5 이상만 검출하므로 확증 수단이 아니라 붕괴를 보는 반증 검사다.
+PAPER_CANDIDATE는 L3를 요구한다.
+
+**forward 검정이 선택 편향을 얼마나 없애는가.** L1·L2의 선택 편향은 "어떤 전략이 forward에 올라가는가"에만 영향을 준다.
+forward 데이터는 선택이 끝난 뒤에 생기므로 선택과 독립이고, 따라서 **forward 데이터만으로 계산한 사전등록 검정**(10.7)은 선택 편향과
+무관하게 유효하다(올라간 전략 수만큼 다중검정 보정). 반대로 forward 구간의 단순 양수 수익률은 기대값 0인 전략에서도 기간과 무관하게
+50 % 확률로 나오므로 선택 편향을 막지 못한다. 그래서 `CONFIRMED`는 forward 검정의 유의한 통과를 요구한다(11.3). 단, 선택 편향이 남기는
+**효과 크기 과대 추정**(L1 추정치의 승자의 저주)은 forward 검정으로도 제거되지 않는다. 효과 크기는 forward 추정치로만 보고한다.
 
 ## 3. 사전 경제성·검정력 (계획용, 데이터를 보기 전 추정)
 
@@ -93,7 +101,8 @@ KRW-BTC 첫 캔들 날짜(상장일), 계정 수수료, maker/taker 차이, 세�
 ## 5. 데이터 품질 판정 Q (경제성과 독립, 수익률을 보기 전)
 
 품질 판정은 품질 도구만으로 수행하고 수익률·신호 성과를 보지 않는다(Q13 제외). 결과는 `VALID`, `INVALID`, `SENSITIVE` 중 하나다.
-historical holdout 구간의 원본 가격은 품질 도구 외에는 열람하지 않는다(잠금 유지).
+historical holdout·제외 구간·forward 구간의 원본 가격은 품질 도구 외에는 열람하지 않고, 품질 도구도 그 구간에 대해서는 집계값(건수·비율)만
+출력한다(19절). 이미 노출된 날짜는 부록 B에 기록하며 미열람 데이터로 간주하지 않는다.
 
 | # | 검사 | 기준 | 위반 시 |
 |---|---|---|---|
@@ -191,11 +200,33 @@ r(a, b]는 a일 종가에서 b일 종가까지의 로그수익률이다. 신호�
 |---|---|---|---|
 | warmup | 첫 일봉 ~ +120일 | – | 신호 계산만, 평가 제외 |
 | 확증 평가 | warmup 끝 ~ 2024-03-31 (약 6년, 상장일 미검증) | L1 | Q·S·E 판정. 보조로 2022-07-01 ~ 2024-03-31 하위 구간 보고 |
-| historical holdout | 2024-04-01 ~ 동결일 전날 | L2 | **잠금.** 한 번만 개봉 |
-| forward | 동결일 ~ 최소 12개월, 최대 24개월 | L3 | 동결 후 수집분만. 월 1회 수동 수집(매번 승인) |
+| historical holdout | 2024-04-01 ~ H_end (18절 결정 D9: 2026-10-02 또는 동결일 전날) | L2 | **잠금(19절).** 한 번만 개봉 |
+| 제외 구간 | H_end 다음 날 ~ 동결일 전날 (D9에서 2026-10-02를 고르면 존재) | – | 노출된 날짜(부록 B). 어떤 평가에도 쓰지 않음. lookback에는 사용 가능 |
+| forward | 동결일 ~ T_F (18절 결정 D6) | L3 | 동결 후 수집분만. 월 1회 수동 수집(매번 승인). **forward 잠금(19절)** |
 
-- lookback이 앞 구간에 걸치는 것은 허용한다(과거 방향 정보뿐). 경계를 넘는 거래는 진입 구간에 귀속한다.
-- 동결 이후 구간 추가나 기간 변경은 새 study(v0.6.1)다.
+동결 이후 구간 추가나 기간 변경은 새 study(v0.6.1)다.
+
+### 8.1 구간 경계 규칙 (holdout 오염 방지)
+
+각 평가 구간 G = [G_start, G_end) (UTC 시각)는 **독립된 운용 기간**으로 계산한다.
+
+1. **데이터 접근 한계:** 구간 G의 통계는 끝 시각이 G_end 이하인 캔들만 읽는다. 확증 평가의 G_end는 2024-04-01 00:00 UTC(일봉 2024-03-31의
+   종가 시각)이고, 이후 시각의 캔들(holdout, 제외 구간, forward)은 확증 평가에 쓰지 않는다. 앞 구간의 캔들은 lookback으로만 쓸 수 있다
+   (과거 방향 정보뿐).
+2. **구간에 속하는 날:** 일별 수익률 r_t는 (기준 시각 t−1, 기준 시각 t]의 변화이며, 기준 시각 t ≤ G_end인 날만 구간 G에 속한다. 기준 시각은
+   시나리오별로 다르다(6.3). 예: E0의 확증 평가 마지막 날은 기준 시각 2024-03-31 01:00 UTC인 날이다.
+3. **시작 시 열린 포지션:** 구간 시작 직전에는 현금이라고 보고, 구간의 첫 기준 시각에 신호가 보유이면 그 시각 근사가로 **진입한 것으로
+   처리하고 진입 비용(f + κ + ι)을 부과**한다(가상 진입).
+4. **끝에 열린 포지션:** 구간의 마지막 기준 시각에 보유 중이면 그 시각 근사가로 **청산한 것으로 처리하고 청산 비용을 부과**한다(가상 청산).
+   구간 밖 가격은 쓰지 않는다.
+5. 같은 규칙을 B1·B2·B4에도 적용한다(B1의 보유 구간도 구간 안에서 시작·종료).
+6. **보고 (판정 미사용):** 구간별 가상 진입·청산 건수, 경계에 걸쳐 잘린 거래 수, "가상 비용 없이 시가 평가만 한 경우"와의 m_s 차이
+   (경계 처리로 인한 왜곡의 크기).
+7. **구간 간 순서:** 확증 평가 → historical holdout 개봉 → forward 평가. forward 첫 신호의 lookback은 holdout·제외 구간 가격을 쓰므로
+   holdout을 개봉하기 전에는 forward를 평가하지 않는다. holdout을 개봉하지 않으면(11.3의 9행에 해당하는 전략이 없으면) forward 평가도 없다.
+
+판정 수수료 25 bp에서 가상 진입·청산은 구간당 최대 왕복 1회분(약 66 bp)의 비용을 더하므로 보수적이다. 반대 선택지(가상 비용 없이
+시가 평가)는 18절 D8에 적었다.
 - **AI 모델 사용 제한:** 언어 모델은 학습 데이터에 과거 가격이 있으므로 신호 생성이나 과거 구간의 매매 판단에 쓰지 않는다(12절).
 
 **Benchmark** (모두 7절 비용과 6.3 기준 시각을 같게 적용):
@@ -254,6 +285,10 @@ seed  = 20261012                      derived_seed(seed, *parts)는 research/sta
 로그수익률을 쓰는 이유: 평균 단순수익률 > 0이어도 변동성 때문에 자산은 줄 수 있다. m_s > 0 ⇔ 기간 중 자산 증가이므로 S와 E가
 같은 양을 본다. 연환산은 365일(24시간·연중무휴)이다.
 
+r_t^s와 m_s는 **구간별로** 8.1의 경계 규칙(가상 진입·청산 포함)에 따라 계산한다. 아래 정의에서 T는 해당 구간의 날 집합이다. 10.2–10.6은
+확증 평가 구간, 10.6의 holdout 항목은 historical holdout 구간, 10.7은 forward 구간에 적용한다. 같은 bootstrap 절차를 구간마다 따로
+적용하고, 구간을 넘나드는 블록은 만들지 않는다.
+
 ### 10.2 H1 (자산 증가) — 단측
 
 - **귀무가설 H1₀,s: μ_s ≤ 0. 대립가설 H1₁,s: μ_s > 0** (μ_s = E[r_t^s]). 오른쪽 단측 검정.
@@ -286,7 +321,7 @@ seed  = 20261012                      derived_seed(seed, *parts)는 research/sta
 - **Holm 보정은 primary 4개의 pS에만** 적용한다. 오름차순 p(1) ≤ … ≤ p(4)에 대해
   p̃(j) = max_{i ≤ j} min(1, (5 − i)·p(i)). **S = PASS ⇔ p̃_s ≤ 0.05.** 4개 전략의 S 주장 전체에서 거짓 주장 확률이 0.05 이하다.
 - secondary 5개는 같은 절차를 별도 family로 적용하고 "탐색"으로 표시한다. primary 판정에 영향을 주지 않는다.
-- holdout·forward 검정(10.6)은 S = PASS 전략에만 적용한다. 두 개 이상이면 그 전략들의 해당 검정 p값에 Holm을 적용한다.
+- holdout·forward 검정(10.6, 10.7)은 S = PASS이고 E = PASS인 전략에만 적용한다. 두 개 이상이면 그 전략들의 해당 검정 p값에 Holm을 적용한다.
 - 보고 전용: 보정 전 p1, p2, 각 family의 Holm 값, 낮은 수수료 시나리오의 p값.
 
 ### 10.5 Sharpe 차이와 기타 보고
@@ -296,17 +331,60 @@ seed  = 20261012                      derived_seed(seed, *parts)는 research/sta
 - deflated Sharpe(Bailey–López de Prado, 시도 수 9, 확증 평가 기간의 왜도·첨도), 연도별 net, MDD와 회복 기간, 국면별 성과(사후 분류).
 - MDE_SR ≈ 2.49/√(n/365)와 관측 Sharpe로 계산한 필요 기간 (2.49/SR)².
 
-### 10.6 실패 증거 검정 (E의 REJECT 근거, holdout·forward)
+### 10.6 실패 증거 검정 (REJECT의 유일한 통계 근거)
 
-경제성 실패를 REJECT하려면 "수익이 없다"는 **충분한 증거**가 필요하다. 다음 검정을 미리 정한다.
+**관측 수익률이 음수인 것과 "수익성이 없다"는 충분한 증거는 다르다.** 점추정 m_s ≤ 0은 E-a 점추정 실패일 뿐이며 그것만으로는 REJECT하지
+않는다. REJECT에는 아래 검정 중 하나의 기각이 필요하다. 기각하지 못하면 증거 부족(검정력 부족 포함)이며 RESEARCH_MORE다.
 
-- **무익성(futility) 검정, 확증 기간:** 의미 있는 최소 효과를 연 Sharpe 0.5로 정한다(δ_s = 0.5 · sd(r^s) / √365, 일 단위).
-  r^s를 그대로(평균 이동 없이) stationary bootstrap(B = 9,999, seed `derived_seed(seed, "FUT", s, 시나리오)`)한 평균의 95 % 분위수를
-  U_s라 하면, **U_s < δ_s이면 "의미 있는 수익 없음"의 충분한 증거**다. 민감도로 최소 효과 0.3·0.7을 보고한다.
-- **무작위보다 나쁨, 확증 기간:** p2low_s = (1 + #{k : m^B1_{s,k} ≤ m_s}) / (K + 1) ≤ 0.05이면 "무작위 배치보다 나쁨"의 충분한 증거다.
-- **holdout·forward 차이 검정:** H₀: μ_hold ≥ μ_conf. 두 구간을 각각 평균을 0에 맞춰 독립적으로 stationary bootstrap(B = 9,999,
-  seed "HOLD"/"FWD")하고, d = m_conf − m_hold에 대해 10.2와 같은 식으로 p값을 계산한다. p < 0.05이면 유의하게 나쁨.
-- **holdout·forward 음수 검정:** H₀: μ ≥ 0, 대립가설 μ < 0(왼쪽 단측). 10.2 절차의 부호를 바꿔 p < 0.05이면 유의하게 음수.
+**(1) 무익성 검정 (futility), 구간 G ∈ {확증 평가, historical holdout, forward}:**
+- 최소 의미 효과: δ_s = θ_min · sd_G(r^s) / √365 (일 단위). θ_min은 연 Sharpe 단위의 최소 의미 효과다(18절 결정 D1).
+- **귀무가설 H₀^fut: μ_s ≥ δ_s** (의미 있는 수익이 있다). **대립가설 H₁^fut: μ_s < δ_s.** 왼쪽 단측.
+- 귀무가설하 재표본추출: 귀무가설의 경계로 옮긴 c_t = r_t^s − m_s + δ_s를 10.2와 같은 stationary bootstrap(평균 블록 20일, B = 9,999,
+  seed `derived_seed(seed, "FUT", G, s, 시나리오)`)으로 재표본한다.
+- p값: **p_fut = (1 + #{b : m*_b ≤ m_s}) / (B + 1)**, m*_b는 재표본 b의 c 평균.
+- 기각 기준: **p_fut ≤ α_fut** (18절 결정 D2). 이는 평균의 (1 − α_fut) 단측 bootstrap 상한이 δ_s보다 작다는 것과 같다.
+- 다중검정: primary 4개의 p_fut에 Holm 적용 여부(18절 결정 D3). 적용하면 4개 전략의 거짓 REJECT 확률이 α_fut 이하다.
+
+**(2) 무작위보다 나쁨 검정 (확증 평가, forward):**
+- **귀무가설:** 전략 배치는 B1 무작위 배치보다 나쁘지 않다(교환 가능). **대립가설:** 전략의 m이 무작위 배치보다 작다. 왼쪽 단측.
+- p값: **p2low_s = (1 + #{k : m^B1_{s,k} ≤ m_s}) / (K + 1)**, K = 9,999 (10.3의 B1 배치 재사용).
+- 기각 기준: p2low ≤ α_fut, Holm 적용 여부는 (1)과 같다(D3).
+
+**(3) 보고 전용 (판정 미사용):** 확증 평균과의 차이 검정(H₀: μ_G ≥ μ_conf). 확증 단계를 통과한 전략은 확증 평균이 위로 치우쳐 있으므로
+(승자의 저주) 이 검정을 REJECT 근거로 쓰면 진짜 좋은 전략도 과도하게 REJECT된다(부록 C 반례 H1-2).
+
+**판정 확률 (계획용, 정규 근사, 확증 6년·holdout 2.5년, α_fut = 0.05):**
+
+| θ_min | 진짜 연 Sharpe | 확증 무익성 REJECT 확률 | holdout 무익성 REJECT 확률 |
+|---|---|---|---|
+| 0.5 | 0.0 | 약 34 % | 약 20 % |
+| 0.5 | 0.5 | 약 5 % | 약 5 % |
+| 0.3 | 0.0 | 약 18 % | – |
+| 0.7 | 0.5 | 약 12 % | – |
+
+이 값은 근사이며, 고정 전 합성 시뮬레이션으로 확인한다(16절 0단계).
+
+### 10.7 forward 검정 (L3, CONFIRMED의 근거)
+
+forward 구간에는 확증 평가와 같은 정의를 forward 데이터에만 적용한다. forward 검정은 S·E를 통과하고 holdout에서 REJECT되지 않은 전략
+집합 F에만 적용한다. F는 forward 시작 전에 확정되므로 forward 데이터와 독립이다.
+
+- **forward H1:** H₀ μ_F ≤ 0, H₁ μ_F > 0, 오른쪽 단측. 10.2와 같은 평균 이동 stationary bootstrap(B = 9,999, seed "FWD-H1").
+- **forward H2:** 10.3과 같은 B1 무작위화 검정을 forward 구간에서 수행(K = 9,999, seed "FWD-H2").
+- **forward S_F:** pS_F = max(p1_F, p2_F), F에 속한 전략들에 Holm 적용. **S_F 통과 ⇔ Holm 조정 p ≤ α_F** (18절 결정 D5).
+- **분석 시점 (사전 고정):**
+  - 중간 분석 (forward 12개월): **실패 판정만** 한다. forward 무익성(10.6 (1), α_fut 기준), 무작위보다 나쁨(10.6 (2)), 위험 한도.
+    중간 분석에서는 CONFIRMED를 판정하지 않는다.
+  - 최종 분석 (forward T_F개월, 18절 결정 D6): S_F 통과면 확증 후보, 무익성이나 위험 한도 위반이면 실패, 둘 다 아니면 결론 없음.
+  - 두 번의 무익성 판정으로 거짓 REJECT 확률이 최대 2·α_fut까지 커진다. 각 분석에서 α_fut/2를 쓸지(18절 결정 D7) 사전에 정한다.
+- **forward 판정 확률 (계획용, 정규 근사, H2 결합 전, 검정력은 이보다 낮음):**
+
+| α_F | T_F | 진짜 연 Sharpe 0 (거짓 통과) | 0.5 | 1.0 |
+|---|---|---|---|---|
+| 0.05 | 24개월 | 5 % | 약 17 % | 약 41 % |
+| 0.10 | 24개월 | 10 % | 약 28 % | 약 55 % |
+| 0.20 | 24개월 | 20 % | 약 45 % | 약 72 % |
+| 0.10 | 36개월 | 10 % | 약 34 % | 약 67 % |
 
 ## 11. 경제성 판정 E와 종합 판정
 
@@ -318,8 +396,8 @@ seed  = 20261012                      derived_seed(seed, *parts)는 research/sta
 
 | 조건 | 통과 기준 (점추정) | 실패 시 충분한 증거 (10.6) |
 |---|---|---|
-| E-a 수익성 | E0에서 m_s > 0 그리고 m_s > mean_k(m^B1_{s,k}) | E0 무익성(U_s < δ_s) 또는 p2low_s ≤ 0.05 |
-| E-b 스트레스 | E1과 E2에서도 m_s > 0 | E1 또는 E2의 무익성 |
+| E-a 수익성 | E0에서 m_s > 0 그리고 m_s > mean_k(m^B1_{s,k}) | E0 무익성 기각(p_fut ≤ α_fut) 또는 무작위보다 나쁨 기각(p2low ≤ α_fut), 10.6 |
+| E-b 스트레스 | E1과 E2에서도 m_s > 0 | E1 또는 E2의 무익성 기각 (10.6 (1)) |
 | E-c 연도 일관성 | net > 0인 연도 비율 ≥ 60 % | 없음 (단독으로는 REJECT 근거가 아님) |
 
 - **E = PASS:** E-a, E-b, E-c 모두 통과.
@@ -339,26 +417,29 @@ seed  = 20261012                      derived_seed(seed, *parts)는 research/sta
 | 4 | E | E = FEE_UNCONFIRMED | `FEE_UNCONFIRMED` (f* 보고) | RESEARCH_MORE |
 | 5 | E | E = FAIL, E-a 실패 | `UNPROFITABLE` | **REJECT (수익성 부족의 충분한 증거)** |
 | 6 | E | E = FAIL, E-b 실패 | `NOT_ROBUST` | **REJECT (스트레스 실패의 충분한 증거)** |
-| 7 | E | E = INCONCLUSIVE | `ECONOMIC_INCONCLUSIVE` (실패 조건과 U_s, p2low 보고) | RESEARCH_MORE |
+| 7 | E | E = INCONCLUSIVE | `ECONOMIC_INCONCLUSIVE` (실패 조건, p_fut, p2low, MDE 보고) | RESEARCH_MORE |
 | 8 | S | E = PASS, S = FAIL | `UNDERPOWERED` (MDE, 필요 기간 보고) | RESEARCH_MORE |
 | 9 | L2 | E = PASS, S = PASS, holdout 미개봉 | `PENDING_HOLDOUT` | RESEARCH_MORE |
-| 10 | L2 | holdout 차이 검정 또는 음수 검정 p < 0.05 | `HOLDOUT_FAIL` | **REJECT (유의한 실패)** |
-| 11 | L2 | holdout net ≤ 0 또는 B1 대비 초과 ≤ 0 (유의하지 않음), **forward 데이터가 아직 없음** | `HOLDOUT_WEAK` | RESEARCH_MORE (forward 진행, 24개월 필요) |
-| 12 | L3 | forward 12개월 미만 (holdout이 약했던 전략은 24개월 미만), 13·14행 미해당 | `PENDING_FORWARD` | RESEARCH_MORE |
-| 13 | L3 | forward 차이 검정 또는 음수 검정 p < 0.05 | `FORWARD_FAIL` | **REJECT (유의한 실패)** |
-| 14 | L3 | forward MDD > 확증 평가 MDD × 1.5 | `RISK_LIMIT` | **REJECT (사전 위험 한도 위반)** |
-| 15 | L3 | net ≤ 0 또는 초과 < 0 (유의하지 않음), 24개월 미만 | `FORWARD_WEAK` | RESEARCH_MORE (24개월까지 연장) |
-| 16 | L3 | 24개월에도 15행 상태 (holdout이 약했던 전략 포함) | `FORWARD_INCONCLUSIVE` | **study 종료** (REJECT 아님) |
-| 17 | E_op | forward 통과, E_op = OP_FAIL 또는 OP_UNDETERMINED (판정 자본) | `CONFIRMED_NO_OPERATING_VALUE` | 가설은 지지, 운용 가치 미달 (PAPER_CANDIDATE 아님) |
-| 18 | – | forward 통과(net > 0, 초과 ≥ 0, MDD ≤ 1.5배), E_op = OP_PASS | `CONFIRMED` | PAPER_CANDIDATE |
+| 10 | L2 | holdout 무익성 기각 (10.6 (1), holdout 구간, Holm 여부는 D3) | `HOLDOUT_FAIL` | **REJECT (충분한 실패 증거)** |
+| 11 | L2 | holdout net ≤ 0 또는 B1 대비 초과 ≤ 0, 무익성 미기각, **forward 데이터가 아직 없음** | `HOLDOUT_WEAK` | RESEARCH_MORE (forward 진행) |
+| 12 | L3 | forward 기간 중 어느 시점이든 MDD > 확증 평가 MDD × 1.5 | `RISK_LIMIT` | **REJECT (사전 위험 한도 위반)** |
+| 13 | L3 | forward 12개월 미만 (T_F = 12이면 T_F 미만) | `PENDING_FORWARD` | RESEARCH_MORE |
+| 14 | L3 | 중간 분석(12개월) 또는 최종 분석(T_F)에서 forward 무익성 기각 또는 무작위보다 나쁨 기각 (10.6, α는 D7) | `FORWARD_FAIL` | **REJECT (충분한 실패 증거)** |
+| 15 | L3 | 12개월 ≤ forward < T_F, 중간 분석에서 14행 미해당 | `PENDING_FORWARD_FINAL` | RESEARCH_MORE |
+| 16 | L3 | 최종 분석(T_F)에서 S_F 미통과, 14행 미해당 | `FORWARD_INCONCLUSIVE` | **study 종료** (REJECT 아님, 검정력 부족 포함) |
+| 17 | E_op | 최종 분석에서 S_F 통과, E_op = OP_FAIL 또는 OP_UNDETERMINED (판정 자본) | `CONFIRMED_NO_OPERATING_VALUE` | 가설은 지지, 운용 가치 미달 (PAPER_CANDIDATE 아님) |
+| 18 | – | 최종 분석에서 S_F 통과(10.7), E_op = OP_PASS | `CONFIRMED` | PAPER_CANDIDATE |
 
-- **REJECT는 5·6행(확증 기간의 충분한 실패 증거), 10·13행(유의한 실패), 14행(사전 위험 한도)뿐이다.** 증거 부족은 모두 RESEARCH_MORE
-  또는 미확정 코드(`ECONOMIC_INCONCLUSIVE`, `UNDERPOWERED`, `HOLDOUT_WEAK`, `FORWARD_WEAK`, `FORWARD_INCONCLUSIVE`)다.
+- **REJECT는 5·6행(확증 기간 무익성·무작위보다 나쁨 기각), 10행(holdout 무익성 기각), 12행(사전 위험 한도), 14행(forward 무익성·무작위보다
+  나쁨 기각)뿐이다.** 점추정 음수나 검정력 부족은 REJECT가 아니며, 모두 RESEARCH_MORE 또는 미확정 코드(`ECONOMIC_INCONCLUSIVE`,
+  `UNDERPOWERED`, `HOLDOUT_WEAK`, `PENDING_FORWARD_FINAL`, `FORWARD_INCONCLUSIVE`)다.
+- **CONFIRMED는 forward 단순 양수 수익률로는 나오지 않는다.** forward 데이터만으로 계산한 S_F(H1·H2 IUT + Holm)가 α_F에서 통과해야 한다(10.7).
 - 우선순위 근거: 데이터·표본 문제(1–3행)는 모든 결과를 무효로 만드므로 먼저 본다. 수수료 미확인(4행)은 판정 수수료 자체가 가정이므로
   REJECT보다 앞선다. 경제성 실패(5–7행)는 통계 유의성과 무관하게 판정하고, S는 E가 통과한 경우에만 결과를 가른다(8행).
-- holdout은 10행(유의한 실패)이 아니면 forward로 진행한다. holdout이 약했던 전략(11행 조건)은 forward 데이터가 생긴 뒤에도
-  12·16행에서 24개월 기준을 적용받는다.
-- forward "통과"는 12개월 이상(holdout이 약했으면 24개월 이상)에서 net > 0, B1 대비 초과 ≥ 0, MDD ≤ 확증 평가 MDD × 1.5다.
+- holdout은 10행(무익성 기각)이 아니면 forward로 진행한다. `HOLDOUT_WEAK` 기록은 L축 보고에 남고, forward 판정 규칙은 같다
+  (forward 검정이 선택과 독립이므로 보정이 따로 필요 없다, 2절).
+- 12행(위험 한도)은 매월 확인하므로 13행(대기)보다 앞에 둔다. 14행 무익성은 중간·최종 분석 시점에만 판정하고, 그 사이에는 직전 분석 결과를 유지한다.
+- holdout을 개봉하지 않으면(9행에 해당하는 전략이 없으면) holdout과 forward 잠금은 유지되고 forward 평가도 없다(8.1, 19절).
 - 각 결과에는 네 축(Q, S, E, L)과 E_op 값을 함께 기록한다. 예: `Q=VALID, S=FAIL, E=PASS, L=L1 → UNDERPOWERED`.
 - secondary는 최대 RESEARCH_MORE. **PAPER_CANDIDATE도 실거래·Paper 승격이 아니다.** Paper Trading 설계를 검토할 자격만 뜻한다.
 
@@ -401,16 +482,19 @@ AI를 결정 경로에 넣는 전략은 별도 study로 다루고, 그 경우 9�
 
 가격·수익률은 분석하지 않았다. 이 표본(9일·9시간)은 가설 선택에 쓰지 않는다. 상세는 부록 B.
 
-## 16. 수집·검증 실행 순서 (고정 후, 각 단계 사용자 승인)
+## 16. 수집·검증 실행 순서 (각 단계 사용자 승인)
 
+0. **고정 전:** 판정 확률 합성 시뮬레이션(진짜 Sharpe별 REJECT·RESEARCH_MORE·통과 확률, 10.6·10.7 표의 근사 확인)과 잠금 구현(19절).
+   결과에 따라 18.1 결정을 확정한 뒤 고정한다.
 1. 일봉 전체: `candles-pull --interval day --start 2017-01-01T00:00:00Z --end <당일 00:00Z> --page-count 200 --max-pages 25` (약 18 요청, 약 15초)
 2. 1시간봉 전체: 같은 범위, `--max-pages 420` (약 396 요청, 약 2–3분, 약 29 MB)
-3. 품질 판정 Q1–Q10 (수익률 미열람)
+3. 데이터 구성(19절): 확증 구간은 공개 파일로, holdout·제외 구간은 잠금 파일로 분리. 품질 판정 Q1–Q10 (확증 구간 수익률 미열람, 잠금 구간은 집계값만)
 4. 7일 이상 뒤: 최근 60일 재수집(일봉 1, 1시간봉 8 요청)과 일봉 전체 재수집(약 18 요청) → Q11, Q12
 5. 백테스트 구현 (3–4단계 대기 중 합성 데이터로 개발 가능)
-6. 확증 평가 → S·E·E_op·종합 판정 → Q13
-7. 일봉 전체 재수집(Q12) 후 historical holdout 1회 개봉
-8. forward 월 1회 수집 (일봉 `--last 35`, 1시간봉 `--last 840`, 자동 반복 없음)
+6. 확증 평가 → S·E·E_op·종합 판정 → Q13. 확증 결과 파일의 SHA를 manifest에 기록 (holdout 개봉 전 결과 고정)
+7. 9행에 해당하는 전략이 있으면 일봉 전체 재수집(Q12) 후 historical holdout 1회 개봉 (19.2). 없으면 개봉하지 않음
+8. forward 월 1회 수집 (일봉 `--last 35`, 1시간봉 `--last 840`, 자동 반복 없음). 수집분은 즉시 봉인(19.3)
+9. forward 중간 분석(12개월, 실패 판정만), 최종 분석(T_F)
 
 모든 live 수집은 같은 인자의 dry-run을 먼저 보이고, UTC 00:00–00:05와 정시 직후 3분을 피하며, 직후 `candles-verify`를 실행한다.
 상장 이전 `to`가 오류를 반환하면 원본을 보존하고 재수집 승인을 요청한다.
@@ -423,16 +507,85 @@ AI를 결정 경로에 넣는 전략은 별도 study로 다루고, 그 경우 9�
 
 ## 18. 고정 전 결정 사항 (사용자)
 
+### 18.1 감사 반영 결정 (선택지와 근거, 결정 전에는 고정 불가)
+
+| ID | 항목 | 선택지 | 근거·영향 | 비고 |
+|---|---|---|---|---|
+| D1 | 무익성 최소 효과 θ_min (연 Sharpe) | 0.3 / 0.5 / 0.7 | 작을수록 "작지만 양의 효과"를 덜 REJECT하지만 REJECT 자체가 드물어짐. 확증 6년, α_fut 0.05에서 진짜 SR 0의 REJECT 확률 약 18 / 34 / 53 %, 진짜 SR 0.5의 거짓 REJECT 약 1.6 / 5 / 12 % (정규 근사) | 이전 초안 값은 0.5 |
+| D2 | 무익성·무작위보다 나쁨 유의수준 α_fut | 0.05 / 0.10 | 0.10이면 결론이 더 자주 나지만 거짓 REJECT가 두 배 | 이전 초안 값은 0.05 (95 % 상한) |
+| D3 | 무익성 REJECT에 Holm 적용 (primary 4개) | 적용 / 미적용 | 적용: 4개 전체 거짓 REJECT ≤ α_fut (S와 대칭). 미적용: 전략별 α_fut, 기대 거짓 REJECT 최대 4·α_fut | – |
+| D4 | forward S_F에 H2 포함 | 포함(IUT) / H1만 | 포함: 확증 S와 같은 주장(시점 선택 가치까지), 검정력 낮음. H1만: 자산 증가만 확인 | – |
+| D5 | forward 유의수준 α_F | 0.05 / 0.10 / 0.20 | 10.7 표: 24개월에서 거짓 통과 5 / 10 / 20 %, 진짜 SR 0.5 통과 약 17 / 28 / 45 % | CONFIRMED는 실거래가 아니라 Paper 설계 자격이므로 확증 단계보다 완화할 여지가 있음 |
+| D6 | forward 최종 분석 시점 T_F | 12 / 24 / 36개월 | 길수록 검정력이 오르지만 결론이 늦어짐. 12면 중간 분석 없음 | – |
+| D7 | 중간·최종 무익성의 α 배분 | 각 α_fut/2 / 각 α_fut / 중간 분석 없음 | 두 번 판정하면 거짓 REJECT가 최대 2·α_fut. α_fut/2는 전체 α_fut 보장(Bonferroni) | – |
+| D8 | 구간 경계의 열린 포지션 | 가상 진입·청산 + 비용 / 비용 없이 시가 평가 | 전자: 구간이 독립 운용 기간이 되고 보수적(구간당 최대 왕복 1회분 비용). 후자: 왜곡이 작지만 낙관적. 어느 쪽이든 나머지는 보고 | 8.1은 전자로 작성 |
+| D9 | historical holdout 끝 H_end | 2026-10-02 / 동결일 전날 | 2026-10-03 이후 가격 일부가 이미 노출됨(부록 B). 전자는 노출 날짜를 holdout에서 빼고 제외 구간으로 둠. 후자는 노출을 기록만 함 | "노출 데이터는 미열람으로 간주하지 않음" 원칙에는 전자가 맞음 |
+
+### 18.2 기존 결정 사항
+
 | # | 항목 | 현재안 |
 |---|---|---|
-| 1 | 계정 수수료 | 공식 확인 전 25 bp (보수적 가정) |
-| 2 | 계획 자본 / 판정 자본 | 100만 / 500만 / 1,000만 KRW, 판정은 1,000만 |
-| 3 | 시장 충격 가정 | ι_ref = 1.0 bp @ 100만 KRW, √ 스케일 |
-| 4 | 무익성 최소 효과 | 연 Sharpe 0.5 (민감도 0.3·0.7) |
-| 5 | 양(+)의 연도 비율 | 60 % (민감도 50·70 %) |
-| 6 | 품질 임계값 | 5절 (민감도 0.5배·2배) |
-| 7 | AI_ops 세션 빈도·단가, Infra 입력값 | 미정 |
-| 8 | guard 규칙 (`candles-pull` live, holdout 개봉 명령) | 제안만 됨, 사용자 결정 |
+| G1 | 계정 수수료 | 공식 확인 전 25 bp (보수적 가정) |
+| G2 | 계획 자본 / 판정 자본 | 100만 / 500만 / 1,000만 KRW, 판정은 1,000만 |
+| G3 | 시장 충격 가정 | ι_ref = 1.0 bp @ 100만 KRW, √ 스케일 |
+| G4 | 양(+)의 연도 비율 | 60 % (민감도 50·70 %) |
+| G5 | 품질 임계값 | 5절 (민감도 0.5배·2배) |
+| G6 | AI_ops 세션 빈도·단가, Infra 입력값 | 미정 |
+| G7 | guard 규칙 (19.5) | 사양만 있음, 구현과 적용은 사용자 결정 |
+
+## 19. v0.6 잠금 설계 (후속 구현 사양, 아직 구현하지 않음)
+
+v0.4의 `LockedTestVault`(`research/split.py`)와 같은 원칙(한 번만 개봉, 개봉 기록을 먼저 쓰고 읽기, 해시 대조)을 v0.6 데이터 구조에 맞게 새로
+만든다. **잠금의 1차 장치는 코드(vault), 2차 장치는 guard다.** guard는 문자열 매칭이라 우회 공백이 있으므로(기존 xfail) 단독으로 믿지 않는다.
+
+### 19.1 데이터 구성
+
+`data/processed/research_v06/<run>/`:
+- `manifest.json`: prereg·config SHA, 사용한 raw pull ID와 SHA, 코드 커밋, Python 버전, 구간 경계(H_end, 동결일), 접근 기록, 단계별 결과 SHA
+- `public/confirmatory.jsonl.gz`: 끝 시각 ≤ 2024-04-01 00:00 UTC인 캔들(warmup 포함)
+- `locked/holdout.jsonl.gz`: historical holdout과 제외 구간 캔들(제외 구간은 forward lookback 용도)
+- `locked_forward/forward_YYYYMM.jsonl.gz`: 월별 forward 캔들, 수집 즉시 봉인
+
+데이터 구성 명령만 raw 페이지를 읽어 이 파일들을 만든다. 그 밖에 raw 페이지를 읽는 것은 `candles-verify`(해시·Replay, 가격 출력 없음)뿐이다.
+
+### 19.2 HistoricalHoldoutVault
+
+- `open_once(preregistration_sha256, config_sha256)`. 개봉 조건(모두 충족):
+  1. 확증 평가 결과 파일이 존재하고 그 SHA가 manifest에 기록됨 (결과를 먼저 고정)
+  2. 11.3의 9행에 해당하는 전략이 하나 이상
+  3. 접근 횟수 0, 구성 시 해시와 일치, prereg·config 해시 일치, Q12 전 구간 재수집 완료
+- 개봉 기록(시각, 호출자, 해시)을 manifest에 먼저 쓰고 읽는다. 실패해도 1회 사용으로 센다.
+- 반환 범위는 holdout 구간 평가와 forward lookback에 필요한 행뿐이다.
+
+### 19.3 ForwardVault
+
+- `seal(month)`: 월별 수집 직후 구성 명령이 forward 파일을 만들고 SHA를 기록한다. 내용은 출력하지 않는다.
+- `open_analysis(kind)`: kind ∈ {interim, final}. interim은 forward 12개월 이상에서 한 번, final은 T_F 이상에서 한 번만 허용한다.
+  historical holdout이 이미 개봉되어 있어야 한다(8.1 순서). 각 개봉은 manifest에 먼저 기록한다.
+- 위험 한도(11.3 12행)의 월별 확인은 MDD 비교 결과(통과/위반)만 반환하고 수익률·가격은 반환하지 않는다.
+
+### 19.4 품질 도구의 출력 제한
+
+잠금 구간(holdout, 제외 구간, forward)에 대한 품질 검사(Q2–Q12)는 건수·비율·통과 여부만 출력한다. 가격, 수익률, 날짜별 값은 출력하지 않는다.
+
+### 19.5 guard·권한 사양 (사용자 승인 후 구현, `.claude/` 변경)
+
+| 대상 | 규칙 | 예외 |
+|---|---|---|
+| `data/raw/upbit/candles_v06/**/pages/*.json` 직접 읽기 (Read, Grep, cat, type, Get-Content 등) | deny | `sha256sum`, `ls` |
+| `data/processed/research_v06/**/locked*/**` 읽기 | deny (v0.4 `locked` 규칙과 같은 방식) | `sha256sum`, `ls` |
+| 위 두 경로 수정·삭제 | deny (`settings.json` deny 목록) | 없음 |
+| `candles-pull` (live) | ask | `--dry-run`, `--source fixture` |
+| holdout 개봉 명령, forward 분석 명령 | ask | 없음 |
+
+- 회귀 테스트: 위 규칙별 허용·차단 명령 목록을 `tests/test_agent_guard.py`에 추가한다.
+- 한계: Python 한 줄 실행이나 런타임에 조립한 경로는 문자열 매칭이 보지 못한다(기존 xfail 2건과 같은 유형). 그래서 vault의 접근 기록과
+  해시 대조가 1차 증거다.
+
+### 19.6 이미 노출된 데이터
+
+부록 B에 노출 범위를 기록한다. 노출된 날짜는 어떤 잠금 구간의 "미열람 데이터"로도 취급하지 않는다(D9). 잠금 구현 전에 수집한 raw 페이지는
+이미 읽기 가능 상태였으므로, 잠금 구현 이후의 접근 기록만 잠금 증거로 인정한다.
 
 ## 부록 A. config 초안 (`configs/research_v06.toml` 예정, 아직 파일 생성 안 함)
 
@@ -471,9 +624,12 @@ threshold_sensitivity_factors = [0.5, 2.0]   # report only
 warmup_days = 120
 confirmatory_end = "2024-03-31"
 confirmatory_sub_start = "2022-07-01"   # report only
-holdout_start = "2024-04-01"            # locked, opened once
-forward_min_months = 12
-forward_max_months = 24
+confirmatory_data_end_utc = "2024-04-01T00:00:00Z"  # 8.1: confirmatory reads candles ending <= this
+holdout_start = "2024-04-01"            # locked (19.2), opened once
+# holdout_end = "2026-10-02"            # D9 PENDING: "2026-10-02" (exclude exposed days) | day before freeze
+forward_interim_months = 12             # failure checks only (10.7)
+# forward_final_months = 24             # D6 PENDING: 12 | 24 | 36
+boundary_rule = "virtual_entry_exit_with_costs"   # D8 PENDING: or "mark_to_market_no_cost"; the other is reported
 
 [strategy]
 primary = ["M20", "M60", "M120", "R5"]
@@ -517,18 +673,33 @@ seed = 20261012
 hac_lag_days = 20
 multiple_testing = "holm_on_iut_max_p"  # pS = max(p1, p2), Holm over the 4 primary
 alpha_one_sided = 0.05
-futility_min_annual_sharpe = 0.5
-futility_sensitivity = [0.3, 0.7]       # report only
-futility_quantile = 0.95
+futility_null = "mu >= theta_min * sd / sqrt(365)"   # 10.6 (1), left-sided, shifted stationary bootstrap
+# futility_min_annual_sharpe = 0.5      # D1 PENDING: 0.3 | 0.5 | 0.7
+futility_sensitivity = [0.3, 0.5, 0.7]  # report only
+# futility_alpha = 0.05                 # D2 PENDING: 0.05 | 0.10 (also used for worse-than-random)
+# futility_holm = true                  # D3 PENDING: true | false (over the 4 primary)
+difference_test_vs_confirmatory = "report_only"   # winner's curse, never a REJECT basis
+
+[forward]
+# include_h2 = true                     # D4 PENDING: true (IUT max(p1, p2)) | false (H1 only)
+# alpha = 0.10                          # D5 PENDING: 0.05 | 0.10 | 0.20
+# interim_futility_alpha = "alpha_fut/2"   # D7 PENDING: alpha_fut/2 | alpha_fut | no interim
+confirmed_requires = "S_F pass at final analysis"  # simple positive forward return is never enough
+
+[vault]
+public = "public/confirmatory.jsonl.gz"
+holdout = "locked/holdout.jsonl.gz"
+forward = "locked_forward/forward_YYYYMM.jsonl.gz"
+holdout_open_requires = ["confirmatory_results_sha_recorded", "row9_strategy_exists", "access_count_0", "q12_done"]
+forward_analyses = ["interim", "final"]  # each once, after the historical holdout is opened
 
 [decision]
 min_confirmatory_years = 5
 min_roundtrips = 20
 min_positive_year_share = 0.60
 positive_year_sensitivity = [0.50, 0.70]   # report only
-forward_max_mdd_ratio = 1.5
-holdout_fail_alpha = 0.05
-forward_fail_alpha = 0.05
+forward_max_mdd_ratio = 1.5            # RISK_LIMIT, checked monthly (pass/fail only)
+# holdout/forward REJECT = futility rejection only (10.6); alphas come from D2/D7
 ```
 
 ## 부록 B. 2026-10-12 수집 기록
@@ -540,3 +711,58 @@ forward_fail_alpha = 0.05
 
 - 로컬 수신 시각과 서버 `Date`의 차이는 1 s 미만이다(`Date`는 초 단위).
 - `to`에 미래 경계를 넣었으므로 `to`의 경계 포함 여부는 이 수집으로 판별되지 않았다.
+
+### B.1 노출 기록 (미열람 데이터로 간주하지 않음)
+
+| # | 일시 (UTC) | 경로 | 노출된 가격 범위 | 노출 주체 |
+|---|---|---|---|---|
+| X1 | 2026-10-12 01:42 | 캔들 API 1차 확인, 응답을 화면에 출력(저장 안 함) | 일봉 2026-10-03 ~ 10-12(10-12 진행 중). 1시간봉 10개: 요청 시각 기준 2026-10-11 16:00 ~ 10-12 01:00 (**추정**: 출력은 남아 있지 않고 count = 10과 요청 시각으로 계산) | AI 에이전트, 사용자 화면 |
+| X2 | 2026-10-12 09:47 | 위 두 pull의 원본 페이지를 에이전트가 직접 읽어 필드 대조 | 일봉 2026-10-03 ~ 10-12(10-12 진행 중), 1시간봉 2026-10-12 00:00 ~ 09:00 | AI 에이전트 |
+| X3 | 2026-10-12 | `tests/test_upbit_candles.py`의 합성 행 일부에 X1의 실제 값을 사용 | 2026-10-12 일봉 시가·고가·저가·종가·거래량 일부, 2026-10-03 일봉 거래량 | 저장소(추적 파일) |
+| X4 | 상시 | AI 모델 학습 데이터 | BTC 가격 흐름 전반, 2026-06까지 (확증 평가 전체와 holdout 2024-04 ~ 2026-06 포함) | AI 모델 |
+| X5 | 상시 | 사람 연구자의 일반 지식 | 범위 미상, 공개된 BTC 가격 흐름 전반으로 가정 | 사용자 |
+
+- 노출 구간 합계(X1–X3): **2026-10-03 00:00 ~ 2026-10-12 09:47 UTC**. D9에서 H_end = 2026-10-02를 고르면 이 구간은 holdout이 아니라 제외 구간이다.
+- X4·X5 때문에 L1·L2는 구조적으로 "알려진 가격"이며(2절), 이 한계는 잠금으로 해결되지 않는다. 잠금은 **분석 과적합**(수익률을 계산해 보고
+  규칙을 고치는 것)을 막는 장치다.
+- 잠금 구현(19절) 이후의 모든 접근은 vault 접근 기록으로 남기고, 예외적 열람이 생기면 이 표에 추가한다.
+
+## 부록 C. 감사 반영 검토: 합성 반례, 우선순위, 정의 영향
+
+수치는 정규 근사 손계산이며 시뮬레이션으로 확인하지 않았다(16절 0단계에서 확인). 연 Sharpe의 표준오차는 1/√T년으로 근사한다(확증 6년 약 0.41,
+holdout 2.5년 약 0.63, forward 12·24개월 1.0·0.71).
+
+### C.1 합성 반례: 수정 전후 판정
+
+| ID | 합성 상황 | 수정 전 (PR #9 초안) | 수정 후 |
+|---|---|---|---|
+| C1-1 | M120이 2024-02-01에 진입해 확증 구간 끝까지 보유. holdout 구간 2024-05-15에 −30 % 하락 후 청산. 확증 연 net 점추정 +4 % | "진입 구간 귀속"으로 holdout 손실 ln 0.7 = −0.357이 확증에 들어감 → 확증 일평균 약 −1.6×10⁻⁴(연 약 −5.9 %p) → E-a 점추정 실패로 뒤집힘. 계산하려면 holdout 가격을 읽어야 함(잠금 위반) | 2024-03-31 01:00 근사가로 가상 청산, 비용 약 33 bp → 확증 연 net 영향 약 −0.06 %p, holdout 미열람. 왜곡 크기는 보고 |
+| H1-1 | 확증 관측 연 Sharpe −0.1 | 무익성 상한 −0.1 + 0.67 = 0.57 > 0.5 → `ECONOMIC_INCONCLUSIVE` | 같음 (θ_min 0.5, α_fut 0.05일 때). 관측 −0.3이면 상한 0.37 < 0.5 → `UNPROFITABLE` REJECT. **점추정 음수 자체는 REJECT가 아님** |
+| H1-2 | 진짜 연 Sharpe 0.5. 확증에서 S 통과(관측 1.13), holdout 관측 −0.2 (진짜 0.5에서 약 13 % 확률로 나오는 값) | 차이 검정 z = (1.13 + 0.2)/0.75 = 1.77, p ≈ 0.038 → `HOLDOUT_FAIL` REJECT. 이런 거짓 REJECT 확률 약 21 % | holdout 무익성: 상한 −0.2 + 1.04 = 0.84 > 0.5 → 미기각 → `HOLDOUT_WEAK`(RM), forward 진행. 거짓 REJECT 확률 약 5 % |
+| H2-1 | 진짜 연 Sharpe 0(이력 기반 선택으로 L1·L2 통과). forward 12개월 관측 +0.2, B1 대비 초과 ≥ 0, MDD 정상 | net > 0, 초과 ≥ 0 → `CONFIRMED`(PAPER_CANDIDATE). 이런 거짓 통과 확률 약 35–50 % | 12개월 중간 분석: 무익성 상한 0.2 + 1.645 = 1.85 > 0.5 → 미기각 → `PENDING_FORWARD_FINAL`. 24개월 관측 0.1: z = 0.14, p ≈ 0.44 → `FORWARD_INCONCLUSIVE`(study 종료). 거짓 통과 ≤ α_F |
+| H2-2 | 진짜 연 Sharpe 1.0, forward 24개월 관측 1.0 | `CONFIRMED` | z = 1.41, p ≈ 0.079 → α_F = 0.10·0.20이면 `CONFIRMED`, 0.05면 `FORWARD_INCONCLUSIVE`. **D5 선택이 판정을 바꾼다** |
+| H5-1 | 품질 점검 중 에이전트가 holdout 구간 raw 페이지(예: 2025년 가격)를 직접 읽음 | 허용되고 기록도 없음 | 사양상 guard deny(19.5). vault 밖 접근은 기록 대상. 잠금 구간 품질 출력은 집계값만(19.4) |
+
+### C.2 판정 코드 우선순위 검토
+
+| 확인 항목 | 결과 |
+|---|---|
+| 품질·표본(1–3행)이 경제성 판정보다 앞섬 | 충돌 없음. 데이터가 무효면 다른 결과를 내지 않음 |
+| 수수료 미확인(4행)이 REJECT(5·6행)보다 앞섬 | 충돌 없음. 판정 수수료가 가정인 상태에서 REJECT하지 않음 |
+| E가 S보다 앞섬(5–8행) | 충돌 없음. 경제성 실패는 유의성과 무관하게 판정하고, S는 E 통과 후에만 결과를 가름 |
+| 위험 한도(12행)가 forward 대기(13행)보다 앞섬 | 수정 반영. 이전에는 12개월 전 위험 한도 위반이 대기 행에 먼저 걸렸음 |
+| forward 무익성(14행)과 최종 판정(16–18행) | 무익성은 분석 시점에만 판정하고, 최종 분석에서 14행 미해당일 때만 16–18행으로 감 |
+| `HOLDOUT_WEAK`와 forward 행 | 11행은 forward 데이터가 없을 때만 해당. 이후 12–18행 적용 |
+| holdout 미개봉 | 9행 해당 전략이 없으면 holdout·forward 모두 잠금 유지 (8.1, 19.2) |
+| 같은 전략이 두 행에 동시에 해당 | 위에서부터 처음 해당하는 행만 적용하므로 결과는 하나. 단, 축 값(Q, S, E, L, E_op)은 모두 기록 |
+
+### C.3 기존 H1·H2 정의에 미치는 영향
+
+- **C1:** 구간 경계에서 가상 진입·청산 비용이 r_t에 들어간다(구간당 최대 2일). H1·H2의 귀무가설·통계량·p값 식은 그대로이고, 표본이
+  구간별로 바뀔 뿐이다. B1도 같은 경계 규칙으로 생성하므로 H2의 교환 가능성 전제가 유지된다. bootstrap 블록은 구간을 넘지 않는다.
+- **H1 수정:** S(10.2–10.4)는 바뀌지 않는다. 바뀐 것은 REJECT 근거(10.6)뿐이다. 무익성 검정은 같은 stationary bootstrap을 귀무가설
+  경계로 옮겨 쓰므로 새 재표본 방법을 도입하지 않는다. 차이 검정은 보고 전용으로 내렸다.
+- **H2 수정:** forward 검정(10.7)은 확증 S와 같은 정의를 forward 데이터에 적용한 것이다. forward에 올라가는 전략 집합은 forward 시작 전에
+  정해지므로 forward 데이터와 독립이고, Holm은 그 집합 안에서만 적용한다.
+- **새 결정값:** θ_min, α_fut, Holm 여부, forward H2 포함, α_F, T_F, 중간 분석 α 배분, 경계 규칙, H_end. 모두 18.1에 선택지와 근거를 적었고,
+  부록 A에서는 PENDING으로 주석 처리했다.
