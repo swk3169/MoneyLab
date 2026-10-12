@@ -77,6 +77,78 @@ def test_selection_stress_forces_every_strategy_forward_as_track_a():
     assert set(out.values()) == {"CONFIRMED"}
 
 
+def test_forward_h2_is_holm_adjusted_within_the_forward_family_and_never_changes_codes():
+    codes = {"M20": "CONFIRMED", "M60": "FORWARD_INCONCLUSIVE", "M120": "HOLDOUT_FAIL", "R5": "UNPROFITABLE"}
+    before = dict(codes)
+    final = {n: window() for n in MC.NAMES}
+    final["M20"]["p2"], final["M60"]["p2"], final["M120"]["p2"] = 0.01, 0.04, 0.0001
+    h2 = MC.forward_h2(codes, final, MC.Procedure(alpha_f=0.05))
+    assert codes == before                                       # reported separately, codes untouched
+    assert set(h2) == {"M20", "M60"}                              # HOLDOUT_FAIL / UNPROFITABLE never went forward
+    assert h2["M20"]["p2_holm"] == pytest.approx(0.02) and h2["M60"]["p2_holm"] == pytest.approx(0.04)
+    assert h2["M20"]["pass"] and h2["M60"]["pass"]
+    final["M20"]["p2"] = 0.03                                     # Holm 0.06 / 0.06 -> neither passes
+    assert not any(v["pass"] for v in MC.forward_h2(codes, final, MC.Procedure(alpha_f=0.05)).values())
+
+
+def test_forward_h2_counts_only_strategies_that_reached_the_final_analysis():
+    codes = {"M20": "FORWARD_FAIL", "M60": "RISK_LIMIT", "M120": "UNDERPOWERED", "R5": "ECONOMIC_INCONCLUSIVE"}
+    final = {n: window() for n in MC.NAMES}
+    final["M20"]["p2"] = final["M60"]["p2"] = 0.0001
+    h2 = MC.forward_h2(codes, final, MC.Procedure())
+    assert set(h2) == {"M20", "M60"} and not any(v["evaluated"] or v["pass"] for v in h2.values())
+    assert MC.forward_h2({n: "UNDERPOWERED" for n in MC.NAMES}, final, MC.Procedure()) == {}
+
+
+def test_aggregate_reports_forward_h2_separately_from_decisions():
+    truth = {n: {"sr_E0": 0.5, "sr_E1": 0.4, "sr_E2": 0.4, "excess_E0": 1e-4} for n in MC.NAMES}
+    truth["R5"]["excess_E0"] = -1e-4                               # H2 null true for R5
+    strategies = {n: {"p1": 0.5, "p2": 0.5, "s_pass": True, "p_rej": 1.0, "rej_path": "futility",
+                      "conf_status": "TRACK_A", "roundtrips": 30} for n in MC.NAMES}
+    passing = {"M20": {"p2": 0.01, "p2_holm": 0.02, "evaluated": True, "pass": True},
+               "R5": {"p2": 0.01, "p2_holm": 0.02, "evaluated": True, "pass": True}}
+    rec = {"strategies": strategies, "A": {"M20": "CONFIRMED", "R5": "FORWARD_INCONCLUSIVE"}, "A_h2": passing,
+           "A+B": {"M20": "CONFIRMED", "R5": "FORWARD_INCONCLUSIVE"}, "A+B_h2": {}}
+    m = MC.aggregate([rec, {**rec, "A_h2": {}}], truth, MC.Procedure())
+    m20 = m["per_strategy"]["M20"]["A"]
+    assert m20["paper"]["estimate"] == 1.0                        # decision rate unchanged by H2
+    assert m20["forward_h2"]["pass"]["estimate"] == 0.5
+    assert m20["forward_h2"]["pass_given_forward_h1_pass"]["estimate"] == 0.5
+    assert m["study"]["A"]["forward_h2_false_pass_fwer"]["estimate"] == 0.5   # R5 passed H2 once though its null holds
+    assert m["study"]["A+B"]["forward_h2_false_pass_fwer"]["estimate"] == 0.0
+
+
+def test_forward_h2_conditional_denominators_are_the_forward_h1_passes_by_track():
+    truth = {n: {"sr_E0": 0.5, "sr_E1": 0.4, "sr_E2": 0.4, "excess_E0": 1e-4} for n in MC.NAMES}
+    strategies = {n: {"p1": 0.5, "p2": 0.5, "s_pass": False, "p_rej": 1.0, "rej_path": "futility",
+                      "conf_status": "UNDERPOWERED", "roundtrips": 30} for n in MC.NAMES}
+
+    def rec(code, h2_pass):
+        h2 = {"M60": {"p2": 0.01, "p2_holm": 0.01, "evaluated": True, "pass": h2_pass}}
+        return {"strategies": strategies, "A": {}, "A_h2": {}, "A+B": {"M60": code}, "A+B_h2": h2}
+
+    records = [rec(MC.EXPLORATORY_PASS, True), rec(MC.EXPLORATORY_PASS, False), rec("CONFIRMED", True),
+               rec("FORWARD_INCONCLUSIVE", True)]
+    h2 = MC.aggregate(records, truth, MC.Procedure())["per_strategy"]["M60"]["A+B"]["forward_h2"]
+    assert h2["pass_given_forward_h1_pass"] == {"estimate": 2 / 3, "mc_se": pytest.approx((2 / 9 / 3) ** 0.5), "n": 3}
+    assert h2["pass_given_forward_h1_pass_track_a"]["n"] == 1 and h2["pass_given_forward_h1_pass_track_a"]["estimate"] == 1.0
+    assert h2["pass_given_forward_h1_pass_track_b"]["n"] == 2 and h2["pass_given_forward_h1_pass_track_b"]["estimate"] == 0.5
+    assert h2["pass_given_final_analysis"]["n"] == 4                        # FORWARD_INCONCLUSIVE counts here only
+    assert h2["pass"]["estimate"] == 0.75
+
+
+def test_rate_with_no_cases_is_none_not_nan():
+    assert MC._rate(0, 0) == {"estimate": None, "mc_se": None, "n": 0}
+    assert MC._rate(1, 4)["mc_se"] == pytest.approx((0.25 * 0.75 / 4) ** 0.5)
+
+
+def test_replication_record_carries_forward_h2_per_mode():
+    r = MC.run_replication(DGP(), MC.Costs(), TINY_PROC, TINY_LAYOUT, False, seed=5)
+    assert set(r) >= {"A", "A+B", "A_h2", "A+B_h2"}
+    for mode in MC.MODES:
+        assert set(r[f"{mode}_h2"]) <= {n for n, c in r[mode].items() if c in MC.FORWARD_SET}
+
+
 def test_aggregate_counts_only_true_nulls_for_fwer_and_reports_mc_se():
     truth = {
         "M20": {"sr_E0": -0.1, "sr_E1": -0.2, "sr_E2": -0.2, "excess_E0": -1e-5},   # null for S
@@ -167,3 +239,5 @@ def test_cli_smoke_writes_manifest_and_results(tmp_path):
     assert len(result["records"]) == 2 and "s_fwer" in result["metrics"]["study"]
     assert main(["research-v06-sim", "--list"]) == 0
     assert main(["research-v06-sim", "--scenario", "nope"]) == 1
+    assert main(["research-v06-sim", "--scenario", "null_flat", "--reps", "0", "--out", str(tmp_path / "x")]) == 1
+    assert not (tmp_path / "x").exists()

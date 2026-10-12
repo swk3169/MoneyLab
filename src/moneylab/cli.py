@@ -704,6 +704,9 @@ def cmd_research_v06_sim(args: argparse.Namespace, settings: Settings) -> int:
     if not names or unknown:
         console.print(f"[red]give --scenario NAME (or all); unknown: {unknown}[/red]")
         return EXIT_ERROR
+    if args.reps < 1 or args.bootstrap < 1 or args.draws < 1 or args.workers < 1:
+        console.print("[red]--reps, --bootstrap, --draws and --workers must be >= 1[/red]")
+        return EXIT_ERROR
     proc = replace(v06mc.Procedure(), bootstrap=args.bootstrap, draws=args.draws)
     cfg = v06mc.RunConfig(reps=args.reps, seed=args.seed, workers=args.workers, truth_years=args.truth_years,
                           procedure=proc)

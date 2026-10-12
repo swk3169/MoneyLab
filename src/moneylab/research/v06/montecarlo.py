@@ -304,7 +304,27 @@ def run_replication(dgp: DGP, costs: Costs, proc: Procedure, layout: Layout, for
         }
     for mode in MODES:
         out[mode] = _decide(status, st, later, proc, mode, force_forward)
+        out[f"{mode}_h2"] = forward_h2(out[mode], later["final"], proc)
     return out
+
+
+FORWARD_SET = frozenset({"CONFIRMED", EXPLORATORY_PASS, "FORWARD_INCONCLUSIVE", "FORWARD_FAIL", "RISK_LIMIT"})
+FINAL_EVALUATED = frozenset({"CONFIRMED", EXPLORATORY_PASS, "FORWARD_INCONCLUSIVE"})
+
+
+def forward_h2(codes: dict[str, str], final: dict, proc: Procedure) -> dict[str, dict[str, Any]]:
+    """D4: forward H2 (B1 randomization on the forward window) reported SEPARATELY. It never changes
+    a decision code. Holm family = the forward set F of the draft (10.7): every strategy that went
+    forward after the holdout, fixed before forward data exist - so RISK_LIMIT and FORWARD_FAIL stay
+    in the family (dropping them would make the family depend on forward outcomes). A pass counts
+    only for strategies that reached the final analysis without failing: CONFIRMED,
+    FORWARD_EXPLORATORY_PASS and FORWARD_INCONCLUSIVE (H2 is judged regardless of H1)."""
+    fam = [n for n in NAMES if codes.get(n) in FORWARD_SET]
+    if not fam:
+        return {}
+    adj = holm([final[n]["p2"] for n in fam])
+    return {n: {"p2": final[n]["p2"], "p2_holm": p, "evaluated": codes[n] in FINAL_EVALUATED,
+                "pass": codes[n] in FINAL_EVALUATED and p <= proc.alpha_f} for n, p in zip(fam, adj)}
 
 
 def _decide(status: dict[str, str], st: dict, later: dict, proc: Procedure, mode: str,
@@ -374,9 +394,13 @@ def _run_task(task: tuple) -> dict[str, Any]:
 
 # --- aggregation ---------------------------------------------------------------------------------
 
-def _rate(hits: int, n: int) -> dict[str, float]:
-    p = hits / n if n else float("nan")
-    return {"estimate": p, "mc_se": math.sqrt(p * (1 - p) / n) if n else float("nan"), "n": n}
+def _rate(hits: int, n: int) -> dict[str, float | None]:
+    """Proportion with its Monte Carlo standard error. n = 0 (a conditional rate with no cases)
+    gives None, not NaN: NaN breaks equality checks and is not valid JSON."""
+    if not n:
+        return {"estimate": None, "mc_se": None, "n": 0}
+    p = hits / n
+    return {"estimate": p, "mc_se": math.sqrt(p * (1 - p) / n), "n": n}
 
 
 def truth_flags(truth: dict[str, dict[str, float]], theta_min: float) -> dict[str, dict[str, bool]]:
@@ -410,12 +434,30 @@ def aggregate(records: list[dict[str, Any]], truth: dict, proc: Procedure) -> di
             row["confirmatory_status"][code] = _rate(sum(r["conf_status"] == code for r in recs), n)
         for mode in MODES:
             codes = [r[mode].get(name, "?") for r in records]
+            h2 = [r.get(f"{mode}_h2", {}).get(name) for r in records]
+            evaluated = [x for x in h2 if x and x["evaluated"]]
+            # forward H1 pass = survived the forward failure checks and Holm-adjusted p1 <= alpha_F; the
+            # code is CONFIRMED (track A) or FORWARD_EXPLORATORY_PASS (track B)
+            confirmed_or_explo = [(c, x) for c, x in zip(codes, h2) if c in PAPER_CODES or c == EXPLORATORY_PASS]
+            track_a = [x for c, x in confirmed_or_explo if c in PAPER_CODES]
+            track_b = [x for c, x in confirmed_or_explo if c == EXPLORATORY_PASS]
             row[mode] = {
                 "reject": _rate(sum(c in REJECT_CODES for c in codes), n),
                 "paper": _rate(sum(c in PAPER_CODES for c in codes), n),
                 "exploratory_pass": _rate(sum(c == EXPLORATORY_PASS for c in codes), n),
                 "research_more": _rate(sum(c not in REJECT_CODES and c not in PAPER_CODES for c in codes), n),
                 "codes": {c: _rate(codes.count(c), n) for c in sorted(set(codes))},
+                # D4: reported separately, never merged into the decision rates above
+                "forward_h2": {
+                    "pass": _rate(sum(1 for x in h2 if x and x["pass"]), n),
+                    "pass_given_final_analysis": _rate(sum(1 for x in evaluated if x["pass"]), len(evaluated)),
+                    "pass_given_forward_h1_pass": _rate(sum(1 for _, x in confirmed_or_explo if x and x["pass"]),
+                                                        len(confirmed_or_explo)),
+                    "pass_given_forward_h1_pass_track_a": _rate(sum(1 for x in track_a if x and x["pass"]),
+                                                                len(track_a)),
+                    "pass_given_forward_h1_pass_track_b": _rate(sum(1 for x in track_b if x and x["pass"]),
+                                                                len(track_b)),
+                },
             }
         res["per_strategy"][name] = row
 
@@ -441,6 +483,10 @@ def aggregate(records: list[dict[str, Any]], truth: dict, proc: Procedure) -> di
             lambda r, nm: nm in unprof and r[mode].get(nm) in PAPER_CODES), n) if unprof else None
         m["false_exploratory_pass_fwer"] = _rate(any_hit(
             lambda r, nm: nm in unprof and r[mode].get(nm) == EXPLORATORY_PASS), n) if unprof else None
+        h2_null = [nm for nm in NAMES if flags[nm]["h2_null"]]
+        m["forward_h2_false_pass_fwer"] = _rate(any_hit(
+            lambda r, nm: nm in h2_null and (r.get(f"{mode}_h2", {}).get(nm) or {}).get("pass", False)), n) \
+            if h2_null else None
         rejected = sum(1 for r in records if all(r[mode].get(nm) in REJECT_CODES for nm in NAMES))
         papered = sum(1 for r in records if any(r[mode].get(nm) in PAPER_CODES for nm in NAMES))
         m["study_reject"] = _rate(rejected, n)
