@@ -114,6 +114,7 @@ from moneylab.research.config import DEFAULT_CONFIG, load_config
 from moneylab.core.clock_monitor import read_log as read_clock_log
 from moneylab.core.clock_monitor import summarize as summarize_clock
 from moneylab.research.split import InsufficientDataError, SplitLockedError
+from moneylab.research.v06 import montecarlo as v06mc
 from moneylab.scanner import MarketScanner, ScanCriteria
 from moneylab.sizing.position import SizingLimits
 from moneylab.strategy.market_making import SymmetricMarketMaker
@@ -691,6 +692,42 @@ def cmd_candles_verify(args: argparse.Namespace, settings: Settings) -> int:
     return EXIT_OK if rep.ok else EXIT_ERROR
 
 
+def cmd_research_v06_sim(args: argparse.Namespace, settings: Settings) -> int:
+    """v0.6 DRAFT decision rules on SYNTHETIC paths (Monte Carlo). No market data, no API."""
+    scenarios = {s.name: s for s in v06mc.tier1_scenarios()}
+    if args.list:
+        for s in scenarios.values():
+            console.print(f"{s.name}: {s.description}", markup=False)
+        return EXIT_OK
+    names = list(scenarios) if args.scenario == ["all"] else args.scenario or []
+    unknown = [n for n in names if n not in scenarios]
+    if not names or unknown:
+        console.print(f"[red]give --scenario NAME (or all); unknown: {unknown}[/red]")
+        return EXIT_ERROR
+    proc = replace(v06mc.Procedure(), bootstrap=args.bootstrap, draws=args.draws)
+    cfg = v06mc.RunConfig(reps=args.reps, seed=args.seed, workers=args.workers, truth_years=args.truth_years,
+                          procedure=proc)
+    out = args.out or settings.processed_dir / "research_v06_sim" / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    try:
+        out.mkdir(parents=True, exist_ok=False)
+    except OSError as exc:
+        console.print(f"[red]cannot create {out}: {exc}[/red]")
+        return EXIT_ERROR
+    chosen = [scenarios[n] for n in names]
+    atomic_write_json(out / "manifest.json", v06mc.manifest(cfg, chosen))
+    console.print(f"SYNTHETIC Monte Carlo (NOT_EVIDENCE): {len(chosen)} scenario(s), reps {cfg.reps}, "
+                  f"bootstrap {proc.bootstrap}, B1 draws {proc.draws}, workers {cfg.workers} -> {out}", markup=False)
+    for s in chosen:
+        t0 = time.monotonic()
+        result = v06mc.run_scenario(s, cfg)
+        atomic_write_json(out / f"{s.name}.json", result)
+        study = result["metrics"]["study"]
+        console.print(f"  {s.name}: {time.monotonic() - t0:.1f}s, study PAPER(A) "
+                      f"{study['A']['study_paper']['estimate']:.4f}, REJECT(A) {study['A']['study_reject']['estimate']:.4f}",
+                      markup=False)
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="moneylab", description="MoneyLab - prediction market research (read-only)")
     p.add_argument("--version", action="version", version=f"moneylab {__version__}")
@@ -805,6 +842,18 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("pull_dir", type=Path, help="pull directory (.../candles_v06/<interval>_<market>_<stamp>)")
     cv.add_argument("--json", action="store_true")
     cv.set_defaults(func=cmd_candles_verify)
+
+    vs = sub.add_parser("research-v06-sim", help="v0.6 DRAFT rules on SYNTHETIC paths (Monte Carlo, offline)")
+    vs.add_argument("--scenario", action="append", help="scenario name (repeatable) or 'all'")
+    vs.add_argument("--list", action="store_true", help="list scenarios")
+    vs.add_argument("--reps", type=int, default=20)
+    vs.add_argument("--bootstrap", type=int, default=199)
+    vs.add_argument("--draws", type=int, default=99, help="B1 placements per test")
+    vs.add_argument("--workers", type=int, default=1)
+    vs.add_argument("--seed", type=int, default=20261012)
+    vs.add_argument("--truth-years", type=int, default=400, help="length of the long path for the scenario truth")
+    vs.add_argument("--out", type=Path, default=None, help="default data/processed/research_v06_sim/<stamp>")
+    vs.set_defaults(func=cmd_research_v06_sim)
 
     rb = sub.add_parser("research-build", help="v0.4: raw Upbit dataset -> grid/features/labels/split (offline)")
     rb.add_argument("dataset", type=Path, help="Upbit dataset directory (.../<session>/KRW-BTC)")
