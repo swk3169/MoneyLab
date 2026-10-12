@@ -12,7 +12,7 @@ AI 코딩 에이전트를 위한 MoneyLab 작업 지침.
 - Windows, Python 3.14 (`C:\MoneyLab\.venv`). 실행할 때는 항상 `.\.venv\Scripts\python.exe`를 쓴다.
 - 패키지는 `pip install -e . --no-deps`로 설치되어 있다 (src layout).
 - 테스트는 `.\.venv\Scripts\python.exe -m pytest`로 돌린다. 오프라인으로 실행되며 모두 통과해야 한다.
-- 실행: `python -m moneylab scan [--source fixture]`, `diagnose`, `book`, `simulate --strategy mm|mispricing [--recording <dir>]`, `record [--source fixture]`, `record --provider upbit [--source fixture] [--duration N]`, `record-verify <dir>`, `replay-check <upbit dir>`, `clock-monitor`, `research-build <upbit dir> [--dry-run]`, `research-stats <run>`, `research-final <run>`
+- 실행: `python -m moneylab scan [--source fixture]`, `diagnose`, `book`, `simulate --strategy mm|mispricing [--recording <dir>]`, `record [--source fixture]`, `record --provider upbit [--source fixture] [--duration N]`, `record-verify <dir>`, `replay-check <upbit dir>`, `clock-monitor`, `research-build <upbit dir> [--dry-run]`, `research-stats <run>`, `research-final <run>`, `candles-pull --interval day|hour (--last N | --start --end) [--dry-run] [--source fixture]`, `candles-verify <pull dir>`
 - 의존성을 추가하면 `pyproject.toml`(범위)과 `requirements*.txt`(고정 버전)를 함께 갱신하고, Python 3.14 호환성을 확인한다.
 
 ## 절대 규칙
@@ -35,6 +35,15 @@ AI 코딩 에이전트를 위한 MoneyLab 작업 지침.
 - maker rebate와 liquidity reward는 `estimated_*`와 `realized_*`로 분리한다. 추정치는 실현 PnL과 채택 판단에 넣지 않는다.
 - 원본 데이터는 `data/raw/<provider>/`, 가공 데이터는 `data/processed/`에 둔다. 둘 다 git에서 제외한다.
 - `research/`는 provider를 import하지 않는다. 사전등록(`docs/research_v04_preregistration.md`, `configs/research_v04.toml`)을 바꾸면 새 study다. test split은 `research-final`로만, run당 한 번 연다.
+
+## v0.6 캔들 수집 (`candles-pull`, `candles-verify`)
+
+- 모드는 세 가지다. `--dry-run`은 요청 계획(엔드포인트, 범위 UTC·KST, page_count, 최대 요청 수, 저장 위치)만 출력하고 요청·파일 쓰기가 없다. `--source fixture`는 합성 `tests/fixtures/upbit_candles_synthetic.json`으로 네트워크 없이 돌고 `data/raw/upbit/candles_v06-fixture/`에 `provenance = fixture`로 쓴다. 기본(live)은 Upbit 공개 REST(`/v1/candles/days`, `/v1/candles/minutes/60`)를 호출하고 `data/raw/upbit/candles_v06/`에 `provenance = real`로 쓴다.
+- **live 실행은 매번 사용자의 명시적 승인을 받는다.** guard와 `settings.json`에는 아직 `candles-pull` 승인 규칙이 없어서 확인 창이 뜨지 않는다. 승인 전에 먼저 같은 인자로 `--dry-run`을 실행해 보여준다. 승인 범위(구간 수, 요청 수)를 넘지 않도록 `--max-pages`를 지정한다.
+- `--last N`은 진행 중인 구간을 포함한 최근 N개 구간이다. 진행 중 캔들은 확정 규칙(구간 끝 + 120 s ≤ 로컬 수신 시각과 서버 `Date` 중 이른 쪽)에 따라 제외된다. UTC 00:00~00:05(KST 09:00~09:05)와 매 정시 직후 3분에는 실행하지 않는다.
+- 수집마다 새 디렉터리(`<interval>_<market>_<UTC stamp>/`)를 만들고 기존 파일은 덮어쓰지 않는다. `pages/NNNN.json`은 gzip을 푼 응답 본문이고 SHA-256은 이 바이트에 대해 계산한다.
+- live 수집 뒤에는 `candles-verify <pull dir>`로 해시·파일 목록·Replay 일치를 확인한다. 이 명령은 오프라인이고 파일을 쓰지 않는다. 수집 원본은 고치거나 지우지 않는다.
+- 캔들 수집은 데이터 검증이다. 사전등록(`docs/research_v06_preregistration_draft.md`)을 고정하기 전에는 가격·수익률을 분석하지 않는다.
 
 ## 작업 방식
 

@@ -10,7 +10,8 @@ Rate limit: 10 requests/s per IP, shared by the candle group (response header
 `Remaining-Req: group=candles; ...`).
 
 Response fields, verified against live responses on 2026-10-12 (10 day + 10 hour candles,
-KRW-BTC, HTTP 200; seen on stdout, not stored in data/raw) and the docs:
+KRW-BTC, HTTP 200; first seen on stdout at 01:42 UTC, then stored and verified at 09:47 UTC under
+data/raw/upbit/candles_v06/{day,hour}_KRW-BTC_20261012T0947*) and the docs:
   market, candle_date_time_utc, candle_date_time_kst   bucket START, "yyyy-MM-ddTHH:mm:ss", no tz
   opening_price (first trade), high_price, low_price, trade_price (close; current price while
   the bucket is open), timestamp (ms of the bucket's last tick), candle_acc_trade_price,
@@ -22,6 +23,12 @@ de-duplicate either way); first available date; whether past candles are revised
 
 Retries happen here (not in urllib3): build the HttpClient with `retries=0` (see
 `candle_http_client`). 451/401/403/418 and other 4xx are never retried.
+
+Raw bytes: `CandlePage.body` is `requests.Response.content`, i.e. the response body AFTER the
+transfer encoding is undone (Upbit sends `Content-Encoding: gzip`; urllib3 decompresses it).
+That decoded body is what candle_store writes to pages/NNNN.json and what its SHA-256 covers.
+The compressed wire bytes are not kept; the `Content-Encoding` header stays in the page meta.
+Parsing uses the same bytes, so the stored file is exactly what the quality report was built from.
 """
 
 from __future__ import annotations
@@ -364,16 +371,22 @@ def _gaps(starts: list[datetime], step: timedelta) -> list[dict[str, Any]]:
 def pull_candles(
     client: UpbitCandleClient, market: str, interval: str, start: datetime, end: datetime, *,
     sink: PageSink | None = None, settle_seconds: float = DEFAULT_SETTLE_SECONDS, max_pages: int = 10_000,
+    page_count: int = MAX_COUNT,
 ) -> CandlePull:
     """Closed candles with start in [start, end), oldest first, de-duplicated, never filled.
 
-    Pages are requested backwards from `end`. Each raw page goes to `sink` *before* parsing, so a
-    parse failure still leaves the evidence on disk. A candle counts only if its bucket ended at
-    least `settle_seconds` before the page's reference time (in-progress candles are dropped).
+    Pages of `page_count` rows are requested backwards from `end`. Each raw page goes to `sink`
+    *before* parsing, so a parse failure still leaves the evidence on disk. A candle counts only if
+    its bucket ended at least `settle_seconds` before the page's reference time (in-progress
+    candles are dropped).
     """
     market = validate_market(market)
     if interval not in INTERVALS:
         raise ValueError(f"interval must be one of {sorted(INTERVALS)}, got {interval!r}")
+    if not 1 <= page_count <= MAX_COUNT:
+        raise ValueError(f"page_count must be 1..{MAX_COUNT}, got {page_count}")
+    if max_pages < 1:
+        raise ValueError(f"max_pages must be >= 1, got {max_pages}")
     start, end = _require_utc(start, "start"), _require_utc(end, "end")
     if not (is_aligned(start, interval) and is_aligned(end, interval)):
         raise ValueError(f"start and end must be on {interval} bucket boundaries (UTC)")
@@ -388,7 +401,7 @@ def pull_candles(
     while True:
         if rep.pages >= max_pages:
             raise ProviderError(PROVIDER, f"page limit {max_pages} reached before {utc_iso(start)}")
-        page = client.fetch_page(market, interval, to, MAX_COUNT)
+        page = client.fetch_page(market, interval, to, page_count)
         index = rep.pages
         rep.pages += 1
         if sink is not None:
