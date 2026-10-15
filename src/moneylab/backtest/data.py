@@ -12,13 +12,15 @@
 from __future__ import annotations
 
 import bisect
-import hashlib
-import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from moneylab.domain.bars import INTERVALS, Bar, BarProvenance, require_utc
+# bars_sha256 lives in domain (one definition for the exporter and the backtest); re-exported here.
+from moneylab.domain.bars import INTERVALS, Bar, BarProvenance, bars_sha256, require_utc
+
+__all__ = ["CONFIRM_DELAY", "AsOfView", "BarSeries", "DataIntegrityError", "DuplicateBarError", "LookAheadError",
+           "QualityReport", "bars_sha256", "inspect_bars", "provenance_for"]
 
 # Upbit confirmation rule (CLAUDE.md, v0.6 draft section 4): a bucket is final 120 s after its end.
 CONFIRM_DELAY = timedelta(seconds=120)
@@ -34,13 +36,6 @@ class DuplicateBarError(DataIntegrityError):
 
 class LookAheadError(ValueError):
     """A request for data the decision time may not see."""
-
-
-def bars_sha256(bars: Iterable[Bar]) -> str:
-    """SHA-256 of the canonical JSONL rows of the bars in start order (one row per bar, LF)."""
-    rows = sorted(bars, key=lambda b: b.start_utc)
-    body = "".join(json.dumps(b.to_record(), sort_keys=True, separators=(",", ":")) + "\n" for b in rows)
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def provenance_for(bars: Sequence[Bar], kind: str, description: str) -> BarProvenance:

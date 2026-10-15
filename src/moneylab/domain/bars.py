@@ -11,6 +11,9 @@ and "synthetic" results are SYNTHETIC / NOT_EVIDENCE.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -79,6 +82,20 @@ class Bar:
         return {"market": self.market, "interval": self.interval, "start_utc": utc_iso(self.start_utc),
                 "open": str(self.open), "high": str(self.high), "low": str(self.low), "close": str(self.close),
                 "value_krw": str(self.value_krw), "volume": str(self.volume), "last_tick_ms": self.last_tick_ms}
+
+
+def canonical_bar_rows(bars: Iterable[Bar]) -> bytes:
+    """The canonical bytes of a set of bars: one JSON row per bar (`Bar.to_record`, sorted keys,
+    separators "," and ":"), in start order, each row ended by LF, UTF-8. Bar files written by the
+    exporter are exactly these bytes, so their file SHA-256 equals `bars_sha256`."""
+    rows = sorted(bars, key=lambda b: b.start_utc)
+    return "".join(json.dumps(b.to_record(), sort_keys=True, separators=(",", ":")) + "\n"
+                   for b in rows).encode("utf-8")
+
+
+def bars_sha256(bars: Iterable[Bar]) -> str:
+    """Content hash of a set of bars (order of the input does not matter): SHA-256 of canonical_bar_rows."""
+    return hashlib.sha256(canonical_bar_rows(bars)).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

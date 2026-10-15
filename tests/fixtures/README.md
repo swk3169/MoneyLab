@@ -31,6 +31,8 @@ the golden values in `tests/test_simulation_e2e.py`.
 
 | `upbit_candles_synthetic.json` | **Synthetic**, hand-written series spec (2026-10-12) | Read by `providers/upbit/candle_fixture.py`, which expands it into REST candle rows in the field shapes checked live on 2026-10-12 (`/v1/candles/days`, `/v1/candles/minutes/60`). `now_utc` 2026-01-15T10:30Z, so the newest day and hour candles are still in progress; one day (01-08) and one hour (01-15T03) are omitted to produce gaps. Linear invented prices. `meta.synthetic = true`; the CLI refuses fixtures without it. |
 
+| `upbit_candles_backtest_synthetic.json` | **Synthetic**, hand-written series spec (2026-10-16), same format | SYNTHETIC / NOT_EVIDENCE input of the backtest bar-export pipeline tests (`tests/test_bar_export.py`, BT-2b-1). Day and hour series from 2025-06-01T00:00Z, `now_utc` 2025-12-18T10:30Z (newest day and hour in progress). Fixed rule: open 100,000,000, day step 240,000 = 24 x hour step 10,000, so every daily close equals the close of its last hour. One day (2025-09-10) and one hour (2025-10-05T13) omitted. Expands to 199 closed days and 4,809 closed hours; the exported bar hashes are pinned in the test. Strictly linear prices: a pipeline check, never a strategy test. |
+
 `tests/upbit_helpers.py` and the Upbit tests build further **synthetic** messages inline. **Real Upbit captures are never
 copied into `tests/fixtures/`**: they stay under `data/raw/upbit/recordings/` (git-ignored, `provenance = real`).
 
