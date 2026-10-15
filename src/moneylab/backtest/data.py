@@ -148,6 +148,12 @@ class BarSeries:
         i = bisect.bisect_left(self._starts, start)
         return self._bars[i] if i < len(self._bars) and self._starts[i] == start else None
 
+    def first_starting_at_or_after(self, t: datetime) -> Bar | None:
+        """Earliest bar whose bucket starts at or after t (fill substitution search)."""
+        require_utc(t, "t")
+        i = bisect.bisect_left(self._starts, t)
+        return self._bars[i] if i < len(self._bars) else None
+
     def last_ended_by(self, t: datetime) -> Bar | None:
         """Latest bar whose bucket ended at or before t (valuation fallback, draft 6.3)."""
         require_utc(t, "t")

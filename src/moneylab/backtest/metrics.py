@@ -3,8 +3,9 @@
   cumulative_net_return   final equity / initial cash - 1 (after all costs)
   max_drawdown            largest peak-to-trough fall of the equity curve [initial cash, daily equity
                           after trades], as a fraction; analytics.metrics.max_drawdown
-  trade counts            legs, buys, sells (= closed round trips), virtual exits, unfilled orders
-  cost totals             fees, slippage, both (KRW)
+  trade counts            legs, buys, sells (= closed round trips), virtual exits, unfilled attempts
+  order counts            unfilled attempts, cancelled orders, primary / substituted / fallback fills
+  cost totals             fees, slippage, market impact, all three (KRW)
   daily_log_returns       ln(E_pre(R_{t+1}) / E_pre(R_t)) with E_pre the equity before the trade at a
                           reference time; the last day ends after the virtual exit. Day t thus carries
                           the trade made at its start, the convention of the v0.6 segment returns.
@@ -41,10 +42,18 @@ def trade_counts(ledger: Ledger) -> dict[str, int]:
             "virtual_exits": sum(1 for t in ledger.trades if t.virtual), "unfilled": len(ledger.unfilled)}
 
 
+def order_counts(ledger: Ledger) -> dict[str, int]:
+    """Order-handling counts (data-quality input, draft Q10): failed attempts, cancellations, fill kinds."""
+    kinds = ("primary", "substituted", "virtual_fallback")
+    return {"unfilled_attempts": len(ledger.unfilled), "cancelled": len(ledger.cancelled)} | {
+        f"fills_{k}": sum(1 for t in ledger.trades if t.fill_kind == k) for k in kinds}
+
+
 def cost_totals(ledger: Ledger) -> dict[str, Decimal]:
     fees = sum((t.fee for t in ledger.trades), Decimal(0))
     slip = sum((t.slippage_cost for t in ledger.trades), Decimal(0))
-    return {"fees": fees, "slippage": slip, "total": fees + slip}
+    impact = sum((t.impact_cost for t in ledger.trades), Decimal(0))
+    return {"fees": fees, "slippage": slip, "impact": impact, "total": fees + slip + impact}
 
 
 def daily_log_returns(ledger: Ledger) -> list[float]:
@@ -63,5 +72,6 @@ def summary(ledger: Ledger) -> dict[str, Any]:
     return {"label": "descriptive, SYNTHETIC / NOT_EVIDENCE in BT-1",
             "cumulative_net_return": str(cumulative_net_return(ledger)),
             "max_drawdown": max_drawdown(ledger), "trade_counts": trade_counts(ledger),
+            "order_counts": order_counts(ledger),
             "cost_totals": {k: str(v) for k, v in costs.items()},
             "final_equity": str(equity_curve(ledger)[-1]), "days_valued": len(ledger.daily)}

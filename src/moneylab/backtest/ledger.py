@@ -5,7 +5,7 @@ as separate items, and the equity valued at the leg's reference price before and
 checks, for every row:
   cash >= 0, quantity >= 0                         (no shorting, no leverage, no overdraft)
   equity = cash + quantity * price                 (valuation identity, before and after)
-  equity_after = equity_before - fee - slippage    (each cost charged exactly once)
+  equity_after = equity_before - fee - slippage - impact   (each cost charged exactly once)
 and for every daily valuation: equity = cash + quantity * price and the holdings equal those left
 by the last FILLED trade (an unfilled order never changes cash or quantity).
 """
@@ -45,6 +45,10 @@ class TradeRow:
     qty_before: Decimal
     qty_after: Decimal
     virtual: bool = False  # forced exit at the end of the evaluation range
+    impact_cost: Decimal = Decimal(0)  # market impact, separate from fee and slippage (BT-2a)
+    scenario: str = "E0"
+    fill_kind: str = "primary"  # primary / substituted / virtual_fallback
+    fee_basis: str = "inclusive"
 
 
 @dataclass(frozen=True)
@@ -78,12 +82,13 @@ def _close(a: Decimal, b: Decimal) -> bool:
 class Ledger:
     initial_cash: Decimal
     trades: list[TradeRow] = field(default_factory=list)
-    unfilled: list[UnfilledRow] = field(default_factory=list)
+    unfilled: list[UnfilledRow] = field(default_factory=list)  # one row per failed fill attempt
+    cancelled: list[UnfilledRow] = field(default_factory=list)  # pending orders withdrawn (never filled)
     daily: list[DailyRow] = field(default_factory=list)
 
     def add_trade(self, *, leg: LegCost, day: datetime, signal_time: datetime, order_time: datetime,
                   fill_time: datetime, fill_bar_start: datetime, cash_before: Decimal, qty_before: Decimal,
-                  virtual: bool = False) -> TradeRow:
+                  virtual: bool = False, scenario: str = "E0", fill_kind: str = "primary") -> TradeRow:
         with localcontext() as ctx:
             ctx.prec = PRECISION
             if leg.side == "buy":
@@ -92,7 +97,8 @@ class Ledger:
                 cash_after, qty_after = cash_before + leg.cash_in, qty_before - leg.quantity
         row = TradeRow(len(self.trades), leg.side, day, signal_time, order_time, fill_time, fill_bar_start,
                        leg.ref_price, leg.exec_price, leg.quantity, leg.fee, leg.slippage_cost,
-                       cash_before, cash_after, qty_before, qty_after, virtual)
+                       cash_before, cash_after, qty_before, qty_after, virtual, leg.impact_cost, scenario,
+                       fill_kind, leg.fee_basis)
         self._check_trade(row)
         self.trades.append(row)
         return row
@@ -105,7 +111,7 @@ class Ledger:
     def _check_trade(r: TradeRow) -> None:
         if r.cash_after < 0 or r.qty_after < 0 or r.cash_before < 0 or r.qty_before < 0:
             raise AccountingError(f"leg {r.leg}: negative cash or quantity")
-        if r.fee < 0 or r.slippage_cost < 0:
+        if r.fee < 0 or r.slippage_cost < 0 or r.impact_cost < 0:
             raise AccountingError(f"leg {r.leg}: negative cost")
         if not (r.signal_time < r.order_time < r.fill_time):
             raise AccountingError(f"leg {r.leg}: signal, order and fill times are not strictly ordered")
@@ -113,8 +119,9 @@ class Ledger:
             ctx.prec = PRECISION
             before = r.cash_before + r.qty_before * r.ref_price
             after = r.cash_after + r.qty_after * r.ref_price
-            if not _close(after, before - r.fee - r.slippage_cost):
-                raise AccountingError(f"leg {r.leg}: equity_after {after} != equity_before {before} - fee - slippage")
+            if not _close(after, before - r.fee - r.slippage_cost - r.impact_cost):
+                raise AccountingError(f"leg {r.leg}: equity_after {after} != equity_before {before}"
+                                      " - fee - slippage - impact")
 
     @staticmethod
     def _check_daily(d: DailyRow) -> None:
