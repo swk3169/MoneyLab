@@ -50,3 +50,18 @@ AI 코딩 에이전트를 위한 MoneyLab 작업 지침.
 - 기능을 구현하면 직접 실행하고 테스트한다. 실패하면 원인을 분석하고 고친 뒤 다시 테스트한다.
 - 새 동작에는 오프라인 테스트를 추가한다 (`tests/conftest.py`의 `FakeSession`, `make_response` 활용).
 - fixture의 출처(실제 캡처인지 합성인지)를 `tests/fixtures/README.md`에 기록한다.
+
+## Work Order (`docs/tasks/`, 계약 v1.1)
+
+task별 계약은 이 파일에 넣지 않는다. 운영 방법과 템플릿은 `docs/tasks/README.md`, `docs/tasks/TEMPLATE.md`를 따른다.
+
+- 찾는 법: task 계약은 `docs/tasks/<TASK_ID>/WORK_ORDER.md` 하나와 `docs/tasks/<TASK_ID>/ERRATA-<NNN>.md` 중 `STATUS: ACCEPTED`인 것이다. ACCEPTED ERRATA는 번호 순으로 적용하고 뒤 번호가 앞선다.
+- 우선순위: (1) 안전·시스템·도구 제약 (2) 저장소 절대 규칙(이 파일, `.claude/` guard·hook·settings, `docs/agent_workflow.md`) (3) 고정·사전등록 계약 (4) Work Order + ACCEPTED ERRATA (5) 구현 판단. 충돌하면 상위 규칙을 따르고 멈춰서 보고한다. Work Order는 (1)–(3)을 바꾸지 못한다.
+- Gate Authorization: 사용자가 대화에서 명시적으로 승인한 gate(`GATE_AUTHORIZATION: <TASK_ID> <GATE> WO@<commit>`) 하나만 수행하고, 그 gate의 보고 후 멈춘다. 이전 gate의 승인이나 Work Order 자체는 다음 gate의 승인이 아니다.
+- 불변: Work Order와 ERRATA는 수정하지 않는다. 최초 생성은 WORKSPACE_SETUP의 C1 커밋(Work Order)과 ACCEPTED ERRATA 커밋에서만, 승인된 문구 그대로 하고 sha256을 보고한다. 계약 문제는 파일을 고치지 않고 `PROPOSED_ERRATA`로 채팅에 보고한다.
+- 파일 범위: `ALLOWED_FILES`는 allowlist다. `ALLOWED_FILES ∩ PROTECTED_FILES = ∅`이 아니면 Work Order는 INVALID다. `docs/tasks/<TASK_ID>/**`는 항상 PROTECTED다. 목록 밖 tracked 변경이나 PROTECTED 변경이 생기면 멈춘다. 보호 해제는 새 Work Order나 ACCEPTED ERRATA로만 한다.
+- 변경 승인 세 겹: Work Order가 정한 gate의 최대 범위, 사용자의 Gate Authorization, 도구 권한·guard 승인이 모두 있어야 변경한다. 셋 중 어느 것도 다른 것을 대신하지 않는다.
+- 멈춤: base/HEAD/tree가 기대와 다를 때, 범위 밖·보호 파일 변경, guard deny나 권한 거절, 테스트 실패, 계약 모순, 예상 밖 untracked 파일, Work Order sha256 불일치.
+- 보존: 다른 branch·worktree, untracked·ignored 파일, 기존 실행 출력·reference 산출물을 정리하거나 지우지 않는다.
+- 우회 금지: guard·hook·settings를 바꾸거나 우회해서 승인을 피하지 않는다. `git add .`·`git add -A`, `--no-verify`, amend, force push를 쓰지 않는다. PR은 merge commit으로 합친다.
+- 증거 등급: 보고 값마다 `GIT_VERIFIABLE`(SHA·tree·diff처럼 누구나 재현 가능), `CLAUDE_REPORTED`(Claude가 실행한 테스트·E2E·계산), `INDEPENDENT`(CI, GitHub 화면, 사용자·ChatGPT의 재확인)를 붙인다. Claude가 실행한 결과를 `INDEPENDENT`로 쓰지 않는다. gate 보고는 채팅으로만 한다.
