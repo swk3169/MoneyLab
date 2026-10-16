@@ -45,14 +45,19 @@ def _bps(v: Decimal | int | str, name: str) -> Decimal:
     return d
 
 
-def impact_bps_for_capital(capital: Decimal) -> tuple[Decimal, bool]:
-    """(iota in bp, capacity_verified). capacity_verified is False above CAPACITY_LIMIT."""
+def impact_bps_for_capital(capital: Decimal, ref_bps: Decimal = IMPACT_REF_BPS,
+                           ref_capital: Decimal = IMPACT_REF_CAPITAL,
+                           limit: Decimal = CAPACITY_LIMIT) -> tuple[Decimal, bool]:
+    """(iota in bp, capacity_verified). capacity_verified is False above `limit`. The defaults are the
+    v0.6 draft assumption; configs/backtest_costs.toml carries the same values (backtest.settings)."""
     if not isinstance(capital, Decimal) or capital <= 0:
         raise ValueError("capital must be a positive Decimal (KRW)")
+    if ref_bps < 0 or ref_capital <= 0 or limit <= 0:
+        raise ValueError("impact reference values must be positive")
     with localcontext() as ctx:
         ctx.prec = PRECISION
-        iota = IMPACT_REF_BPS * (capital / IMPACT_REF_CAPITAL).sqrt()
-    return iota, capital <= CAPACITY_LIMIT
+        iota = ref_bps * (capital / ref_capital).sqrt()
+    return iota, capital <= limit
 
 
 @dataclass(frozen=True)
