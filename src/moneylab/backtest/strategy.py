@@ -1,13 +1,22 @@
-"""Long/cash rules on confirmed daily closes (BT-1, docs/backtest_design.md section 5).
+"""Long/cash rules on confirmed daily closes (BT-1, BT-3a; docs/backtest_design.md section 5).
 
-Rules (fixed parameters; nothing here searches or tunes them):
+Rules (fixed parameters; nothing here searches or tunes them). Two families with separate IDs:
+
+  engine validation (BT-1, decision U1, 2026-10-16):
   sma20 / sma60 / sma120   C_D > SMA_N(D) -> 1 (long), C_D <= SMA_N(D) -> 0 (cash);
                            SMA_N(D) = mean of the N closes of days D-N+1 .. D (day D included)
   r5                       C_D < C_{D-5} -> 1 (5-day return negative: short-term reversal), else 0
 
-These SMA rules are NOT the M20/M60/M120 of docs/research_v06_preregistration_draft.md 6.1, which
-hold when the N-day return r(D-N, D] is positive. The user fixed the SMA definition for BT-1
-(decision U1, 2026-10-16); the draft's rules are unchanged and are not implemented here.
+  preregistered v0.6 (BT-3a; docs/research_v06_preregistration_draft.md 6.1, which is not changed):
+  M20 / M60 / M120         C_D > C_{D-N} -> 1, else 0; the same as r(D-N, D] = ln(C_D / C_{D-N}) > 0
+                           because closes are positive. N + 1 closes (21 / 61 / 121)
+  R5                       C_D < C_{D-5} -> 1, else 0; r(D-5, D] < 0. 6 closes
+
+The SMA rules are NOT the M20/M60/M120 (different signal, different history). R5 and r5 compute the
+same signal but are different strategies by identity and provenance: r5 validates the engine, R5 is
+the preregistered rule. The family sets below only document identity; they are not written into any
+manifest, result or report. Every result on fixture or synthetic bars is SYNTHETIC / NOT_EVIDENCE,
+for the preregistered rules too.
 
 A decision for day D is taken from an AsOfView at D+1 00:00 UTC + confirm delay, so only bars that
 ended and were confirmed are visible. The newest visible daily bar must be day D itself and the
@@ -29,7 +38,7 @@ from moneylab.domain.bars import Bar
 @dataclass(frozen=True)
 class Rule:
     name: str
-    kind: str  # "sma" or "reversal"
+    kind: str  # "sma", "momentum" or "reversal"
     length: int
 
     @property
@@ -42,7 +51,14 @@ RULES: dict[str, Rule] = {
     "sma60": Rule("sma60", "sma", 60),
     "sma120": Rule("sma120", "sma", 120),
     "r5": Rule("r5", "reversal", 5),
+    "M20": Rule("M20", "momentum", 20),
+    "M60": Rule("M60", "momentum", 60),
+    "M120": Rule("M120", "momentum", 120),
+    "R5": Rule("R5", "reversal", 5),
 }
+
+ENGINE_VALIDATION_RULES = frozenset({"sma20", "sma60", "sma120", "r5"})
+PREREG_V06_RULES = frozenset({"M20", "M60", "M120", "R5"})
 
 
 @dataclass(frozen=True)
@@ -89,5 +105,8 @@ def decide(rule: Rule, view: AsOfView, day: datetime) -> Signal:
         value = 1 if close > level else 0
         return Signal(rule.name, day, view.as_of, value, None, f"close={close} sma{rule.length}={level}")
     base = window[0].close
+    if rule.kind == "momentum":
+        value = 1 if close > base else 0
+        return Signal(rule.name, day, view.as_of, value, None, f"close={close} close_{rule.length}d_ago={base}")
     value = 1 if close < base else 0
     return Signal(rule.name, day, view.as_of, value, None, f"close={close} close_{rule.length}d_ago={base}")
