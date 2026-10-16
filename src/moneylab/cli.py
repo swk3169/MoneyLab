@@ -12,6 +12,10 @@
     python -m moneylab record --provider upbit --duration 60          # real Upbit KRW-BTC WebSocket (public)
     python -m moneylab record --provider upbit --source fixture       # offline, scripted synthetic session
     python -m moneylab replay-check <upbit dataset dir>               # recorder -> replay consistency
+    python -m moneylab clock-monitor --duration 1800                  # read-only local clock offset log (w32tm)
+    python -m moneylab research-build <upbit dataset dir> [--dry-run]  # raw -> events -> grid -> labels -> split
+    python -m moneylab research-stats <run dir>                       # train/validation leaderboard (test locked)
+    python -m moneylab research-final <run dir>                       # test split, exactly once
 
 Exit codes: 0 ok, 3 data source unavailable (handled), 1 unexpected error (handled), 2 usage.
 """
@@ -21,25 +25,34 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
+import time
 import traceback
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from moneylab import __version__
 from moneylab.config import Settings, load_settings
+from moneylab.core.clock_monitor import ClockMonitor, ClockThresholds
 from moneylab.core.diagnostics import run_diagnostics
 from moneylab.core.http import HttpClient
 from moneylab.core.logging_setup import setup_logging
+from moneylab.core.ratelimit import SlidingWindowLimiter
 from moneylab.core.redaction import redact_text
 from moneylab.core.exceptions import ProviderError
 from moneylab.display.console import (
     console,
     render_book,
+    render_clock_summary,
     render_diagnostics,
     render_http_diagnostics,
     render_integrity,
+    render_leaderboard,
     render_recorder_report,
     render_replay_check,
+    render_research_build,
     render_scan,
     render_simulation,
     render_stream_recorder_report,
@@ -73,10 +86,40 @@ from moneylab.providers.upbit.recorder import (
     replay_check,
     verify_upbit_recording,
 )
+from moneylab.providers.upbit.candle_fixture import CandleFixture
+from moneylab.providers.upbit.candle_store import (
+    DEFAULT_SUBDIR as CANDLES_SUBDIR,
+    CandleStoreError,
+    pull_to_store,
+    verify_candle_pull,
+)
+from moneylab.providers.upbit.candles import (
+    DEFAULT_LIMITS as CANDLE_LIMITS,
+    INTERVALS as CANDLE_INTERVALS,
+    KST,
+    MAX_COUNT as CANDLE_MAX_COUNT,
+    CandleParseError,
+    UpbitCandleClient,
+    candle_http_client,
+    is_aligned,
+    utc_iso,
+)
+from moneylab.providers.upbit.endpoints import REST_BASE_URL as UPBIT_REST_URL
+from moneylab.providers.upbit.recorder.quality import quality_report
+from moneylab.providers.upbit.recorder.store import CAPTURE_MANIFEST, CLOCK_LOG, dataset_dirname, read_json
+from moneylab.recording.shutdown import install_stop_signals
+from moneylab.providers.upbit.research_export import ExportParams, export_events, raw_manifest, write_raw_manifest
+from moneylab.research import pipeline as research
+from moneylab.research.config import DEFAULT_CONFIG, load_config
+from moneylab.core.clock_monitor import read_log as read_clock_log
+from moneylab.core.clock_monitor import summarize as summarize_clock
+from moneylab.research.split import InsufficientDataError, SplitLockedError
+from moneylab.research.v06 import montecarlo as v06mc
 from moneylab.scanner import MarketScanner, ScanCriteria
 from moneylab.sizing.position import SizingLimits
 from moneylab.strategy.market_making import SymmetricMarketMaker
 from moneylab.strategy.mispricing import CombinedMispricing, ComplementArbitrage, FairValueDeviation
+from moneylab.storage.atomic import atomic_write_json
 from moneylab.storage.files import RawStore, save_json, save_markets_csv
 
 log = logging.getLogger("moneylab")
@@ -86,6 +129,7 @@ FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
 DEFAULT_FIXTURE = FIXTURES / "gamma_markets_sample.json"
 DEFAULT_BOOKS = FIXTURES / "clob_books_sample.json"
 DEFAULT_UPBIT_FIXTURE = FIXTURES / "upbit_ws_timeline_synthetic.json"
+DEFAULT_CANDLE_FIXTURE = FIXTURES / "upbit_candles_synthetic.json"
 DEFAULT_TIMELINES = {
     "mm": FIXTURES / "clob_timeline_mm.json",
     "mispricing": FIXTURES / "clob_timeline_mispricing.json",
@@ -288,6 +332,8 @@ def cmd_record_upbit(args: argparse.Namespace, settings: Settings) -> int:
             orderbook_units=args.orderbook_units or settings.upbit_orderbook_units,
             duration=args.duration, max_market_events=args.max_events,
             ping_text_interval=args.ping_interval, max_consecutive_failures=settings.upbit_max_failures,
+            status_interval=args.status_interval, disk_check_interval=args.disk_check_interval,
+            min_free_bytes=int(args.min_free_gb * 1e9), stop_on_clock_unstable=args.stop_on_clock_unstable,
         )
         if source == "fixture":
             src = ScriptedWsSource(args.fixture or DEFAULT_UPBIT_FIXTURE)
@@ -298,14 +344,25 @@ def cmd_record_upbit(args: argparse.Namespace, settings: Settings) -> int:
                                      origin=f"fixture:{src.path.name}", clock=src.clock, sleep=src.sleep)
         else:
             out = args.out or settings.upbit_recordings_dir
-            recorder = UpbitRecorder(websockets_connector(), WS_PUBLIC_URL, out, config, provenance="real")
+            monitor = None
+            if not args.no_clock_monitor:  # read-only; logs next to the (first) market's raw data
+                monitor = ClockMonitor(Path(out) / dataset_dirname(config.markets[0]) / CLOCK_LOG,
+                                       server=args.clock_server, interval=args.clock_interval)
+            recorder = UpbitRecorder(websockets_connector(), WS_PUBLIC_URL, out, config, provenance="real",
+                                     clock_monitor=monitor)
     except (OSError, KeyError, ValueError) as exc:
         console.print(f"[red]Cannot start recorder:[/red] {exc}")
         return EXIT_ERROR
     label = "SYNTHETIC fixture session" if source == "fixture" else WS_PUBLIC_URL
     console.print(f"[dim]Recording Upbit {', '.join(config.markets)} orderbook({config.orderbook_units}) + trade "
-                  f"from {label} (public, read-only). Ctrl+C stops and saves.[/dim]")
-    report = recorder.run()
+                  f"from {label} (public, read-only). Ctrl+C / Ctrl+Break stops and saves.[/dim]")
+    if recorder.clock_monitor is not None:
+        recorder.clock_monitor.start()
+    restore = install_stop_signals(recorder.stop)
+    try:
+        report = recorder.run()
+    finally:
+        restore()
     render_stream_recorder_report(report)
     if report.status in (RecorderStatus.BLOCKED_HTTP_451, RecorderStatus.ACCESS_DENIED,
                          RecorderStatus.BANNED_HTTP_418):
@@ -378,6 +435,302 @@ def cmd_replay_check(args: argparse.Namespace, settings: Settings) -> int:
     return EXIT_OK if report.ok else EXIT_ERROR
 
 
+def cmd_clock_monitor(args: argparse.Namespace, settings: Settings) -> int:
+    """Standalone read-only clock log (never changes the system clock)."""
+    mon = ClockMonitor(args.out, server=args.server, interval=args.interval, samples_per_measurement=args.samples)
+    console.print(f"[dim]Clock monitor -> {args.out} every {args.interval:g}s for {args.duration:g}s "
+                  f"(w32tm /stripchart, read-only). Ctrl+C stops.[/dim]")
+    end = time.time() + args.duration
+    try:
+        while True:
+            s = mon.measure_once()
+            console.print(f"{s.timestamp_iso} {s.measurement_status} offset="
+                          f"{'-' if s.measured_offset_ms is None else f'{s.measured_offset_ms:.1f}ms'}  "
+                          f"status={mon.status}")
+            if time.time() + args.interval > end:
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        console.print("[yellow]stopped[/yellow]")
+    render_clock_summary(mon.summary())
+    return EXIT_OK
+
+
+def _clock_metadata(dataset: Path, cfg) -> dict | None:
+    """Clock log next to the raw data, re-classified with the pre-registered thresholds."""
+    samples = read_clock_log(dataset / CLOCK_LOG)
+    if not samples:
+        return None
+    return summarize_clock(samples, ClockThresholds(cfg.clock_warn_ms, cfg.clock_unstable_ms,
+                                                    cfg.clock_unstable_seconds, cfg.clock_unstable_min_measurements,
+                                                    cfg.clock_stale_seconds))
+
+
+def cmd_research_build(args: argparse.Namespace, settings: Settings) -> int:
+    """Upbit raw dataset (read-only) -> processed events -> research run (grid, features, labels, split)."""
+    dataset = Path(args.dataset)
+    if not is_upbit_recording(dataset):
+        console.print(f"[red]{dataset} is not an Upbit recording[/red]")
+        return EXIT_ERROR
+    overrides = {}
+    if args.embargo_seconds is not None:
+        if not args.dry_run:
+            console.print("[red]--embargo-seconds changes the pre-registered split; only allowed with --dry-run[/red]")
+            return EXIT_ERROR
+        overrides["embargo_seconds"] = args.embargo_seconds
+    try:
+        cfg = load_config(args.config, **overrides)
+    except (OSError, KeyError, ValueError) as exc:
+        console.print(f"[red]Bad research config:[/red] {exc}")
+        return EXIT_ERROR
+    integrity = verify_upbit_recording(dataset)
+    if not integrity.ok:
+        render_integrity(integrity)
+        console.print("[red]Integrity check failed; refusing to build research data from this dataset[/red]")
+        return EXIT_ERROR
+    ds = read_json(dataset / "dataset.json")
+    if ds.get("provenance") != "real" and not args.allow_fixture:
+        console.print(f"[red]provenance={ds.get('provenance')!r}: research needs real data "
+                      "(--allow-fixture for pipeline tests; results are NOT_EVIDENCE)[/red]")
+        return EXIT_ERROR
+    session_id = args.session_id or dataset.resolve().parent.name
+    root = args.out or settings.processed_dir
+    proc = root / "upbit" / session_id / ds["market"]
+    before = raw_manifest(dataset)
+    write_raw_manifest(dataset, proc / "raw_manifest.json")
+    params = ExportParams(cfg.warmup_seconds, cfg.stale_book_seconds)
+    quality = quality_report(dataset, params, cfg.gap_seconds).to_dict()
+    atomic_write_json(proc / "quality.json", quality)
+    events_path = proc / "events.jsonl.gz"
+    export_events(dataset, events_path, params)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    run_dir = root / "research" / f"{session_id}__{'DRYRUN__' if args.dry_run else ''}{stamp}"
+    source = {"provenance": ds.get("provenance"), "market": ds.get("market"), "raw_dataset": str(dataset),
+              "raw_manifest_sha256": before["manifest_sha256"], "integrity_ok": integrity.ok,
+              "integrity_warnings": integrity.counts.get("warnings_total", 0), "processed_dir": str(proc),
+              "quality": quality, "clock": _clock_metadata(dataset, cfg),
+              "capture": _capture_summary(dataset)}
+    try:
+        manifest = research.build(events_path, run_dir, cfg, session_id=session_id, source=source,
+                                  dry_run=args.dry_run, allow_fixture=args.allow_fixture)
+    except (research.ProvenanceError, InsufficientDataError, ValueError) as exc:
+        console.print(f"[red]research-build refused:[/red] {exc}")
+        return EXIT_ERROR
+    if raw_manifest(dataset)["manifest_sha256"] != before["manifest_sha256"]:
+        console.print("[red]raw dataset changed during research-build (it must be immutable)[/red]")
+        return EXIT_ERROR
+    render_research_build(manifest)
+    console.print(f"run dir: {run_dir}")
+    return EXIT_OK
+
+
+def _capture_summary(dataset: Path) -> dict | None:
+    path = dataset / CAPTURE_MANIFEST
+    if not path.exists():
+        return None
+    doc = read_json(path)
+    runs = doc.get("runs") or []
+    return {"runs": len(runs), "termination_reasons": [r.get("termination_reason") for r in runs],
+            "all_final": all(r.get("final") for r in runs), "raw_manifest_sha256": doc.get("raw_manifest_sha256"),
+            "disk_free_start_bytes": runs[0].get("disk_free_start_bytes") if runs else None,
+            "disk_free_end_bytes": runs[-1].get("disk_free_end_bytes") if runs else None}
+
+
+def cmd_research_stats(args: argparse.Namespace, settings: Settings) -> int:
+    try:
+        cfg = research.config_for_run(args.run_dir, args.config)
+        result = research.stats(args.run_dir, cfg)
+    except (OSError, KeyError, ValueError, SplitLockedError) as exc:
+        console.print(f"[red]research-stats refused:[/red] {exc}")
+        return EXIT_ERROR
+    m = result["manifest"]
+    render_leaderboard(result["leaderboard"], m["evidence"], f"{m['kind']} validation (test LOCKED)", args.top)
+    console.print(f"leaderboard: {Path(args.run_dir) / research.STATS_DIR / 'leaderboard.csv'}")
+    return EXIT_OK
+
+
+def cmd_research_final(args: argparse.Namespace, settings: Settings) -> int:
+    try:
+        cfg = research.config_for_run(args.run_dir, args.config)
+        result = research.final(args.run_dir, cfg)
+    except (OSError, KeyError, ValueError, SplitLockedError) as exc:
+        console.print(f"[red]research-final refused:[/red] {exc}")
+        return EXIT_ERROR
+    m = result["manifest"]
+    render_leaderboard(result["leaderboard"], m["evidence"], f"{m['kind']} FINAL (test opened once)", args.top)
+    return EXIT_OK
+
+
+def _parse_utc(text: str, name: str) -> datetime:
+    t = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if t.tzinfo is None:
+        raise ValueError(f"{name} needs an explicit timezone, e.g. 2026-10-01T00:00:00Z")
+    return t.astimezone(UTC)
+
+
+def candle_window(interval: str, now: datetime, last: int | None, start: str | None,
+                  end: str | None) -> tuple[datetime, datetime]:
+    """[start, end) in UTC. --last N = the N most recent buckets, the one still in progress included
+    (the pull drops it as incomplete), so N buckets cost one page of N rows."""
+    step = CANDLE_INTERVALS[interval][1]
+    if last is not None:
+        if start or end:
+            raise ValueError("--last cannot be combined with --start/--end")
+        if last < 1:
+            raise ValueError("--last must be >= 1")
+        floor = now.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+        if interval == "day":
+            floor = floor.replace(hour=0)
+        return floor + step - last * step, floor + step
+    if not (start and end):
+        raise ValueError("give --last N, or both --start and --end")
+    s, e = _parse_utc(start, "--start"), _parse_utc(end, "--end")
+    if not (is_aligned(s, interval) and is_aligned(e, interval)):
+        raise ValueError(f"--start/--end must be on {interval} bucket boundaries (UTC)")
+    if s >= e:
+        raise ValueError("--start must be before --end")
+    return s, e
+
+
+def _kst(iso: str | None) -> str:
+    if not iso:
+        return "-"
+    return (_parse_utc(iso, "time") + KST).strftime("%Y-%m-%d %H:%M KST")
+
+
+def render_candle_report(r: dict[str, Any]) -> None:
+    console.print(f"pages {r['pages']}, rows received {r['rows_received']}, candles kept {r['candles']}: "
+                  f"{r['first_start']} .. {r['last_start']} UTC ({_kst(r['first_start'])} .. {_kst(r['last_start'])})",
+                  markup=False)
+    console.print(f"excluded: in progress {r['excluded_incomplete']}, outside range {r['excluded_out_of_range']}; "
+                  f"duplicates: identical {r['duplicates_identical']}, conflicting {len(r['duplicates_conflicting'])}; "
+                  f"missing buckets {r['missing_buckets']}; invalid values {len(r['invalid'])}", markup=False)
+    for g in r["gaps"]:
+        console.print(f"  gap: {g['missing']} bucket(s) after {g['after']} before {g['before']} (not filled)", markup=False)
+    for c in r["duplicates_conflicting"]:
+        console.print(f"  conflicting duplicate at {c} (first received kept)", markup=False)
+    for bad in r["invalid"]:
+        console.print(f"  invalid {bad['start_utc']}: {', '.join(bad['problems'])}", markup=False)
+    for w in r["warnings"]:
+        console.print(f"  warning: {w}", markup=False)
+    console.print("[green]quality ok[/green]" if r["ok"] else "[red]quality NOT ok[/red]")
+
+
+def render_candle_verify(rep: Any) -> None:
+    console.print(f"verify {rep.pull_dir}: provenance {rep.provenance}, status {rep.status}, "
+                  f"pages checked {rep.pages_checked}, candles on replay {rep.candles}", markup=False)
+    for p in rep.problems:
+        console.print(f"  problem: {p}", markup=False)
+    console.print("[green]verify ok: hashes, file set and replay match[/green]" if rep.ok else "[red]verify FAILED[/red]")
+
+
+def cmd_candles_pull(args: argparse.Namespace, settings: Settings) -> int:
+    """v0.6: public Upbit candles -> raw pages + pull.json, then an offline verify. Read-only."""
+    fixture = args.source == "fixture"
+    try:
+        if fixture:
+            fx = CandleFixture.load(args.fixture or DEFAULT_CANDLE_FIXTURE)
+            now, origin, provenance = fx.now, f"fixture:{fx.path.name}", "fixture"
+            out = args.out or settings.raw_dir / "upbit" / "candles_v06-fixture"
+        else:
+            now, origin, provenance = datetime.now(UTC), "live", "real"
+            out = args.out or settings.raw_dir / CANDLES_SUBDIR
+        start, end = candle_window(args.interval, now, args.last, args.start, args.end)
+        buckets = int((end - start) / CANDLE_INTERVALS[args.interval][1])
+        page_count = min(CANDLE_MAX_COUNT, buckets) if args.page_count is None else args.page_count
+        if not 1 <= page_count <= CANDLE_MAX_COUNT:
+            raise ValueError(f"--page-count must be 1..{CANDLE_MAX_COUNT}")
+        max_pages = math.ceil(buckets / page_count) + 1 if args.max_pages is None else args.max_pages
+        if max_pages < 1:
+            raise ValueError("--max-pages must be >= 1")
+        market = args.market.upper()
+    except (OSError, KeyError, ValueError) as exc:
+        console.print(f"[red]candles-pull refused:[/red] {exc}", markup=True)
+        return EXIT_ERROR
+    label = "SYNTHETIC fixture " + origin if fixture else f"LIVE {UPBIT_REST_URL}{CANDLE_INTERVALS[args.interval][0]}"
+    console.print(f"candles-pull {market} {args.interval} from {label} (public market data only)", markup=False)
+    console.print(f"  range [{utc_iso(start)}, {utc_iso(end)}) = {buckets} bucket(s); "
+                  f"{_kst(utc_iso(start))} .. {_kst(utc_iso(end))}", markup=False)
+    console.print(f"  page_count {page_count}, at most {max_pages} page request(s) (each retried at most twice "
+                  f"on 429/5xx/timeout)", markup=False)
+    console.print(f"  output: {out}/{args.interval}_{market}_<UTC stamp>/ (new directory, never overwrites)",
+                  markup=False)
+    if args.dry_run:
+        console.print("dry run: no request sent, nothing written", markup=False)
+        return EXIT_OK
+
+    if fixture:
+        sleep = lambda s: None  # noqa: E731 - scripted session, no real clock to wait for
+        client = UpbitCandleClient(HttpClient(UPBIT_REST_URL, session=fx.session()), sleep=sleep, utcnow=lambda: now,
+                                   limiter=SlidingWindowLimiter(CANDLE_LIMITS, clock=lambda: 0.0, sleep=sleep))
+    else:
+        client = UpbitCandleClient(candle_http_client(settings.http_timeout, settings.user_agent))
+    created: list[Any] = []
+    try:
+        pull, store = pull_to_store(client, out, market, args.interval, start, end, provenance=provenance,
+                                    origin=origin, page_count=page_count, max_pages=max_pages,
+                                    on_created=created.append)
+    except (ProviderError, CandleStoreError, CandleParseError, ValueError) as exc:
+        where = f" (evidence: {created[0].dir})" if created else ""
+        console.print(f"candles-pull failed{where}: {redact_text(f'{type(exc).__name__}: {exc}')}", markup=False)
+        return EXIT_UNAVAILABLE if isinstance(exc, ProviderError) else EXIT_ERROR
+    console.print(f"saved {store.dir}", markup=False)
+    render_candle_report(store.doc["report"])
+    verify = verify_candle_pull(store.dir)
+    render_candle_verify(verify)
+    return EXIT_OK if verify.ok and pull.report.ok else EXIT_ERROR
+
+
+def cmd_candles_verify(args: argparse.Namespace, settings: Settings) -> int:
+    rep = verify_candle_pull(args.pull_dir)
+    if args.json:
+        console.print_json(json.dumps(rep.to_dict()))
+    else:
+        render_candle_verify(rep)
+        if rep.replay:
+            render_candle_report(rep.replay)
+    return EXIT_OK if rep.ok else EXIT_ERROR
+
+
+def cmd_research_v06_sim(args: argparse.Namespace, settings: Settings) -> int:
+    """v0.6 DRAFT decision rules on SYNTHETIC paths (Monte Carlo). No market data, no API."""
+    scenarios = {s.name: s for s in v06mc.tier1_scenarios()}
+    if args.list:
+        for s in scenarios.values():
+            console.print(f"{s.name}: {s.description}", markup=False)
+        return EXIT_OK
+    names = list(scenarios) if args.scenario == ["all"] else args.scenario or []
+    unknown = [n for n in names if n not in scenarios]
+    if not names or unknown:
+        console.print(f"[red]give --scenario NAME (or all); unknown: {unknown}[/red]")
+        return EXIT_ERROR
+    if args.reps < 1 or args.bootstrap < 1 or args.draws < 1 or args.workers < 1:
+        console.print("[red]--reps, --bootstrap, --draws and --workers must be >= 1[/red]")
+        return EXIT_ERROR
+    proc = replace(v06mc.Procedure(), bootstrap=args.bootstrap, draws=args.draws)
+    cfg = v06mc.RunConfig(reps=args.reps, seed=args.seed, workers=args.workers, truth_years=args.truth_years,
+                          procedure=proc)
+    out = args.out or settings.processed_dir / "research_v06_sim" / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    try:
+        out.mkdir(parents=True, exist_ok=False)
+    except OSError as exc:
+        console.print(f"[red]cannot create {out}: {exc}[/red]")
+        return EXIT_ERROR
+    chosen = [scenarios[n] for n in names]
+    atomic_write_json(out / "manifest.json", v06mc.manifest(cfg, chosen))
+    console.print(f"SYNTHETIC Monte Carlo (NOT_EVIDENCE): {len(chosen)} scenario(s), reps {cfg.reps}, "
+                  f"bootstrap {proc.bootstrap}, B1 draws {proc.draws}, workers {cfg.workers} -> {out}", markup=False)
+    for s in chosen:
+        t0 = time.monotonic()
+        result = v06mc.run_scenario(s, cfg)
+        atomic_write_json(out / f"{s.name}.json", result)
+        study = result["metrics"]["study"]
+        console.print(f"  {s.name}: {time.monotonic() - t0:.1f}s, study PAPER(A) "
+                      f"{study['A']['study_paper']['estimate']:.4f}, REJECT(A) {study['A']['study_reject']['estimate']:.4f}",
+                      markup=False)
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="moneylab", description="MoneyLab - prediction market research (read-only)")
     p.add_argument("--version", action="version", version=f"moneylab {__version__}")
@@ -443,7 +796,23 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--duration", type=float, default=None, help="stop after N seconds")
     r.add_argument("--rebate-rate", type=float, default=None,
                    help="maker rebate share for this market (not served by the CLOB)")
+    r.add_argument("--status-interval", type=float, default=300.0, help="Upbit: heartbeat seconds")
+    r.add_argument("--disk-check-interval", type=float, default=600.0, help="Upbit: free-space check seconds")
+    r.add_argument("--min-free-gb", type=float, default=5.0, help="Upbit: stop gracefully below this free space")
+    r.add_argument("--no-clock-monitor", action="store_true", help="Upbit live: do not log the clock offset")
+    r.add_argument("--clock-interval", type=float, default=120.0, help="Upbit live: seconds between clock checks")
+    r.add_argument("--clock-server", default="time.windows.com", help="Upbit live: NTP server for w32tm")
+    r.add_argument("--stop-on-clock-unstable", action="store_true",
+                   help="Upbit live: stop gracefully when clock quality becomes CLOCK_UNSTABLE")
     r.set_defaults(func=cmd_record)
+
+    cm = sub.add_parser("clock-monitor", help="read-only local clock offset log (w32tm /stripchart)")
+    cm.add_argument("--out", type=Path, default=Path("data/raw/clock/clock_monitor.jsonl"))
+    cm.add_argument("--duration", type=float, default=1800.0)
+    cm.add_argument("--interval", type=float, default=120.0)
+    cm.add_argument("--samples", type=int, default=3)
+    cm.add_argument("--server", default="time.windows.com")
+    cm.set_defaults(func=cmd_clock_monitor)
 
     v = sub.add_parser("record-verify", help="integrity check of a recorded dataset (offline)")
     v.add_argument("dataset", type=Path, help="dataset directory (.../recordings/<condition_id>)")
@@ -454,6 +823,62 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("dataset", type=Path, help="dataset directory (.../upbit/recordings/<market>)")
     c.add_argument("--json", action="store_true")
     c.set_defaults(func=cmd_replay_check)
+
+    cp = sub.add_parser("candles-pull", help="v0.6: public Upbit day/60-minute candles to data/raw (read-only)")
+    cp.add_argument("--interval", choices=sorted(CANDLE_INTERVALS), required=True)
+    cp.add_argument("--market", default="KRW-BTC", help="Upbit pair code (default KRW-BTC)")
+    cp.add_argument("--last", type=int, default=None,
+                    help="the N most recent buckets, the in-progress one included (it is dropped as incomplete)")
+    cp.add_argument("--start", default=None, help="UTC bucket boundary, e.g. 2026-10-01T00:00:00Z (with --end)")
+    cp.add_argument("--end", default=None, help="exclusive UTC bucket boundary (with --start)")
+    cp.add_argument("--page-count", type=int, default=None,
+                    help=f"rows per request, 1..{CANDLE_MAX_COUNT} (default: buckets in range, capped)")
+    cp.add_argument("--max-pages", type=int, default=None, help="hard cap on page requests (default: pages needed + 1)")
+    cp.add_argument("--source", choices=["live", "fixture"], default="live")
+    cp.add_argument("--fixture", type=Path, default=None, help="synthetic candle fixture for --source fixture")
+    cp.add_argument("--out", type=Path, default=None,
+                    help="pull root (default data/raw/upbit/candles_v06, fixture: .../candles_v06-fixture)")
+    cp.add_argument("--dry-run", action="store_true", help="print the request plan; no request, no files")
+    cp.set_defaults(func=cmd_candles_pull)
+
+    cv = sub.add_parser("candles-verify", help="v0.6: re-hash and replay a stored candle pull (offline)")
+    cv.add_argument("pull_dir", type=Path, help="pull directory (.../candles_v06/<interval>_<market>_<stamp>)")
+    cv.add_argument("--json", action="store_true")
+    cv.set_defaults(func=cmd_candles_verify)
+
+    vs = sub.add_parser("research-v06-sim", help="v0.6 DRAFT rules on SYNTHETIC paths (Monte Carlo, offline)")
+    vs.add_argument("--scenario", action="append", help="scenario name (repeatable) or 'all'")
+    vs.add_argument("--list", action="store_true", help="list scenarios")
+    vs.add_argument("--reps", type=int, default=20)
+    vs.add_argument("--bootstrap", type=int, default=199)
+    vs.add_argument("--draws", type=int, default=99, help="B1 placements per test")
+    vs.add_argument("--workers", type=int, default=1)
+    vs.add_argument("--seed", type=int, default=20261012)
+    vs.add_argument("--truth-years", type=int, default=400, help="length of the long path for the scenario truth")
+    vs.add_argument("--out", type=Path, default=None, help="default data/processed/research_v06_sim/<stamp>")
+    vs.set_defaults(func=cmd_research_v06_sim)
+
+    rb = sub.add_parser("research-build", help="v0.4: raw Upbit dataset -> grid/features/labels/split (offline)")
+    rb.add_argument("dataset", type=Path, help="Upbit dataset directory (.../<session>/KRW-BTC)")
+    rb.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="pre-registered study config")
+    rb.add_argument("--session-id", default=None, help="default: name of the dataset's parent directory")
+    rb.add_argument("--out", type=Path, default=None, help="processed root (default data/processed)")
+    rb.add_argument("--dry-run", action="store_true", help="pipeline check; results are DRY_RUN/INSUFFICIENT_EVIDENCE")
+    rb.add_argument("--embargo-seconds", type=float, default=None, help="dry run only: shorter embargo")
+    rb.add_argument("--allow-fixture", action="store_true", help="accept fixture data (results are NOT_EVIDENCE)")
+    rb.set_defaults(func=cmd_research_build)
+
+    rs = sub.add_parser("research-stats", help="v0.4: train/validation statistics and leaderboard (test locked)")
+    rs.add_argument("run_dir", type=Path)
+    rs.add_argument("--config", type=Path, default=None, help="default: the config the run was built with")
+    rs.add_argument("--top", type=int, default=20)
+    rs.set_defaults(func=cmd_research_stats)
+
+    rf = sub.add_parser("research-final", help="v0.4: evaluate the locked test split exactly once")
+    rf.add_argument("run_dir", type=Path)
+    rf.add_argument("--config", type=Path, default=None)
+    rf.add_argument("--top", type=int, default=20)
+    rf.set_defaults(func=cmd_research_final)
     return p
 
 

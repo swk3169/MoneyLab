@@ -266,6 +266,36 @@ python -m pytest -m network tests/test_upbit_live_smoke.py                 # 실
 
 ---
 
+## v0.4 (Phase 1): Upbit KRW-BTC microstructure research pipeline
+
+질문: t 시점의 orderbook/trade 상태가 t+1s/5s/10s/30s 가격 움직임을 **거래비용을 넘을 만큼** 예측하는가.
+사전등록: `docs/research_v04_preregistration.md` + `configs/research_v04.toml` (두 파일의 SHA-256이 모든 run manifest에 기록된다).
+
+```
+raw (불변, recorder만 씀)  --record-verify-->  providers/upbit/research_export.py  -->  MarketEvent (+ quality flag)
+   --> research/ : 1초 wall-clock as-of grid --> features --> labels --> 시간순 split (embargo, purge, test lock)
+   --> research-stats (train/validation) --> leaderboard --> research-final (test, 한 번만)
+```
+
+- 시간 축은 로컬 수신 시각이다. 행 t는 `received_timestamp <= t`인 이벤트만 쓴다(도착 순서 누적 최대 시각). `received − exchange` 차이는 품질 지표로만 쓴다.
+- 품질 flag(`warmup`, `stale_book`, `crossed_book`, `locked_book`, `timestamp_reverse`, `sequence_gap`, `duplicate`, `reconnect_boundary`)는 삭제하지 않고 기록한다. 제외 여부는 research layer가 정하고 사유별로 집계한다.
+- label: 미래 mid 수익률(wall-clock)과 체결 가능 수익률(VWAP, 0.001/0.01 BTC, 지연 0/100/250ms). depth가 부족하면 NaN이고, forward-fill은 하지 않는다.
+- 비용: `analytics/spot_costs.py`. 수수료는 설정값이며 기본 시나리오는 5/15/25bp다. 계정 수수료가 확정되기 전에는 가장 비싼 시나리오로 판정한다.
+- 통계: Spearman IC, quintile, 방향 적중률, stationary block bootstrap CI, Newey-West HAC, Benjamini-Hochberg FDR. 의존성은 표준 라이브러리뿐이다(processed 파일은 gzip JSONL, Parquet 미사용).
+- 판정: `REJECT` / `RESEARCH_MORE` / `PAPER_CANDIDATE`. fixture/synthetic(`NOT_EVIDENCE`), dry-run, 6시간 미만, 단일 세션은 최대 `RESEARCH_MORE`다.
+- 판정 근거는 `evidence_class`로 구분한다: `INSUFFICIENT_EVIDENCE`(표본 부족 → RESEARCH_MORE, REJECT 아님), `NEGATIVE_EVIDENCE`(충분한 표본에서 net ≤ 0 또는 gross < cost → REJECT), `POSITIVE_BUT_UNCONFIRMED`(→ RESEARCH_MORE).
+- 장시간 수집(Phase 1.1): Ctrl+C·Ctrl+Break(SIGBREAK)·SIGTERM에 graceful stop, 10분마다 디스크 확인(5GB 미만이면 중단), 5분 heartbeat, 종료 시 `capture_manifest.json`(종료 사유, 디스크, raw sha256, clock 요약). `w32tm /stripchart` 기반 read-only clock monitor(`clock_monitor.jsonl`)는 품질 metadata일 뿐 보정에 쓰지 않는다. 단독 실행: `python -m moneylab clock-monitor`.
+- test split은 `locked/`에만 있다. `research-stats`는 열 수 없다. `research-final`은 사전등록 해시가 같고 validation이 끝난 경우에만, run마다 **한 번** 연다.
+
+```powershell
+python -m moneylab research-build data\raw\upbit\research\<session>\KRW-BTC     # 실데이터만 (fixture: --allow-fixture, NOT_EVIDENCE)
+python -m moneylab research-build <dir> --dry-run --embargo-seconds 15          # 짧은 데이터로 파이프라인 점검 (DRY_RUN)
+python -m moneylab research-stats data\processed\research\<run>
+python -m moneylab research-final data\processed\research\<run>                # test split, run당 1회
+```
+
+---
+
 ## 설치
 
 Python 3.12 이상이 필요하다 (개발과 검증은 3.14.8에서 진행).
@@ -324,14 +354,15 @@ src/moneylab/
 ├── config.py               환경변수 설정 (비밀정보 없음)
 ├── cli.py, __main__.py     CLI 진입점
 ├── core/                   HTTP(timeout, 재시도, 진단), 예외, 비밀정보 마스킹, 로깅, rate limiter
-├── domain/                 공급자 중립 Market/Outcome, OrderBook, TradeTick
+├── domain/                 공급자 중립 Market/Outcome, OrderBook, TradeTick, MarketEvent(research)
 ├── recording/              공급자 중립 recorder core (상태, 실패 분류, backoff, checksum)
 ├── providers/
 │   ├── base.py             MarketDataProvider, RecordedBookSource 인터페이스
 │   ├── polymarket/         Gamma/CLOB client, 파서, provider 어댑터, recorder/ (기록·무결성·replay)
 │   └── upbit/              공개 WebSocket transport, 파서, market list provider, recorder/ (기록·무결성·replay)
 ├── scanner/                공급자 독립 스캐너 (필터, 정렬, 플래그)
-├── analytics/              metrics(MDD, spread, microprice, depth), costs(fee/rebate), rewards, ev
+├── analytics/              metrics(MDD, spread, microprice, depth), costs(fee/rebate), spot_costs, rewards, ev
+├── research/               v0.4 as-of grid, features, labels, split/test lock, stats, leaderboard, pipeline
 ├── storage/                data/raw JSON, data/processed CSV, atomic write
 ├── display/                rich 콘솔 출력
 ├── strategy/               Strategy→Signal, MarketMakingStrategy→Quote, MispricingStrategy→TradeIntent
@@ -350,7 +381,7 @@ data/raw, data/processed    생성 데이터 (git 제외)
 ```
 cli → scanner → providers.base (MarketDataProvider) ← providers.polymarket, providers.upbit
          ↘ domain ↙
-strategy / risk / backtest / paper / execution → domain, analytics   (공급자 import 금지)
+strategy / risk / backtest / paper / execution / research → domain, analytics   (공급자 import 금지)
 providers.* → recording (공통 core). providers.upbit와 providers.polymarket은 서로 import하지 않는다
 ```
 
@@ -373,7 +404,7 @@ providers.* → recording (공통 core). providers.upbit와 providers.polymarket
 | v0.3 | Real Market Data Recorder (REST), atomic 저장, resume, 451 중단, 무결성 검사, ReplayBookStream ✅ (실제 수집은 접근 가능해진 뒤) |
 | v0.3.1 | Upbit 공개 WebSocket recorder (KRW-BTC orderbook 30호가 + trade), 공통 recording core, replay 검증 ✅ (실제 데이터로 확인) |
 | v0.3.x | Polymarket WebSocket recorder, 일 단위 압축, 실제 기록으로 fixture 교체, queue-position fill 모델, 현물 시장용 비용 모델·전략 |
-| v0.4 | Paper trading, PnL tracking, 지표 리포트 |
+| v0.4 | 실데이터 microstructure 연구 pipeline (Phase 1 구현, 6시간 수집 전) → Paper trading, PnL tracking, 지표 리포트 |
 | v0.5 | Risk management, position sizing, kill switch |
 | v1.0 | Live execution. 별도 검토, 명시적 opt-in, 소액 한도를 전제로 하며, 합법적으로 접근 가능한 환경에서만 진행 |
 

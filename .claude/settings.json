@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -m pytest *)",
+      "Bash(./.venv/Scripts/python.exe -m pytest *)"
+    ],
+    "ask": [
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git merge *)",
+      "Bash(git rebase *)",
+      "Bash(gh pr *)",
+      "Bash(* research-final *)",
+      "Bash(* record --provider upbit *)",
+      "Edit(/.claude/**)",
+      "Edit(/.github/**)",
+      "Edit(/.gitattributes)",
+      "Edit(/.gitignore)",
+      "Edit(/CLAUDE.md)",
+      "Edit(/docs/research_v05_preregistration_draft.md)"
+    ],
+    "deny": [
+      "Edit(/configs/research_v04.toml)",
+      "Edit(/docs/research_v04_preregistration.md)",
+      "Edit(/data/raw/**)",
+      "Read(/data/processed/**/locked/**)",
+      "Edit(/data/processed/**/locked/**)",
+      "Read(.env)",
+      "Edit(.env)",
+      "Edit(~/.claude/settings.json)",
+      "Edit(~/.claude/settings.local.json)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git clean *)",
+      "Bash(git reset --hard *)",
+      "Bash(w32tm /resync *)",
+      "Bash(w32tm /config *)",
+      "Bash(reg add *)",
+      "Bash(reg delete *)",
+      "Bash(powercfg /change *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit|Read|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "timeout -k 1 8 \"${CLAUDE_PROJECT_DIR}/.venv/Scripts/python.exe\" \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard.py\" || exit 2",
+            "timeout": 10,
+            "onFailure": "block",
+            "statusMessage": "MoneyLab guard"
+          }
+        ]
+      }
+    ]
+  }
+}

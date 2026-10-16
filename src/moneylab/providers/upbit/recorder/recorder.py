@@ -13,6 +13,16 @@ states (Retry-After) or `ban_default_wait`, and stops when the ban is longer tha
 else backs off exponentially with jitter. `max_consecutive_failures` connection attempts in a
 row without market data end the run with status `failed` (no endless reconnect loop).
 
+Long runs (v0.4): graceful stop on Ctrl+C (KeyboardInterrupt) and on SIGBREAK/SIGTERM via
+`stop(reason)` (installed by the CLI, recording.shutdown); free disk space is checked every
+`disk_check_interval` s and the run stops below `min_free_bytes` (reason disk_low); a heartbeat
+every `status_interval` s logs counts (books, trades, reconnects, gaps, stale/crossed/locked
+books, disk, clock quality) and rewrites `capture_manifest.json`. On every exit the buffer is
+flushed, state saved and the capture manifest finalized with the termination reason and the
+sha256 of every raw file. An optional read-only ClockMonitor (core.clock_monitor) runs alongside;
+with `stop_on_clock_unstable` a CLOCK_UNSTABLE status stops the run. The raw line format is
+unchanged; the new counters are not written into raw lines.
+
 Deliberately absent: API keys, JWT, private endpoints, orders, proxies.
 """
 
@@ -22,6 +32,7 @@ import base64
 import json
 import logging
 import random
+import shutil
 import time
 import uuid
 from collections.abc import Callable
@@ -30,6 +41,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from moneylab.core.clock_monitor import CLOCK_UNSTABLE as CLOCK_STATUS_UNSTABLE
 from moneylab.core.ratelimit import SlidingWindowLimiter
 from moneylab.core.redaction import redact_text
 from moneylab.providers.upbit.endpoints import (
@@ -53,7 +65,14 @@ from moneylab.providers.upbit.parser import (
     parse_orderbook,
     parse_trade,
 )
-from moneylab.providers.upbit.recorder.store import UpbitStore, book_content_key
+from moneylab.providers.upbit.recorder.store import (
+    CAPTURE_MANIFEST,
+    CLOCK_LOG,
+    UpbitStore,
+    book_content_key,
+    raw_file_manifest,
+    read_json,
+)
 from moneylab.providers.upbit.ws_client import Connector, WsClosed, WsConnectError, WsConnection, WsHandshakeError
 from moneylab.recording.core import (
     FATAL_STATUSES,
@@ -63,9 +82,11 @@ from moneylab.recording.core import (
     SourceExhausted,
     backoff_delay,
     header,
+    iso,
     parse_retry_after,
 )
-from moneylab.storage.atomic import sha256_of
+from moneylab.recording import shutdown as term
+from moneylab.storage.atomic import atomic_write_json, sha256_of
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +111,12 @@ class UpbitRecorderConfig:
     rate_limit_min_wait: float = 1.0  # 429: docs say retry from the next second
     ban_default_wait: float = 60.0  # 418 without a parseable ban duration (format unverified)
     max_ban_wait: float = 600.0  # 418 bans longer than this stop the recorder
+    status_interval: float = 300.0  # heartbeat log + capture manifest update
+    disk_check_interval: float = 600.0
+    min_free_bytes: int = 5 * 1024**3  # free space below this -> graceful stop (disk_low)
+    stale_book_seconds: float = 1.0  # counters only; research flags are computed offline
+    gap_seconds: float = 10.0  # no frame for this long -> counted as a gap
+    stop_on_clock_unstable: bool = False
 
     def __post_init__(self):
         if not self.markets:
@@ -106,6 +133,8 @@ class UpbitRecorderConfig:
             raise ValueError("timeouts must be > 0")
         if self.max_consecutive_failures < 1:
             raise ValueError("max_consecutive_failures must be >= 1")
+        if self.status_interval <= 0 or self.disk_check_interval <= 0 or self.min_free_bytes < 0:
+            raise ValueError("status/disk intervals must be > 0 and min_free_bytes >= 0")
 
 
 @dataclass
@@ -131,6 +160,16 @@ class UpbitRecorderReport:
     rate_limited: int = 0
     banned: int = 0
     segments_written: int = 0
+    crossed_books: int = 0
+    locked_books: int = 0
+    stale_books: int = 0
+    gaps: int = 0
+    heartbeats: int = 0
+    termination_reason: str | None = None
+    disk_free_start: int | None = None
+    disk_free_end: int | None = None
+    last_heartbeat: dict[str, Any] | None = None
+    clock: dict[str, Any] | None = None
     last_error: dict[str, Any] | None = None
     datasets: dict[str, Path] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
@@ -147,7 +186,7 @@ class UpbitRecorderReport:
         keys = ("connections", "connect_failures", "messages", "orderbook_events", "trade_events",
                 "duplicate_orderbooks", "duplicate_trades", "status_replies", "pings_sent", "server_errors",
                 "parse_errors", "unknown_messages", "disconnects", "failures", "rate_limited", "banned",
-                "segments_written")
+                "segments_written", "crossed_books", "locked_books", "stale_books", "gaps", "heartbeats")
         return {k: getattr(self, k) for k in keys}
 
 
@@ -185,6 +224,7 @@ class UpbitRecorder:
         origin: str | None = None, clock: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep, rng: random.Random | None = None,
         ticket_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
+        disk_free: Callable[[Path], int] | None = None, clock_monitor: Any = None,
     ):
         self.connector, self.url = connector, url
         self.out_dir = Path(out_dir)
@@ -202,9 +242,18 @@ class UpbitRecorder:
         self._connect_limiter = SlidingWindowLimiter(WS_CONNECT_LIMITS, clock=clock, sleep=sleep)
         self._started = 0.0
         self._connection_seq = 0
+        self._disk_free_fn = disk_free or _disk_free_bytes
+        self.clock_monitor = clock_monitor
+        self._stop_reason: str | None = None
+        self._last_disk = self._last_status = 0.0
+        self._last_frame: float | None = None
+        self._last_book: dict[str, float] = {}
 
     # --- public API ---------------------------------------------------------------------
-    def stop(self) -> None:
+    def stop(self, reason: str = term.STOPPED) -> None:
+        """Request a graceful stop (safe from signal handlers and other threads)."""
+        if self._stop_reason is None:
+            self._stop_reason = reason
         self._stop_requested = True
 
     def run(self) -> UpbitRecorderReport:
@@ -214,27 +263,130 @@ class UpbitRecorder:
             self._open_stores(now)
         except (OSError, ValueError) as exc:
             self.report.status = RecorderStatus.FAILED
+            self.report.termination_reason = term.UNEXPECTED_ERROR
             self.report.last_error = {"category": "storage", "message": redact_text(str(exc))}
             self.report.stopped_at = self.clock()
             log.error("Recorder cannot open datasets: %s", exc)
             return self.report
-        status = RecorderStatus.FAILED
+        self.report.disk_free_start = self._disk_free()
+        self._last_disk = self._last_status = self._started
+        self._write_capture(final=False)
+        status, reason = RecorderStatus.FAILED, None
         try:
             status = self._run_loop()
         except KeyboardInterrupt:
-            status = RecorderStatus.STOPPED
+            status, reason = RecorderStatus.STOPPED, term.KEYBOARD_INTERRUPT
             log.warning("Recorder interrupted; buffered events flushed and state saved")
+        except Exception as exc:  # last resort: still flush, save state and finalize the manifest
+            status, reason = RecorderStatus.FAILED, term.UNEXPECTED_ERROR
+            self.report.last_error = {"category": "unexpected", "message": redact_text(f"{type(exc).__name__}: {exc}")}
+            log.error("Recorder stopped by an unexpected error: %s", self.report.last_error["message"])
         finally:
             end = self.clock()
             self.report.status, self.report.stopped_at = status, end
+            self.report.termination_reason = reason or self._reason_for(status)
+            self.report.disk_free_end = self._disk_free()
+            if self.clock_monitor is not None:
+                try:
+                    self.clock_monitor.stop(final_measurement=True)
+                    self.report.clock = self.clock_monitor.summary()
+                except Exception as exc:  # the clock monitor never blocks a clean shutdown
+                    log.warning("clock monitor shutdown: %s", exc)
             for store in self.stores.values():
                 try:
                     store.flush()
-                    store.end_run(end, status.value)
+                    store.end_run(end, status.value, termination_reason=self.report.termination_reason)
                 except OSError as exc:  # pragma: no cover - disk full etc.
                     log.error("Could not save %s: %s", store.market, exc)
                 self.report.segments_written += store.segments_written
+            self._write_capture(final=True)
         return self.report
+
+    def _reason_for(self, status: RecorderStatus) -> str:
+        if status == RecorderStatus.COMPLETED:
+            return term.COMPLETED
+        if status == RecorderStatus.SOURCE_EXHAUSTED:
+            return term.SOURCE_EXHAUSTED
+        if status == RecorderStatus.STOPPED:
+            return self._stop_reason or term.STOPPED
+        return term.CONNECTION_FAILURE  # failed / blocked / access denied / banned
+
+    # --- long-run safety ----------------------------------------------------------------
+    def _disk_free(self) -> int | None:
+        try:
+            return int(self._disk_free_fn(self.out_dir))
+        except OSError as exc:
+            log.warning("cannot read free disk space: %s", exc)
+            return None
+
+    def _periodic(self) -> None:
+        c, now = self.config, self.clock()
+        if now - self._last_disk >= c.disk_check_interval:
+            self._last_disk = now
+            free = self._disk_free()
+            if free is not None and free < c.min_free_bytes:
+                msg = f"free disk space {free / 1e9:.2f} GB below {c.min_free_bytes / 1e9:.2f} GB; stopping"
+                log.error(msg)
+                self.report.warnings.append(msg)
+                self.stop(term.DISK_LOW)
+        if (self.clock_monitor is not None and c.stop_on_clock_unstable
+                and self.clock_monitor.status == CLOCK_STATUS_UNSTABLE):
+            log.error("clock quality CLOCK_UNSTABLE; stopping")
+            self.stop(term.CLOCK_UNSTABLE)
+        if now - self._last_status >= c.status_interval:
+            self._last_status = now
+            self._heartbeat(now)
+
+    def _heartbeat(self, now: float) -> None:
+        r = self.report
+        clock = self.clock_monitor.summary() if self.clock_monitor is not None else None
+        hb = {"at": iso(now), "runtime_seconds": round(now - self._started, 3), "books": r.orderbook_events,
+              "trades": r.trade_events, "reconnects": max(0, r.connections - 1), "disconnects": r.disconnects,
+              "gaps": r.gaps, "stale_books": r.stale_books, "crossed_books": r.crossed_books,
+              "locked_books": r.locked_books, "disk_free_bytes": self._disk_free(),
+              "clock_quality_status": None if clock is None else clock["clock_quality_status"],
+              "clock_offset_ms": None if clock is None else clock["clock_offset_end_ms"]}
+        r.heartbeats += 1
+        r.last_heartbeat = hb
+        log.info("heartbeat %s", hb)
+        self._write_capture(final=False)
+
+    def _write_capture(self, final: bool) -> None:
+        """Recorder-owned run summary next to the raw data (atomic). Raw lines are not touched."""
+        r = self.report
+        started = iso(r.started_at) if r.started_at else None
+        run = {"run_id": started, "started_at": started, "stopped_at": iso(r.stopped_at) if r.stopped_at else None,
+               "final": final, "status": r.status.value, "termination_reason": r.termination_reason,
+               "counters": r.counters(), "disk_free_start_bytes": r.disk_free_start,
+               "disk_free_end_bytes": r.disk_free_end, "min_free_bytes": self.config.min_free_bytes,
+               "last_heartbeat": r.last_heartbeat,
+               "clock": r.clock if final else (self.clock_monitor.summary() if self.clock_monitor is not None else None),
+               "clock_log": CLOCK_LOG if self.clock_monitor is not None else None,
+               "config": {k: v for k, v in self.config.__dict__.items() if k != "markets"},
+               "last_error": r.last_error, "warnings": r.warnings[:20]}
+        for store in self.stores.values():
+            path = store.path / CAPTURE_MANIFEST
+            try:
+                doc = read_json(path) if path.exists() else {}
+            except (OSError, ValueError):
+                doc = {}
+            doc.update(schema="moneylab.upbit.capture_manifest/1", market=store.market, provenance=store.provenance)
+            runs = doc.setdefault("runs", [])
+            if runs and runs[-1].get("run_id") == run["run_id"]:
+                runs[-1] = dict(run)
+            else:
+                runs.append(dict(run))
+            if final:
+                try:
+                    manifest = raw_file_manifest(store.path)
+                    runs[-1]["raw_manifest"] = manifest
+                    doc["raw_manifest_sha256"] = manifest["manifest_sha256"]
+                except (OSError, ValueError) as exc:
+                    runs[-1]["raw_manifest_error"] = str(exc)
+            try:
+                atomic_write_json(path, doc)
+            except OSError as exc:  # pragma: no cover - disk full
+                log.error("cannot write %s: %s", path, exc)
 
     # --- setup --------------------------------------------------------------------------
     def _open_stores(self, now: float) -> None:
@@ -267,6 +419,9 @@ class UpbitRecorder:
         return self.config.duration - (self.clock() - self._started)
 
     def _should_stop(self) -> RecorderStatus | None:
+        if self._stop_requested:
+            return RecorderStatus.STOPPED
+        self._periodic()
         if self._stop_requested:
             return RecorderStatus.STOPPED
         c = self.config
@@ -389,6 +544,7 @@ class UpbitRecorder:
         except WsClosed as exc:
             return None, classify_ws_error(exc, self.clock(), c), False
         opened = self.clock()
+        self._last_book.clear()  # stale-book counting is per connection
         self._local_event("connection", opened, conn_id, {"url": self.url, "request": request})
         last_market = last_ping = opened
         got_data = False
@@ -427,6 +583,9 @@ class UpbitRecorder:
     # --- frames -------------------------------------------------------------------------
     def _handle_frame(self, frame: bytes | str, received: float, conn_id: str) -> tuple[str, str | None]:
         self.report.messages += 1
+        if self._last_frame is not None and received - self._last_frame > self.config.gap_seconds:
+            self.report.gaps += 1
+        self._last_frame = received
         base: dict[str, Any] = {"received_timestamp": received, "connection_id": conn_id}
         try:
             text, frame_type = decode_frame(frame)
@@ -498,6 +657,16 @@ class UpbitRecorder:
                       "duplicate_of": dup_of, "parse_error": None})
         if dup_of is not None:
             self.report.duplicate_orderbooks += 1
+        else:
+            bb, ba = summary.get("best_bid"), summary.get("best_ask")
+            if bb is not None and ba is not None:
+                self.report.crossed_books += bb > ba
+                self.report.locked_books += bb == ba
+            recv = float(base["received_timestamp"])
+            prev = self._last_book.get(store.market)
+            if prev is not None and recv - prev > self.config.stale_book_seconds:
+                self.report.stale_books += 1
+            self._last_book[store.market] = recv
         self.report.orderbook_events += 1
         return "orderbook"
 
@@ -521,3 +690,10 @@ class UpbitRecorder:
             self.report.duplicate_trades += 1
         self.report.trade_events += 1
         return "trade"
+
+
+def _disk_free_bytes(path: Path) -> int:
+    p = Path(path)
+    while not p.exists() and p.parent != p:
+        p = p.parent
+    return shutil.disk_usage(p).free

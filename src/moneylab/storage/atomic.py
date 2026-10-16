@@ -15,8 +15,10 @@ import logging
 import os
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 log = logging.getLogger(__name__)
 
@@ -36,30 +38,51 @@ def sha256_of(payload: Any) -> str:
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
-def atomic_write_bytes(path: Path, data: bytes) -> Path:
+def sha256_file(path: Path) -> str:
+    """Hash of the file's exact bytes (read in chunks)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _replace(tmp: str, path: Path) -> None:
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_REPLACE_DELAY * (attempt + 1))
+
+
+@contextmanager
+def atomic_open(path: Path) -> Iterator[BinaryIO]:
+    """Binary stream to `path` with the same all-or-nothing guarantee as `atomic_write_bytes`,
+    for outputs too large to build in memory. Nothing appears at `path` if the block raises."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=TMP_SUFFIX)
     try:
         with os.fdopen(fd, "wb") as f:
-            f.write(data)
+            yield f
             f.flush()
             os.fsync(f.fileno())
-        for attempt in range(_REPLACE_ATTEMPTS):
-            try:
-                os.replace(tmp, path)
-                break
-            except PermissionError:
-                if attempt == _REPLACE_ATTEMPTS - 1:
-                    raise
-                time.sleep(_REPLACE_DELAY * (attempt + 1))
+        _replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
         except OSError:
             pass
         raise
-    return path
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> Path:
+    with atomic_open(path) as f:
+        f.write(data)
+    return Path(path)
 
 
 def atomic_write_text(path: Path, text: str) -> Path:

@@ -1,0 +1,95 @@
+# MoneyLab v0.4 - Upbit KRW-BTC microstructure study: PRE-REGISTERED parameters.
+#
+# Frozen before any label or statistic of the research data is looked at. The SHA-256 of this
+# file and of docs/research_v04_preregistration.md are written into every run manifest;
+# `research-final` refuses to open the test split when either hash differs from the one the run
+# was built with. Changing anything here starts a NEW study (new hashes), never a silent edit.
+
+[study]
+name = "moneylab-v0.4-upbit-krw-btc-microstructure"
+version = 1
+market = "KRW-BTC"
+preregistration = "docs/research_v04_preregistration.md"
+provenance_required = "real"          # synthetic / fixture data is NOT_EVIDENCE
+# A single session can never yield PAPER_CANDIDATE.
+min_sessions_for_paper = 3
+nominal_session_seconds = 21600       # 6 h; shorter sessions are INSUFFICIENT_EVIDENCE
+
+[sampling]
+grid_seconds = 1.0                    # wall-clock grid on the local receive clock
+time_axis = "received"                # a row at t uses only events with received_timestamp <= t
+warmup_seconds = 5.0                  # after the first REALTIME book of every connection
+stale_book_seconds = 1.0              # book_age above this: row excluded (stale_book)
+gap_seconds = 10.0                    # book_age above this: discontinuity (windows across it are invalid)
+
+[labels]
+horizons_seconds = [1, 5, 10, 30]
+sizes_btc = [0.001, 0.01]
+delays_ms = [0, 100, 250]             # entry at t+delay, exit at t+h+delay
+
+[split]
+train = 0.6
+validation = 0.2
+test = 0.2
+embargo_seconds = 300                 # between train|validation and validation|test
+# Additionally: label windows are purged at every segment end and feature windows never reach
+# into the previous segment (see preregistration, section 6).
+
+[costs]
+# Upbit trading fee per side, in bp. Not confirmed from an official page for this account, so
+# it is a parameter, never a constant in code. While `account_fee_bps` is unset, decisions use
+# the most expensive scenario.
+fee_bps_scenarios = [5.0, 15.0, 25.0]
+# account_fee_bps = 5.0
+decision_size_btc = 0.001
+decision_delay_ms = 0
+
+[stats]
+quantiles = 5
+ci_level = 0.95
+bootstrap = "stationary"
+bootstrap_resamples = 1000
+bootstrap_seed = 20261006
+block_seconds_min = 60                # mean block length = max(block_seconds_min, block_horizon_multiple * h)
+block_horizon_multiple = 5
+hac_extra_lag_seconds = 60            # Newey-West lag = h + this
+fdr_alpha = 0.05                      # Benjamini-Hochberg over every tested feature x horizon
+
+[decision]
+min_valid_share = 0.90
+min_quantile_monotonicity = 0.9
+min_gross_to_cost = 1.5
+robust_delay_ms = 250
+robust_fee_buffer_bps = 2.0
+min_nonoverlapping_triggers = 200
+# Evidence sufficiency (Phase 1.1). Without enough evidence a test is INSUFFICIENT_EVIDENCE ->
+# RESEARCH_MORE, never REJECT. REJECT needs NEGATIVE_EVIDENCE on a sufficient sample.
+min_evidence_triggers = 30            # non-overlapping triggers needed before net/gross can reject
+max_missing_rate = 0.5                # feature missing on more than this share of clean rows -> insufficient
+
+[clock]
+# Local clock quality (core.clock_monitor, w32tm /stripchart). Quality metadata ONLY: never used to
+# correct timestamps, features or labels. offset = reference - local (negative: local clock ahead).
+warn_ms = 100.0                       # any |offset| above -> WARNING
+unstable_ms = 250.0                   # |offset| above this ...
+unstable_seconds = 600.0              # ... for at least 10 minutes ...
+unstable_min_measurements = 3         # ... and 3 consecutive measurements -> CLOCK_UNSTABLE
+stale_seconds = 1800.0                # no successful measurement for 30 min -> UNKNOWN
+
+[features]
+# Tested signals (feature x horizon). Price LEVELS (mid_price, microprice, spread in KRW) are
+# computed and stored as state but not tested: they are non-stationary and testing them would
+# only measure the session's trend.
+signals = [
+  "spread_bps", "microprice_dev_bps",
+  "obi_1", "obi_5", "obi_10", "obi_30",
+  "bid_depth_10", "ask_depth_10", "bid_depth_30", "ask_depth_30",
+  "depth_imbalance_5bp", "depth_imbalance_10bp",
+  "signed_volume_1s", "signed_volume_5s", "signed_volume_30s",
+  "trade_flow_imbalance_1s", "trade_flow_imbalance_5s", "trade_flow_imbalance_30s",
+  "buy_intensity", "sell_intensity",
+  "return_1s", "return_5s", "return_30s", "return_60s",
+  "realized_vol_30s", "realized_vol_60s", "realized_vol_300s",
+  "liquidity_concentration", "book_slope",
+]
+state = ["mid_price", "spread", "microprice"]
