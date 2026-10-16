@@ -105,10 +105,47 @@ def test_block_bootstrap_is_deterministic_and_needs_enough_blocks():
     assert S.derived_seed(7, "validation", "obi_5", "5") == S.derived_seed(7, "validation", "obi_5", "5")
 
 
+# research/v06 is the one package exempt from the no-shuffle rule: its pre-registered matched random
+# exposure test (B1) needs seeded permutations. Its randomness is checked in tests/test_v06_randomness.py.
+V06_DIR = SRC / "research" / "v06"
+V04_RESEARCH_MODULES = {"__init__", "book_state", "config", "features", "io", "labels", "leaderboard",
+                        "manifest", "pipeline", "sampling", "split", "stats"}
+
+
+def _v04_research_files() -> list[Path]:
+    """Every research file outside research/v06, including files added later."""
+    return [f for f in (SRC / "research").rglob("*.py") if V06_DIR not in f.parents]
+
+
 def test_no_random_shuffle_in_research_code():
-    for f in (SRC / "research").rglob("*.py"):
+    files = _v04_research_files()
+    assert {f.stem for f in files if f.parent == SRC / "research"} >= V04_RESEARCH_MODULES
+    for f in files:
         text = f.read_text(encoding="utf-8")
         assert "shuffle" not in text and "random.sample" not in text, f
+
+
+def test_only_research_v06_is_exempt_from_the_no_shuffle_rule():
+    exempt = [f for f in (SRC / "research").rglob("*.py") if f not in _v04_research_files()]
+    assert exempt and all(V06_DIR in f.parents for f in exempt)
+
+
+def test_v04_research_code_does_not_import_v06():
+    """The exemption must not leak: v0.4 modules cannot reach the seeded shuffling in research/v06."""
+    import ast
+
+    for f in _v04_research_files():
+        for node in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                assert not module.startswith("moneylab.research.v06"), f
+                if node.level:  # relative import from inside research/
+                    assert module != "v06" and not module.startswith("v06."), f
+                    assert not any(a.name == "v06" for a in node.names), f
+                if module == "moneylab.research":
+                    assert not any(a.name == "v06" for a in node.names), f
+            elif isinstance(node, ast.Import):
+                assert not any(a.name.startswith("moneylab.research.v06") for a in node.names), f
 
 
 def test_nonoverlapping_count():
