@@ -129,6 +129,7 @@ from moneylab.backtest.ledger import AccountingError
 from moneylab.backtest.portfolio import RunConfig as BacktestRunConfig
 from moneylab.backtest.run import INITIAL_CASH_KRW, RunError, run_backtest, verify_run
 from moneylab.backtest.report import ReportError, build_report, check_report
+from moneylab.backtest.segment import SegmentError, export_segment
 from moneylab.backtest.settings import DEFAULT_SETTINGS_FILE as BACKTEST_SETTINGS, SettingsError, cost_model
 from moneylab.backtest.settings import load_cost_settings
 from moneylab.backtest.strategy import RULES as BACKTEST_RULES
@@ -815,11 +816,25 @@ def cmd_backtest_verify(args: argparse.Namespace, settings: Settings) -> int:
     if args.json:
         console.print_json(json.dumps(rep.to_dict()))
     else:
-        console.print(f"{NOT_EVIDENCE} | backtest-verify {args.run_dir}: {'OK' if rep.ok else 'FAILED'}", markup=False)
+        console.print(f"{NOT_EVIDENCE} | backtest-verify {args.run_dir}: {rep.status}", markup=False)
         for name, c in rep.checks.items():
             state = "PASS" if c["ok"] is True else "FAIL" if c["ok"] is False else "NOTE"
             console.print(f"  {state} {name}: {c['detail']}", markup=False)
     return EXIT_OK if rep.ok else EXIT_ERROR
+
+
+def cmd_backtest_segment(args: argparse.Namespace, settings: Settings) -> int:
+    """Upper-bound segment (bar.end_utc <= last_day + 3 days) of two verified bar directories (BT-3c)."""
+    out = args.out or settings.processed_dir / "backtest_segments-fixture"
+    try:
+        exp = export_segment(args.daily, args.hourly, _utc_day(args.last_day), out)
+    except (SegmentError, DataIntegrityError, OSError, ValueError) as exc:
+        console.print(f"{NOT_EVIDENCE} | backtest-segment refused: {type(exc).__name__}: {exc}", markup=False)
+        return EXIT_ERROR
+    console.print(f"{NOT_EVIDENCE} | backtest-segment {exp.status}: {exp.dir}", markup=False)
+    console.print(f"  segment_content_sha256 {exp.plan.content_sha256}", markup=False)
+    console.print(f"  segment_manifest_sha256 {exp.plan.manifest_sha256}", markup=False)
+    return EXIT_OK
 
 
 def cmd_backtest_report(args: argparse.Namespace, settings: Settings) -> int:
@@ -999,6 +1014,14 @@ def build_parser() -> argparse.ArgumentParser:
     bt.add_argument("--settings", type=Path, default=BACKTEST_SETTINGS, help="cost settings (configs/backtest_costs.toml)")
     bt.add_argument("--out", type=Path, default=None, help="default data/processed/backtest-fixture")
     bt.set_defaults(func=cmd_backtest)
+
+    bs = sub.add_parser("backtest-segment", help="backtest: upper-bound input segment (end <= last day + 3 days) of "
+                                                 "exported SYNTHETIC/fixture bars (offline)")
+    bs.add_argument("--daily", type=Path, required=True, help="exported daily bar directory")
+    bs.add_argument("--hourly", type=Path, required=True, help="exported hourly bar directory")
+    bs.add_argument("--last-day", required=True, help="last signal day of the runs, YYYY-MM-DD (UTC)")
+    bs.add_argument("--out", type=Path, default=None, help="default data/processed/backtest_segments-fixture")
+    bs.set_defaults(func=cmd_backtest_segment)
 
     bv = sub.add_parser("backtest-verify", help="backtest: re-check and recompute a run directory (writes nothing)")
     bv.add_argument("run_dir", type=Path)
