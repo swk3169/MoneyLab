@@ -128,6 +128,7 @@ from moneylab.backtest.execution import SUBSTITUTION_RULES as BACKTEST_SUBSTITUT
 from moneylab.backtest.ledger import AccountingError
 from moneylab.backtest.portfolio import RunConfig as BacktestRunConfig
 from moneylab.backtest.run import INITIAL_CASH_KRW, RunError, run_backtest, verify_run
+from moneylab.backtest.report import ReportError, build_report, check_report
 from moneylab.backtest.settings import DEFAULT_SETTINGS_FILE as BACKTEST_SETTINGS, SettingsError, cost_model
 from moneylab.backtest.settings import load_cost_settings
 from moneylab.backtest.strategy import RULES as BACKTEST_RULES
@@ -821,6 +822,37 @@ def cmd_backtest_verify(args: argparse.Namespace, settings: Settings) -> int:
     return EXIT_OK if rep.ok else EXIT_ERROR
 
 
+def cmd_backtest_report(args: argparse.Namespace, settings: Settings) -> int:
+    """Metrics and benchmarks B1-B4 of a verified run, into a new report directory (BT-2b-3)."""
+    out = args.out or settings.processed_dir / "backtest_reports-fixture"
+    console.print(f"{NOT_EVIDENCE} | backtest-report {args.run_dir} -> {out} (descriptive only, no p-values)",
+                  markup=False)
+    try:
+        rep = build_report(args.run_dir, out, seed=args.seed, draws=args.b1_draws, code_state=backtest_code_state(),
+                           now=datetime.now(UTC))
+    except (ReportError, RunError, DataIntegrityError, AccountingError, OSError, ValueError) as exc:
+        console.print(f"backtest-report refused: {type(exc).__name__}: {exc}", markup=False)
+        return EXIT_ERROR
+    b = rep.body["benchmarks"]
+    console.print(f"saved {rep.dir}", markup=False)
+    console.print(f"  report_sha256 {rep.report_sha256}", markup=False)
+    console.print(f"  benchmarks: {b['status']}" + ("" if b["status"] == "compared" else f" ({'; '.join(b['reasons'])})"),
+                  markup=False)
+    return EXIT_OK
+
+
+def cmd_backtest_report_verify(args: argparse.Namespace, settings: Settings) -> int:
+    rep = check_report(args.report_dir, args.run_dir, code_state=backtest_code_state())
+    if args.json:
+        console.print_json(json.dumps(rep.to_dict()))
+    else:
+        console.print(f"{NOT_EVIDENCE} | backtest-report-verify {args.report_dir}: {'OK' if rep.ok else 'FAILED'}",
+                      markup=False)
+        for name, c in rep.checks.items():
+            console.print(f"  {'PASS' if c['ok'] else 'FAIL'} {name}: {c['detail']}", markup=False)
+    return EXIT_OK if rep.ok else EXIT_ERROR
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="moneylab", description="MoneyLab - prediction market research (read-only)")
     p.add_argument("--version", action="version", version=f"moneylab {__version__}")
@@ -972,6 +1004,19 @@ def build_parser() -> argparse.ArgumentParser:
     bv.add_argument("run_dir", type=Path)
     bv.add_argument("--json", action="store_true")
     bv.set_defaults(func=cmd_backtest_verify)
+
+    br = sub.add_parser("backtest-report", help="backtest: metrics and benchmarks B1-B4 of a verified run (offline)")
+    br.add_argument("run_dir", type=Path)
+    br.add_argument("--seed", type=int, required=True, help="B1 seed, 0 <= seed < 2**64 (rule bt-seed/1; no default)")
+    br.add_argument("--b1-draws", type=int, default=999, help="B1 placements (default 999)")
+    br.add_argument("--out", type=Path, default=None, help="default data/processed/backtest_reports-fixture")
+    br.set_defaults(func=cmd_backtest_report)
+
+    bq = sub.add_parser("backtest-report-verify", help="backtest: re-check a report against its run (writes nothing)")
+    bq.add_argument("report_dir", type=Path)
+    bq.add_argument("run_dir", type=Path)
+    bq.add_argument("--json", action="store_true")
+    bq.set_defaults(func=cmd_backtest_report_verify)
 
     rb = sub.add_parser("research-build", help="v0.4: raw Upbit dataset -> grid/features/labels/split (offline)")
     rb.add_argument("dataset", type=Path, help="Upbit dataset directory (.../<session>/KRW-BTC)")
