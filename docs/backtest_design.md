@@ -131,8 +131,46 @@ data/processed/backtest/<run_id>/  trades.jsonl, equity.jsonl, metrics.json, man
     개별 1시간봉 결측은 기존 규칙(대기·대체 체결, `virtual_fallback`, `last_close`)을 따른다. E2의 일봉 범위는 이 검사에 넣지 않는다.
   - `backtest-verify`의 `boundary` 검사는 백테스트를 다시 돌리지 않고 저장된 config, 신호, daily, 거래 행이 이 경계 안에 있는지 따로
     확인한다(`run.boundary_problems`).
-  - **현재 차단은 이 두 층(엔진 guard, 독립 verifier)이다.** 입력 파일 자체를 G_end에서 잘라 넘기는 적재 단계 분할(vault)은 BT-3c다.
-    그 전까지 provenance는 입력 파일 전체의 해시다.
+  - BT-3b의 차단은 이 두 층(엔진 guard, 독립 verifier)이다. 입력을 물리적으로 자르는 segment와 입력·config 식별은 BT-3c(아래),
+    잠금 vault는 BT-3d다.
+- **입력 segment와 식별 (BT-3c).** 평가 창은 [G_start, G_end], 입력 창은 [데이터 시작, G_end]다. 물리적 불변식은 `bar.end_utc ≤ G_end`
+  하나이고 하한은 없다(G_start로 자르지 않는다: 신호 창은 개수 기준이고 평가 fallback은 과거로 제한이 없어, 하한을 자르면 간격이 있을 때
+  신호 사유와 평가 가격이 바뀐다).
+  - `backtest-segment --daily D --hourly H --last-day E [--out R]`(`backtest/segment.py`): 두 bar 디렉터리를 `load_bars`로 **전체**
+    검증한 뒤(깨진 행·중복·순서·real 거부, G_end 이후 행도 포함) `end_utc ≤ cut_end_utc = E + 3일`인 Bar만 기존 정규 행으로 쓴다.
+    결과 `<R>/<segment_id>/`: `segment_manifest.json`(`moneylab.backtest.segment/1`), 최상위 `SHA256SUMS.txt`(7개 파일, 상대경로 사전순),
+    source 디렉터리 이름 그대로인 bars/1 하위 디렉터리 2개(`load_bars`가 그대로 읽는다; `candle_report`는 pull 전체 값이라 복사하지
+    않는다). 같은 내용이 이미 있으면 `ALREADY_EXISTS_IDENTICAL`(쓰기 없음), 다르면 거부하고 덮어쓰지 않는다. 임시 디렉터리에 쓰고 한
+    번의 rename으로 게시한다.
+  - 식별은 네 가지로 나뉜다.
+    1. **source 식별·계보**: interval별 `source_bars_sha256`, `source_bars_manifest_sha256`, `source_bars`와 위치 `source_locator`.
+       segment manifest에 기록하지만 content 식별에는 넣지 않는다.
+    2. **segment 의미상 content 식별**: `segment_content_sha256` = identity payload의 정규 JSON SHA. payload는 스키마, market,
+       provenance, cut, rule, interval별 dir_name·bars_file·`segment_bars_sha256`·`segment_bars`·처음/끝 시작 시각뿐이다(source 계보,
+       경로, 시간 없음). `segment_id`는 이 SHA에서 유도한 디렉터리 이름이다.
+    3. **최종 manifest 무결성**: `segment_manifest_sha256` = 최종 manifest 바이트(content payload + source 계보 + 식별자 + locator)의 SHA.
+    4. **run의 consumed 식별**: run/2의 `inputs.<iv>.consumed_sha256`(아래).
+    - G_end 이후 정상 행이 source에 추가되면 (1)과 (3)은 바뀌고 (2), `segment_id`, (4), 원장·경제적 결과는 바뀌지 않는다. 같은 source를
+      다른 경로로 복사하면 locator 때문에 (3)만 바뀐다. G_end 이하 행이 바뀌면 (2), id, (4)가 바뀐다.
+  - run manifest `moneylab.backtest.run/2`: `config_sha256`(기본값까지 반영된 `RunConfig.to_dict()`의 정규 JSON SHA, CLI 표현이
+    아님), `boundary`(g_start, g_end, first_ref, valuation_end), `inputs.<iv>.consumed_sha256`·`consumed_bars`(입력 중
+    `end_utc ≤ G_end`인 Bar의 의미상 식별; 기존 `bars_sha256`은 입력 디렉터리 전체의 식별로 남는다), `inputs.<iv>.segment`(전체 입력이면
+    null, segment 입력이면 id·content SHA·manifest SHA·cut·source 해시 2개). segment 입력은 입력 디렉터리의 부모에 segment manifest가
+    있을 때이며, 무결성·id 일치·`cut == G_end`·일봉과 시간봉이 같은 segment인지가 하나라도 어긋나면 run을 거부한다(전체 입력으로 대체하지
+    않음). **result.json은 바뀌지 않는다**: segment run의 result는 provenance의 `bars_sha256` 두 값만 전체 입력 run과 다르고 신호·원장·지표는
+    같다.
+  - 이 `config_sha256`은 backtest `RunConfig`의 식별이다. 사전등록이 말하는 study config(`configs/research_v06.toml`, BT-4에서 고정)의
+    SHA와는 다른 개념이다.
+  - `backtest-verify`의 `identity` 검사(files, inputs 다음)는 백테스트를 다시 돌리지 않고 저장 config·재적재한 입력·segment 파일만으로
+    config SHA, boundary, consumed 해시, segment 식별과 `source_locator`의 source에서 다시 자른 결과를 확인한다. source를 그 위치에서
+    찾을 수 없으면 `SOURCE_UNAVAILABLE`(identity ok = None, 전체 ok = false, exit 1; 손상이 아니라 유도를 다시 확인하지 못했다는 뜻,
+    다른 위치 자동 탐색 없음), source가 있는데 다르면 실패다.
+  - run/1 manifest(BT-3c 이전)는 run/2로 바꾸거나 다시 해석하지 않는다. files·inputs·settings·accounting(저장 행)·boundary·
+    engine_self_check는 그대로 검사하고, identity(필드 없음)와 기록과 다른 커밋의 code, 현재 엔진으로 재현되지 않는 reproducibility는
+    NOTE로 둔다. 실패가 없으면 상태 `LEGACY_REQUIRES_COMMIT_<기록 커밋 7자리>`(ok = false, exit 1)이고 완전 검증은 기록 커밋에서 한다.
+    실패가 있으면 `FAILED`다. CLI 머리줄은 상태(OK, FAILED, SOURCE_UNAVAILABLE, LEGACY_…)를 출력한다.
+  - 잠금 vault(open_once, seal, 접근 기록, 초안 19.1–19.5)는 BT-3d, 사전등록·study config 고정은 BT-4다. 모든 segment와 run은
+    SYNTHETIC / NOT_EVIDENCE다.
 - 위반 시도(미래 인덱스, horizon 밖 시각)는 `LookAheadError`를 낸다. 경고로 넘기지 않는다.
 
 ## 5. 전략 계층
@@ -348,6 +386,8 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 
 ### 10.3 Holdout 격리 (BT-3)
 
+- 구현 상태: 상한 segment와 입력·config 식별은 BT-3c(4절)에 있다. 아래 vault 잠금은 BT-3d에서 구현한다(사전등록 16-0: 고정 전 완료).
+
 - 구간: 확증 평가(warmup 끝 – 2024-03-31), historical holdout(2024-04-01 – H_end), 제외 구간, forward(동결 후). 초안 8절과 같다.
 - `bar_export`가 구간을 나눌 때 holdout·forward Bar는 **vault 디렉터리에만** 쓰고, 확증 평가용 Bar 파일에는 넣지 않는다.
 - `HoldoutVault.open_once(config_sha, prereg_sha)`: 한 번만 열린다(기존 `research/split.LockedTestVault`와 같은 형태). 개봉 기록을
@@ -514,3 +554,4 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 | 문구 정리 | 2026-10-16 | 사전등록 M20/M60/M120과 BT `sma*`의 구분을 명확화(5.1절, 10.4절). 전략 정의 변경 없음 |
 | BT-3a | 2026-10-16 | 사전등록 v0.6 규칙 `M20/M60/M120/R5`를 별도 rule ID로 구현(5.1절, 16절 U1 후속). `R5`와 `r5`는 신호가 같지만 별개 전략. 스키마·초안 변경 없음, 합성·fixture 전용(SYNTHETIC / NOT_EVIDENCE) |
 | BT-3b | 2026-10-16 | 평가 구간 경계(4절): G = [F + 2일, E + 3일), 평가 끝 R(E + 1) ≤ G_end를 유도, 엔진 guard(`bar.end_utc ≤ G_end`), 1시간봉이 평가 끝 전에 끝나면 거부, `backtest-verify`의 독립 `boundary` 검사. "이중 차단"과 "(현금 유지)" 문구를 실제 동작에 맞게 정정(U4는 미결). 적재 단계 분할·vault는 BT-3c. 스키마·초안 변경 없음, SYNTHETIC / NOT_EVIDENCE |
+| BT-3c | 2026-10-16 | 입력 segment와 식별(4절): `backtest-segment`(segment/1, `end_utc ≤ last_day + 3일`, 하한 없음, source 계보·content SHA·id·manifest SHA 분리. 계약 v1.2: content SHA에서 source 계보 제외), run manifest run/2(`config_sha256`, `boundary`, consumed 해시, segment 필드), `backtest-verify`의 독립 `identity` 검사, `SOURCE_UNAVAILABLE`과 run/1 legacy 상태. result·report/2·bt-metrics/2·bt-seed/1·bars/1 형식 변경 없음. vault 잠금은 BT-3d, 고정은 BT-4. SYNTHETIC / NOT_EVIDENCE |
