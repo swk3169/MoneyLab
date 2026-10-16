@@ -20,6 +20,8 @@ is fixed at 1,000,000 KRW. Fixture runs must go under a root whose name ends wit
                      that can affect execution (allowed untracked documents are listed, not failed)
   reproducibility    the same config on the same inputs gives the same result_sha256
   accounting         ledger invariants on the recomputed run and on the stored daily / trade rows
+  boundary           the stored signals, daily rows and trades lie inside the evaluation boundary derived
+                     from the config (BT-3b, `boundary_problems`); checked on the files, not by re-running
   engine_self_check  a hand-calculated reference case still gives its exact expected equity
 The full pytest suite is not run here (no subprocess in backtest/); run it separately.
 All outputs are SYNTHETIC / NOT_EVIDENCE before BT-5.
@@ -41,9 +43,10 @@ from moneylab.backtest.bars_io import MANIFEST_FILE as BARS_MANIFEST_FILE
 from moneylab.backtest.bars_io import load_bars
 from moneylab.backtest.code_state import CODE_STATE_POLICY, code_state_problems
 from moneylab.backtest.costs import PRECISION, CostModel
-from moneylab.backtest.data import BarSeries, DataIntegrityError, provenance_for
+from moneylab.backtest.data import BarSeries, DataIntegrityError, LookAheadError, provenance_for
+from moneylab.backtest.execution import SCENARIOS
 from moneylab.backtest.ledger import AccountingError
-from moneylab.backtest.portfolio import BacktestResult, RunConfig, simulate
+from moneylab.backtest.portfolio import BacktestResult, RunConfig, evaluation_boundary, simulate
 from moneylab.backtest.settings import cost_model, load_cost_settings, settings_hashes
 from moneylab.domain.bars import NOT_EVIDENCE, Bar
 from moneylab.storage.atomic import atomic_write_bytes, sha256_file
@@ -85,7 +88,9 @@ class RunVerifyReport:
         return {"evidence": NOT_EVIDENCE, "run_dir": self.run_dir, "ok": self.ok, "checks": self.checks}
 
 
-VERIFY_CHECKS = ("files", "inputs", "settings", "code", "reproducibility", "accounting", "engine_self_check")
+VERIFY_CHECKS = ("files", "inputs", "settings", "code", "reproducibility", "accounting", "boundary",
+                 "engine_self_check")
+FILL_KINDS = ("primary", "substituted", "virtual_fallback")
 
 
 def utc_stamp(t: datetime) -> str:
@@ -224,6 +229,90 @@ def _stored_accounting(run_dir: Path) -> str:
     return "stored rows hold the invariants"
 
 
+def _utc(text: Any) -> datetime:
+    t = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    if t.utcoffset() != timedelta(0):
+        raise ValueError(f"not a UTC time: {text!r}")
+    return t
+
+
+def boundary_problems(config: dict[str, Any], signals: list[dict[str, Any]], daily: list[dict[str, Any]],
+                      trades: list[dict[str, Any]]) -> list[str]:
+    """Temporal membership of the stored rows in the run's evaluation boundary (BT-3b). Pure: reads only the
+    given config and rows (it does not run the backtest). Terminal holdings are the accounting check's job."""
+    try:
+        cfg = config_from_dict(config)  # V1: first_day / last_day at 00:00 UTC and last_day >= first_day
+        b = evaluation_boundary(cfg)  # V6: valuation end <= G_end
+    except (KeyError, TypeError, ValueError) as exc:
+        return [f"config: {type(exc).__name__}: {exc}"]
+    problems: list[str] = []
+    if b.valuation_end > b.g_end:
+        problems.append(f"valuation end {b.valuation_end} is after G_end {b.g_end}")
+    one_day = timedelta(days=1)
+    spec = SCENARIOS[cfg.scenario]
+    n = (cfg.last_day - cfg.first_day).days + 1
+
+    try:  # V2
+        days = [_utc(s["day"]) for s in signals]
+        if days != [cfg.first_day + k * one_day for k in range(n)]:
+            problems.append(f"signal days are not exactly first_day .. last_day ({len(days)} rows, expected {n})")
+        for s, d in zip(signals, days):
+            decided = _utc(s["decided_at"])
+            if decided != d + one_day + cfg.confirm_delay:
+                problems.append(f"signal {s['day']}: decided_at {s['decided_at']} does not follow the confirm delay")
+            if decided > b.g_end:
+                problems.append(f"signal {s['day']}: decided_at {s['decided_at']} is after G_end")
+    except (KeyError, TypeError, ValueError) as exc:
+        problems.append(f"signals: {type(exc).__name__}: {exc}")
+
+    try:  # V3
+        allowed = {spec.ref_time(cfg.first_day + k * one_day) for k in range(n + 1)}
+        refs = [_utc(r["ref_time"]) for r in daily]
+        for r, t in zip(daily, refs):
+            if t not in allowed:
+                problems.append(f"daily row {r['ref_time']} is not a reference time R(D), "
+                                f"first_day <= D <= last_day + 1")
+            if t > b.valuation_end:
+                problems.append(f"daily row {r['ref_time']} is after the valuation end")
+        if any(a >= c for a, c in zip(refs, refs[1:])):
+            problems.append("daily reference times are not strictly increasing")
+    except (KeyError, TypeError, ValueError) as exc:
+        problems.append(f"daily: {type(exc).__name__}: {exc}")
+
+    try:  # V4, V5
+        virtual = 0
+        for t in trades:
+            leg = t.get("leg")
+            day, fill, start, signal = (_utc(t[k]) for k in ("day", "fill_time", "fill_bar_start", "signal_time"))
+            kind, is_virtual = t["fill_kind"], t["virtual"]
+            if kind not in FILL_KINDS:
+                problems.append(f"trade {leg}: unknown fill_kind {kind!r}")
+            if not start <= fill <= b.valuation_end:
+                problems.append(f"trade {leg}: fill_bar_start {t['fill_bar_start']} <= fill_time {t['fill_time']} "
+                                f"<= valuation end does not hold")
+            if fill > b.g_end:
+                problems.append(f"trade {leg}: fill_time {t['fill_time']} is after G_end")
+            if signal > b.g_end:
+                problems.append(f"trade {leg}: signal_time {t['signal_time']} is after G_end")
+            if kind in ("primary", "substituted") and not start < fill:
+                problems.append(f"trade {leg}: {kind} fill bar must start before it ends")
+            if kind == "virtual_fallback" and not is_virtual:
+                problems.append(f"trade {leg}: virtual_fallback on a non-virtual trade")
+            if is_virtual:
+                virtual += 1
+                if fill != b.valuation_end:
+                    problems.append(f"trade {leg}: virtual exit fill_time {t['fill_time']} is not the valuation end")
+                if day != cfg.last_day + one_day:
+                    problems.append(f"trade {leg}: virtual exit on day {t['day']}, expected last_day + 1")
+            elif not cfg.first_day <= day <= cfg.last_day:
+                problems.append(f"trade {leg}: day {t['day']} is outside first_day .. last_day")
+        if virtual > 1:
+            problems.append(f"{virtual} virtual exits (at most one)")
+    except (KeyError, TypeError, ValueError) as exc:
+        problems.append(f"trades: {type(exc).__name__}: {exc}")
+    return problems
+
+
 def engine_self_check() -> str:
     """Hand-calculated reference (sma20, E0, 25 bp fee, 5 bp slippage): buy at 121, sell at 91.
     Expected final equity = 1,000,000 * 0.9975^2 * 0.9995^2 * 91 / 121, exactly up to 50 digits."""
@@ -345,8 +434,22 @@ def verify_run(run_dir: Path, *, code_state: dict[str, Any]) -> RunVerifyReport:
         recomputed[0].ledger.verify()
         return "recomputed ledger verifies; " + _stored_accounting(run_dir)
 
+    def boundary() -> str:
+        result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+
+        def rows(name: str) -> list[dict[str, Any]]:
+            return [json.loads(line) for line in (run_dir / name).read_text(encoding="utf-8").splitlines() if line]
+
+        problems = boundary_problems(manifest["config"], result["signals"], rows("daily.jsonl"), rows("trades.jsonl"))
+        if problems:
+            more = f" (+{len(problems) - 5} more)" if len(problems) > 5 else ""
+            raise LookAheadError("; ".join(problems[:5]) + more)
+        b = evaluation_boundary(config_from_dict(manifest["config"]))
+        return f"stored rows lie within G_end {b.g_end.isoformat()}; valuation end {b.valuation_end.isoformat()}"
+
     _check(rep, "reproducibility", reproducibility)
     _check(rep, "accounting", accounting)
+    _check(rep, "boundary", boundary)
     _check(rep, "engine_self_check", engine_self_check)
     rep.add("regression_tests", None, "not run by verify_run; run the pytest suite separately")
     return rep

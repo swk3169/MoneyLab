@@ -69,7 +69,7 @@ tests: research/v06의 procedures·synthetic는 **테스트에서만** 기준 �
 data/processed/backtest_bars/<bars_id>/  bars_<interval>.jsonl + bars_manifest.json + SHA256SUMS.txt
       ▼
 [백테스트, 신규] backtest.run
-      │  BarSeries 적재 → SHA 재확인 → AsOfView(horizon = 구간 끝)
+      │  BarSeries 적재 → SHA 재확인 → AsOfView(horizon = G_end) + 경계 guard (4절, BT-3b)
       │  신호(일봉, 확정분만) → 주문 의도 → 체결 모델(1시간봉) → 비용 → 포트폴리오 → 원장·평가금액
       ▼
 data/processed/backtest/<run_id>/  trades.jsonl, equity.jsonl, metrics.json, manifest.json, SHA256SUMS.txt
@@ -119,8 +119,20 @@ data/processed/backtest/<run_id>/  trades.jsonl, equity.jsonl, metrics.json, man
 
 - `AsOfView(series, t)`는 **`end_utc ≤ t`이고 확정 시각 ≤ t인 Bar만** 돌려준다(기존 `candles.closed_as_of`와 같은 규칙).
 - 전략은 `AsOfView`만 받는다. `BarSeries` 자체나 인덱스에 직접 접근할 수 없다.
-- 구간 horizon: 각 평가 구간 G의 실행에서 `AsOfView`의 상한은 `min(t, G_end)`다(v0.6 초안 8.1-1). G_end 이후 Bar는 적재 단계에서
-  아예 넘기지 않는다(이중 차단).
+- **평가 구간 경계 (BT-3b).** 구간은 `first_day` F, `last_day` E, 시나리오에서 유도하고 새 설정 필드나 저장 필드는 없다
+  (`portfolio.evaluation_boundary`). 비교의 기준은 날짜 이름이 아니라 UTC 시각이다.
+  - R(D) = D + 1일 + ρ(시나리오의 `ref_offset`: E0·E3·DIAG 01:00, E1 02:00, E2 24:00).
+  - G = [G_start, G_end), G_start = F + 2일, G_end = E + 3일(초안 8.1, research `synthetic`의 구간 [g0, g1)과 같은 대응 g0 = F + 2,
+    g1 = E + 3). first_ref = R(F), 평가 끝 = R(E + 1) ≤ G_end(E2에서는 같다).
+  - 체결·평가에 쓰는 모든 Bar는 `bar.end_utc ≤ G_end`(같으면 허용), 모든 결정 시각은 ≤ G_end. 위반은 `LookAheadError`다(엔진 guard,
+    `AsOfView`에는 horizon = G_end를 넘긴다). G_start는 기록용이고 하한으로 쓰지 않는다: F 이전 일봉은 lookback으로 쓸 수 있다(초안
+    8.1-1). 이력 부족·간격은 run을 거부하지 않고 신호를 `None`으로 둔다.
+  - 1시간봉 데이터가 평가 끝 R(E + 1)보다 먼저 끝나면(`hourly.last_end < R(E + 1)`) run을 거부한다(`DataIntegrityError`). 범위 안의
+    개별 1시간봉 결측은 기존 규칙(대기·대체 체결, `virtual_fallback`, `last_close`)을 따른다. E2의 일봉 범위는 이 검사에 넣지 않는다.
+  - `backtest-verify`의 `boundary` 검사는 백테스트를 다시 돌리지 않고 저장된 config, 신호, daily, 거래 행이 이 경계 안에 있는지 따로
+    확인한다(`run.boundary_problems`).
+  - **현재 차단은 이 두 층(엔진 guard, 독립 verifier)이다.** 입력 파일 자체를 G_end에서 잘라 넘기는 적재 단계 분할(vault)은 BT-3c다.
+    그 전까지 provenance는 입력 파일 전체의 해시다.
 - 위반 시도(미래 인덱스, horizon 밖 시각)는 `LookAheadError`를 낸다. 경고로 넘기지 않는다.
 
 ## 5. 전략 계층
@@ -153,7 +165,8 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
   - 신호는 테스트에서만 `research/v06/procedures.signals`와 교차검증한다. 운영 코드(`backtest/`)는 research를 import하지 않는다.
   - 계열 구분은 manifest·result·report에 기록하지 않는다(스키마 변경 없음).
   - fixture·합성 데이터 결과는 M 규칙이라도 SYNTHETIC / NOT_EVIDENCE이고 사전등록 판정이나 확증 결과가 아니다. 실데이터는 계속 거부한다.
-- 필요한 일봉이 없거나 해당 일봉이 결측이면 신호는 `None`(현금 유지)이고 사유를 기록한다.
+- 필요한 일봉이 없거나 해당 일봉이 결측이면 신호는 `None`이고 사유를 기록한다. 이때 새 주문은 없고 대기 주문과 포지션은 그대로
+  유지된다(보유 중 포지션을 청산할지는 U4, 미결).
 - 0 수익률(= 0)은 초안 M 규칙에서 현금, R5에서 현금이다(부등호가 엄격). BT `sma*` 규칙은 C_D = SMA_N(D)이면 현금이다(위 정의).
 - 파라미터(N, 방향)는 config에서 읽고 config SHA를 manifest에 기록한다. 백테스터에는 파라미터를 바꾸는 반복 실행 기능이 없다.
 
@@ -194,7 +207,7 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 | 체결 1시간봉이 없음(무체결 구간 생략) | 다음 1시간봉 종가에 체결. 24시간 안에 없으면 그 시나리오의 다음 기준 시각 종가 (초안 6.3) | `fill_substituted`, 지연 시간 |
 | 다음 기준 시각까지도 없음 | 미체결. 포지션 유지, 다음 날 다시 시도 | `unfilled`, 연속 일수 |
 | 주문 금액이 체결 구간 거래대금의 비율 p를 넘음 | **연구 모드에서는 체결하고 표시만 한다**(초안에 참여율 규칙이 없으므로 넣으면 study 변경) | `participation_ratio`, 초과 여부 |
-| 데이터 결측으로 신호가 `None` | 현금 유지(보유 중이면 청산하지 않고 유지할지는 U4) | `signal_missing` |
+| 데이터 결측으로 신호가 `None` | 새 주문 없음, 대기 주문·포지션 유지(보유 중 포지션을 청산할지는 U4, 미결) | `signal_missing` |
 
 - 미체결과 대체 체결 건수는 품질 지표(초안 Q10)로 보고한다.
 - 계좌 모드(8.2절)는 참여율 상한을 적용해 부분 체결을 계산할 수 있지만, 판정에는 연구 모드만 쓴다.
@@ -500,3 +513,4 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 | BT-1 | 2026-10-16 | U1 결정 반영(5.1절, 16절). 코어 MVP 구현(합성 데이터 전용, 미커밋): `domain/bars.py`, `backtest/{data,strategy,costs,portfolio,ledger,metrics}.py`. 비용은 매수·매도 수수료와 고정 bp slippage만(ASSUMED, FEE_UNCONFIRMED). 실데이터(`kind = real`)는 거부 |
 | 문구 정리 | 2026-10-16 | 사전등록 M20/M60/M120과 BT `sma*`의 구분을 명확화(5.1절, 10.4절). 전략 정의 변경 없음 |
 | BT-3a | 2026-10-16 | 사전등록 v0.6 규칙 `M20/M60/M120/R5`를 별도 rule ID로 구현(5.1절, 16절 U1 후속). `R5`와 `r5`는 신호가 같지만 별개 전략. 스키마·초안 변경 없음, 합성·fixture 전용(SYNTHETIC / NOT_EVIDENCE) |
+| BT-3b | 2026-10-16 | 평가 구간 경계(4절): G = [F + 2일, E + 3일), 평가 끝 R(E + 1) ≤ G_end를 유도, 엔진 guard(`bar.end_utc ≤ G_end`), 1시간봉이 평가 끝 전에 끝나면 거부, `backtest-verify`의 독립 `boundary` 검사. "이중 차단"과 "(현금 유지)" 문구를 실제 동작에 맞게 정정(U4는 미결). 적재 단계 분할·vault는 BT-3c. 스키마·초안 변경 없음, SYNTHETIC / NOT_EVIDENCE |
