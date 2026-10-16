@@ -18,6 +18,14 @@ Valuation at R(D): close of the hourly bar ending at R(D), else the last hourly 
 After the last signal day E the run ends at R(E+1): pending orders are cancelled and an open position
 is sold (virtual exit, draft 8.1 rule 4; at the valuation price if the fill bar is missing).
 
+Evaluation boundary (BT-3b; derived from first_day F, last_day E and the scenario, nothing new is stored):
+  R(D) = D + 1 day + ref_offset, G = [F + 2 days, E + 3 days) (draft 8.1; research/v06/synthetic segment
+  [g0, g1) with g0 = F + 2, g1 = E + 3), valuation end = R(E + 1) <= G_end (equal for E2).
+  Every bar the loop uses for a fill or a valuation must end at or before G_end and every decision time
+  must be at or before G_end, else LookAheadError; daily bars before F stay usable as lookback. The run is
+  refused (DataIntegrityError) when the hourly series ends before the valuation end; a single missing
+  hourly bucket inside the range keeps the fallback rules above.
+
 Only fixture or synthetic bars are accepted before BT-5. Results are SYNTHETIC / NOT_EVIDENCE;
 scenarios E3 and DIAG are additionally REPORT_ONLY (no executable order rule).
 """
@@ -32,7 +40,7 @@ from decimal import Decimal, localcontext
 from typing import Any
 
 from moneylab.backtest.costs import PRECISION, CostModel
-from moneylab.backtest.data import CONFIRM_DELAY, AsOfView, BarSeries, DataIntegrityError
+from moneylab.backtest.data import CONFIRM_DELAY, AsOfView, BarSeries, DataIntegrityError, LookAheadError
 from moneylab.backtest.execution import SCENARIOS, SUBSTITUTION_RULES, find_fill
 from moneylab.backtest.ledger import DailyRow, Ledger, UnfilledRow
 from moneylab.backtest.strategy import RULES, Signal, decide
@@ -77,6 +85,35 @@ class RunConfig:
                 "report_only": SCENARIOS[self.scenario].report_only, "fill_substitution": self.fill_substitution,
                 "fill_model": "ohlcv_approximation", "confirm_delay_s": self.confirm_delay.total_seconds(),
                 "capacity": "verified_range" if self.capacity_verified else "CAPACITY_UNVERIFIED"}
+
+
+@dataclass(frozen=True)
+class EvaluationBoundary:
+    first_day: datetime
+    last_day: datetime
+    scenario: str
+    g_start: datetime  # F + 2 days (recorded, not enforced: earlier daily bars are lookback)
+    g_end: datetime  # E + 3 days: no bar used for a fill or a valuation may end later
+    first_ref: datetime  # R(F)
+    valuation_end: datetime  # R(E + 1), the virtual exit
+
+
+def evaluation_boundary(config: RunConfig) -> EvaluationBoundary:
+    """The evaluation segment of a run, derived from first_day, last_day and the scenario only."""
+    spec = SCENARIOS[config.scenario]
+    one_day = timedelta(days=1)
+    b = EvaluationBoundary(config.first_day, config.last_day, config.scenario,
+                           config.first_day + 2 * one_day, config.last_day + 3 * one_day,
+                           spec.ref_time(config.first_day), spec.ref_time(config.last_day + one_day))
+    if b.valuation_end > b.g_end:
+        raise LookAheadError(f"scenario {config.scenario}: valuation end {b.valuation_end} is after G_end {b.g_end}")
+    return b
+
+
+def require_within_boundary(end_utc: datetime, g_end: datetime, what: str) -> None:
+    """A bar or a time used by the run must not lie after G_end (equal is allowed)."""
+    if end_utc > g_end:
+        raise LookAheadError(f"{what} at {utc_iso(end_utc)} is after the evaluation end G_end {utc_iso(g_end)}")
 
 
 @dataclass
@@ -149,6 +186,11 @@ def simulate(daily: BarSeries, hourly: BarSeries, config: RunConfig) -> Backtest
 
 def _simulate(daily: BarSeries, hourly: BarSeries, config: RunConfig) -> BacktestResult:
     _check_inputs(daily, hourly)
+    bound = evaluation_boundary(config)
+    g_end = bound.g_end
+    if hourly.last_end < bound.valuation_end:
+        raise DataIntegrityError(f"hourly bars end at {utc_iso(hourly.last_end)}, before the valuation end "
+                                 f"R(last_day + 1) = {utc_iso(bound.valuation_end)} (scenario {config.scenario})")
     rule = RULES[config.rule]
     spec = SCENARIOS[config.scenario]
     result = BacktestResult(config, {s.interval: {"kind": s.provenance.kind, "description": s.provenance.description,
@@ -163,6 +205,7 @@ def _simulate(daily: BarSeries, hourly: BarSeries, config: RunConfig) -> Backtes
         bar = hourly.last_ended_by(ref_time)
         if bar is None:
             return None, "none", None
+        require_within_boundary(bar.end_utc, g_end, "valuation bar")
         return bar.close, ("ref_close" if bar.end_utc == ref_time else "last_close"), bar.start_utc
 
     day = config.first_day
@@ -174,11 +217,12 @@ def _simulate(daily: BarSeries, hourly: BarSeries, config: RunConfig) -> Backtes
         ref_time = spec.ref_time(day)
         position = 1 if qty > 0 else 0
         last_step = day == final
+        require_within_boundary(decided_at, g_end, "decision time")
 
         if last_step:
             target: int | None = 0  # end of the run: virtual exit of an open position
         else:
-            sig = decide(rule, AsOfView(daily, decided_at, confirm_delay=config.confirm_delay), day)
+            sig = decide(rule, AsOfView(daily, decided_at, horizon=g_end, confirm_delay=config.confirm_delay), day)
             result.signals.append(sig)
             target = sig.value
 
@@ -202,8 +246,10 @@ def _simulate(daily: BarSeries, hourly: BarSeries, config: RunConfig) -> Backtes
             fill = find_fill(spec, daily, hourly, day, side, next_decision,
                              "none" if last_step else config.fill_substitution)
             if fill is not None:
+                require_within_boundary(fill.fill_time, g_end, "fill bar")
                 fill = (fill.price, fill.fill_time, fill.bar_start, fill.kind)
             elif last_step and price is not None:
+                require_within_boundary(ref_time, g_end, "virtual fallback fill")
                 fill = (price, ref_time, val_start or ref_time, "virtual_fallback")
             elif not last_step:
                 ledger.unfilled.append(UnfilledRow(day, order_time, side, "fill_bar_missing"))
