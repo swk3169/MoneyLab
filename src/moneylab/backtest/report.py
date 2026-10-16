@@ -1,4 +1,7 @@
-"""Backtest reports from verified run directories (BT-2b-3; docs/backtest_bt2b3_metrics.md).
+"""Backtest reports from verified run directories (BT-2b-3, BT-2b-4; docs/backtest_bt2b3_metrics.md and
+docs/backtest_bt2b4_metrics.md). Schema moneylab.backtest.report/2, metrics bt-metrics/2, seed bt-seed/1.
+/2 is the /1 content plus cost_analysis (gross / cost, break-even fee f*), yearly (UTC years) and
+round_trips (KRW P&L, Profit Factor, win rate).
 
 `build_report(run_dir, out_root, seed=..., draws=..., code_state=..., now=...)`
   1. refuses an output root that does not end with "-fixture" or lies inside the run directory, and an
@@ -20,6 +23,12 @@ version and the SHA-256 of report.json. SHA256SUMS.txt lists the three files by 
 `check_report(report_dir, run_dir, code_state=...)` writes nothing and checks the file hashes, the meta,
 the schema / definition / seed versions (unknown ones are refused), the run references, the run itself
 (verify_run) and that report.json and report.md are reproduced byte for byte.
+
+Legacy /1 reports (bt-metrics/1, commit 09504cd): only the checks that need no recomputation run (files,
+meta, versions, run_refs). The /1 calculation is not kept and /1 is never recomputed with the /2 code, and
+verify_run pins the run to its own commit anyway, so run_verify and content are marked
+LEGACY_REQUIRES_COMMIT_09504cd (ok = None) and the overall result is not OK. This status is distinct from a
+failed (corrupt) report: a legacy report whose integrity checks fail is FAILED.
 All reports are SYNTHETIC / NOT_EVIDENCE and descriptive: no p-values, no verdict.
 """
 
@@ -50,10 +59,10 @@ from moneylab.backtest.benchmarks import (
     ledger_positions,
     market_log_returns,
 )
+from moneylab.backtest.cost_analysis import cost_analysis
 from moneylab.backtest.data import DataIntegrityError
 from moneylab.backtest.performance import (
     ANNUALIZATION_DAYS,
-    METRICS_VERSION,
     RISK_FREE_RATE,
     MetricError,
     check_positive,
@@ -63,15 +72,24 @@ from moneylab.backtest.performance import (
     value,
 )
 from moneylab.backtest.portfolio import BacktestResult, simulate
+from moneylab.backtest.round_trips import RoundTripError, pair_round_trips, round_trip_report
 from moneylab.backtest.run import FIXTURE_ROOT_SUFFIX, SUMS_FILE, config_from_dict, utc_stamp, verify_run
+from moneylab.backtest.yearly import yearly_report
 from moneylab.domain.bars import NOT_EVIDENCE
 from moneylab.storage.atomic import atomic_write_bytes, sha256_file
 
-REPORT_SCHEMA = "moneylab.backtest.report/1"
+REPORT_SCHEMA = "moneylab.backtest.report/2"
+METRICS_VERSION = "bt-metrics/2"  # bt-metrics/1 formulas (backtest.performance) + BT-2b-4 sections
 REPORT_FILES = ("report.json", "report.md", "report_meta.json")
 KNOWN_SCHEMAS = (REPORT_SCHEMA,)
 KNOWN_METRICS_VERSIONS = (METRICS_VERSION,)
 KNOWN_SEED_ALGORITHMS = (BT_SEED_ALGORITHM,)
+LEGACY_COMMIT = "09504cd9dacd37cc18ac5a65ecf69fb5f5661286"
+LEGACY_STATUS = "LEGACY_REQUIRES_COMMIT_09504cd"
+LEGACY_VERSIONS = {"moneylab.backtest.report/1": "bt-metrics/1"}  # schema -> metrics definition
+LEGACY_DETAIL = (f"{LEGACY_STATUS}: not a corruption. This is a /1 report (bt-metrics/1); the /1 calculation is not "
+                 f"kept in this code and verify_run pins a run to its own commit, so full verification (run_verify "
+                 f"and content) must be done at commit {LEGACY_COMMIT}")
 TOTAL_RETURN_TOLERANCE = 1e-12  # relative: exp(sum r) - 1 against the Decimal ledger
 MDD_NOTE = ("mdd (P) samples wealth before each day's trade and after the final exit (research/v06/procedures."
             "max_drawdown); mdd_ledger_after_trade (BT-1 backtest.metrics.max_drawdown) samples equity after each "
@@ -90,6 +108,19 @@ FORMULAS = {
     "exposure": "sum(p) / n",
     "turnover": "sum(quantity * ref_price) / mean(daily equity after trades); * 365 / T_d annualized (primary)",
     "turnover_legs": "sum(quantity * ref_price / equity before the leg) * 365 / T_d (secondary)",
+    "gross_log_return": "G = sum over round trips of ln(P_exit / P_entry) (leg ref prices; before any cost)",
+    "cost_log": "-R (c_b + c_s), c_b / c_s = log multipliers of one buy / sell (R round trips)",
+    "decomposition": "sum r = G - cost_log, checked to 1e-9 before any cost metric is reported",
+    "gross_to_cost_ratio": "G / cost_log (log basis)",
+    "annual_cost_log": "cost_log * 365 / T_d (log units per year, primary)",
+    "annual_cost_fraction": "1 - exp(-annual_cost_log) (share of wealth per year, supplementary)",
+    "annual_round_trips": "R * 365 / T_d",
+    "break_even_fee": "m_s = 0 with kappa, iota, fills fixed; A = (G + 2 R ln(1 - kappa - iota)) / R; "
+                      "inclusive f* = 1 - exp(-A / 2), on_top f* = tanh(A / 2)",
+    "yearly": "r_i assigned to the UTC year of ref_{i+1}; partial_year = n_returns < days_in_year",
+    "round_trip_net_pnl": "sell.cash_after - buy.cash_before (KRW, every cost of both legs included)",
+    "win_rate": "wins / round trips of the view (zeros included)",
+    "profit_factor": "sum of wins / |sum of losses| (KRW)",
 }
 
 
@@ -109,15 +140,31 @@ class ReportVerifyReport:
     report_dir: str
     checks: dict[str, dict[str, Any]] = field(default_factory=dict)
 
-    def add(self, name: str, ok: bool, detail: str) -> None:
+    legacy: bool = False
+
+    def add(self, name: str, ok: bool | None, detail: str) -> None:
         self.checks[name] = {"ok": ok, "detail": detail}
 
     @property
     def ok(self) -> bool:
         return all(self.checks.get(k, {}).get("ok") is True for k in REPORT_CHECKS)
 
+    @property
+    def status(self) -> str:
+        """OK, FAILED (a check failed: corrupt, changed or unsupported) or LEGACY_REQUIRES_COMMIT_09504cd."""
+        if self.ok:
+            return "OK"
+        if self.legacy and all(c["ok"] is not False for c in self.checks.values()) and all(
+                self.checks.get(k, {}).get("ok") is True for k in ("files", "meta", "versions", "run_refs")):
+            return LEGACY_STATUS
+        return "FAILED"
+
     def to_dict(self) -> dict[str, Any]:
-        return {"evidence": NOT_EVIDENCE, "report_dir": self.report_dir, "ok": self.ok, "checks": self.checks}
+        out = {"evidence": NOT_EVIDENCE, "report_dir": self.report_dir, "ok": self.ok, "status": self.status,
+               "checks": self.checks}
+        if self.status == LEGACY_STATUS:
+            out["legacy"] = LEGACY_DETAIL
+        return out
 
 
 REPORT_CHECKS = ("files", "meta", "versions", "run_refs", "run_verify", "content")
@@ -206,6 +253,8 @@ def compute_body(run_dir: Path, manifest: dict[str, Any], *, seed: int, draws: i
                         labels=labels)
     else:
         bench = {"status": "not_aligned", "reasons": list(align["reasons"])}
+    rts, open_at_end = pair_round_trips(led)
+    costs_krw = {k: str(v) for k, v in bt_metrics.cost_totals(led).items()}
     return {
         "schema": REPORT_SCHEMA,
         "evidence": NOT_EVIDENCE,
@@ -222,7 +271,11 @@ def compute_body(run_dir: Path, manifest: dict[str, Any], *, seed: int, draws: i
         "metrics": perf,
         "alignment": align,
         "benchmarks": bench,
+        "cost_analysis": cost_analysis(rts, open_at_end, r, cfg.costs, t_days, costs_krw),
+        "yearly": yearly_report([d.ref_time for d in led.daily], r),
+        "round_trips": round_trip_report(led),
         "p_values": "not computed",
+        "verdict": "not computed",
     }
 
 
@@ -308,7 +361,53 @@ def report_markdown(body: dict[str, Any]) -> str:
             f"CAGR − B2 {_fmt(b['differences']['cagr_minus_b2'])}, MDD − B2 {_fmt(b['differences']['mdd_minus_b2'])}.",
             f"B4 weight {_fmt(b['b4']['weight'])}, no rebalancing.",
         ]
+    lines += _cost_markdown(body["cost_analysis"]) + _yearly_markdown(body["yearly"]) + \
+        _round_trip_markdown(body["round_trips"])
     return "\n".join(lines) + "\n"
+
+
+def _cost_markdown(c: dict[str, Any]) -> list[str]:
+    f = c["break_even_fee"]
+    fee = f"n/a ({f['reason']})" if f["value"] is None else f"{f['value_bps']:.6g} bp ({f['value']:.6g})"
+    return [
+        "",
+        "## Costs and break-even fee (log basis)",
+        "",
+        f"- gross log return G {_fmt(c['gross_log_return'])}, cost_log {_fmt(c['cost_log'])}, "
+        f"net log return {_fmt(c['net_log_return'])}, gross/cost {_fmt(c['gross_to_cost_ratio'])}",
+        f"- annual cost: {_fmt(c['annual_cost_log'])} log/year (primary), {_fmt(c['annual_cost_fraction'])} of "
+        f"wealth/year (supplementary); annual round trips {_fmt(c['annual_round_trips'])}",
+        f"- costs (KRW, supplementary): fees {c['costs_krw']['fees']}, slippage {c['costs_krw']['slippage']}, "
+        f"impact {c['costs_krw']['impact']}, total {c['costs_krw']['total']}",
+        f"- break-even one-way fee f* ({f['condition']}, {f['fee_basis']}, kappa {f['kappa_bps']} bp, "
+        f"iota {f['impact_bps']} bp, capital {f['capital_krw']} KRW, {f['round_trips']} round trips): {fee}",
+    ]
+
+
+def _yearly_markdown(y: dict[str, Any]) -> list[str]:
+    lines = ["", "## UTC years (net, no verdict)", "", f"Assignment: {y['assignment']}."]
+    if y["note"]:
+        lines.append(f"Note: {y['note']}.")
+    lines += ["", "| year | returns / days | partial | irregular | sum log r | net return |", "|---|---|---|---|---|---|"]
+    lines += [f"| {r['year']} | {r['n_returns']} / {r['days_in_year']} | {r['partial_year']} | {r['irregular']} | "
+              f"{_fmt(r['sum_log_return'])} | {_fmt(r['net_return'])} |" for r in y["years"]]
+    lines += ["", f"Positive-year ratio: all years {_fmt(y['positive_year_ratio_all_years'])}, full years only "
+                  f"{_fmt(y['positive_year_ratio_full_years'])} (neither is primary; no verdict)."]
+    return lines
+
+
+def _round_trip_markdown(t: dict[str, Any]) -> list[str]:
+    lines = ["", "## Round trips (KRW net P&L)", "",
+             f"{t['count']} round trips, {t['virtual_close_count']} closed by the virtual exit at the end.", "",
+             "| view | count | wins / losses / zeros | win rate | profit factor | net P&L (KRW) |",
+             "|---|---|---|---|---|---|"]
+    for name, v in t["views"].items():
+        lines.append(f"| {name} | {v['count']} | {v['wins']} / {v['losses']} / {v['zeros']} | {_fmt(v['win_rate'])} | "
+                     f"{_fmt(v['profit_factor'])} | {v['net_pnl_krw']} |")
+    inv = t["invariant"]
+    held = f"n/a ({inv['reason']})" if inv["holds"] is None else str(inv["holds"])
+    lines += ["", f"Invariant sum of net P&L (including virtual close) = final equity − initial cash: {held}."]
+    return lines
 
 
 # --- build ----------------------------------------------------------------------------------------------
@@ -344,7 +443,7 @@ def build_report(run_dir: Path, out_root: Path, *, seed: int, draws: int, code_s
     try:
         body = compute_body(run_dir, manifest, seed=seed, draws=draws)
         rj = report_bytes(body)
-    except (MetricError, BenchmarkError, DataIntegrityError, KeyError) as exc:
+    except (MetricError, BenchmarkError, RoundTripError, DataIntegrityError, KeyError) as exc:
         raise ReportError(f"{type(exc).__name__}: {exc}") from exc
     files = {
         "report.json": rj,
@@ -421,16 +520,25 @@ def check_report(report_dir: Path, run_dir: Path, *, code_state: dict[str, Any])
 
     def versions():
         body = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
+        schema = body.get("schema")
+        metrics = body.get("metrics_definition", {}).get("version")
+        legacy = schema in LEGACY_VERSIONS
         problems = []
-        if body.get("schema") not in KNOWN_SCHEMAS:
-            problems.append(f"unknown schema {body.get('schema')!r}")
-        if body.get("metrics_definition", {}).get("version") not in KNOWN_METRICS_VERSIONS:
-            problems.append(f"unknown metrics definition {body.get('metrics_definition', {}).get('version')!r}")
+        if legacy:
+            if metrics != LEGACY_VERSIONS[schema]:
+                problems.append(f"metrics definition {metrics!r} does not belong to legacy schema {schema!r}")
+        else:
+            if schema not in KNOWN_SCHEMAS:
+                problems.append(f"unknown schema {schema!r}")
+            if metrics not in KNOWN_METRICS_VERSIONS:
+                problems.append(f"unknown metrics definition {metrics!r}")
         if body.get("seed", {}).get("algorithm") not in KNOWN_SEED_ALGORITHMS:
             problems.append(f"unknown seed algorithm {body.get('seed', {}).get('algorithm')!r}")
         if problems:
             raise ReportError("; ".join(problems))
-        return f"{body['schema']}, {body['metrics_definition']['version']}, {body['seed']['algorithm']}", body
+        rep.legacy = legacy
+        tag = " (legacy, integrity checks only)" if legacy else ""
+        return f"{schema}, {metrics}, {body['seed']['algorithm']}{tag}", body
 
     def run_refs(body):
         manifest = _read_manifest(run_dir)
@@ -465,6 +573,10 @@ def check_report(report_dir: Path, run_dir: Path, *, code_state: dict[str, Any])
     manifest = step("run_refs", lambda: run_refs(body)) if body is not None else None
     if body is None:
         rep.add("run_refs", False, "skipped: report.json schema and versions did not check")
+    if rep.legacy:  # no recomputation of a /1 report with the /2 code
+        rep.add("run_verify", None, LEGACY_DETAIL)
+        rep.add("content", None, LEGACY_DETAIL)
+        return rep
     step("run_verify", run_verify)
     if body is not None and manifest is not None:
         step("content", lambda: content(body, manifest))
