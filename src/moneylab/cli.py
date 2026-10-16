@@ -26,6 +26,7 @@ import argparse
 import json
 import logging
 import math
+import subprocess
 import time
 import traceback
 from dataclasses import replace
@@ -121,6 +122,20 @@ from moneylab.strategy.market_making import SymmetricMarketMaker
 from moneylab.strategy.mispricing import CombinedMispricing, ComplementArbitrage, FairValueDeviation
 from moneylab.storage.atomic import atomic_write_json
 from moneylab.storage.files import RawStore, save_json, save_markets_csv
+from moneylab.backtest.data import DataIntegrityError
+from moneylab.backtest.execution import SCENARIOS as BACKTEST_SCENARIOS
+from moneylab.backtest.execution import SUBSTITUTION_RULES as BACKTEST_SUBSTITUTION
+from moneylab.backtest.ledger import AccountingError
+from moneylab.backtest.portfolio import RunConfig as BacktestRunConfig
+from moneylab.backtest.run import INITIAL_CASH_KRW, RunError, run_backtest, verify_run
+from moneylab.backtest.report import ReportError, build_report, check_report
+from moneylab.backtest.settings import DEFAULT_SETTINGS_FILE as BACKTEST_SETTINGS, SettingsError, cost_model
+from moneylab.backtest.settings import load_cost_settings
+from moneylab.backtest.strategy import RULES as BACKTEST_RULES
+from moneylab.domain.bars import NOT_EVIDENCE
+from moneylab.providers.upbit.bar_export import BarExportError, export_bars
+from moneylab.backtest.code_state import classify_worktree, parse_porcelain_z
+from moneylab.research.config import ROOT as REPO_ROOT
 
 log = logging.getLogger("moneylab")
 
@@ -731,6 +746,113 @@ def cmd_research_v06_sim(args: argparse.Namespace, settings: Settings) -> int:
     return EXIT_OK
 
 
+# --- backtest (BT-2b-2): offline, synthetic / fixture bars only until BT-5 --------------------------------
+
+def backtest_code_state(root: Path = REPO_ROOT) -> dict[str, Any]:
+    """Commit and classified working tree for backtest manifests (local, read-only git; backtest.code_state)."""
+    def git(*args: str) -> bytes | None:
+        try:
+            out = subprocess.run(["git", *args], cwd=root, capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return out.stdout if out.returncode == 0 else None
+
+    head = git("rev-parse", "HEAD")
+    status = git("status", "--porcelain=v1", "-z", "--untracked-files=all")
+    entries = None
+    if status is not None:
+        try:
+            entries = parse_porcelain_z(status.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            entries = None
+    commit = head.decode("ascii", "replace").strip() if head else ""
+    return classify_worktree(commit or None, entries)
+
+
+def _utc_day(text: str) -> datetime:
+    return datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=UTC)
+
+
+def cmd_bars_export(args: argparse.Namespace, settings: Settings) -> int:
+    """Stored fixture candle pull -> verified Bar files (no request, the pull is only read)."""
+    out = args.out or settings.processed_dir / "backtest_bars-fixture"
+    console.print(f"{NOT_EVIDENCE} | bars-export {args.pull_dir} -> {out}", markup=False)
+    try:
+        exp = export_bars(args.pull_dir, out)
+    except (BarExportError, OSError, ValueError) as exc:
+        console.print(f"bars-export refused: {type(exc).__name__}: {exc}", markup=False)
+        return EXIT_ERROR
+    console.print(f"saved {exp.dir} ({exp.bars} {exp.interval} bars, bars_sha256 {exp.bars_sha256})", markup=False)
+    return EXIT_OK
+
+
+def cmd_backtest(args: argparse.Namespace, settings: Settings) -> int:
+    """One rule over exported bars; writes a new run directory. Initial cash is fixed (1,000,000 KRW)."""
+    out = args.out or settings.processed_dir / "backtest-fixture"
+    try:
+        cost_settings, _ = load_cost_settings(args.settings)
+        costs, verified = cost_model(cost_settings, args.fee_bps, args.scenario, INITIAL_CASH_KRW,
+                                     impact=not args.no_impact, fee_basis=args.fee_basis)
+        cfg = BacktestRunConfig(args.rule, _utc_day(args.first_day), _utc_day(args.last_day), INITIAL_CASH_KRW, costs,
+                                scenario=args.scenario, fill_substitution=args.fill_substitution,
+                                capacity_verified=verified)
+        output = run_backtest(args.daily, args.hourly, cfg, out, code_state=backtest_code_state(), settings_file=args.settings,
+                              now=datetime.now(UTC))
+    except (RunError, SettingsError, DataIntegrityError, AccountingError, OSError, ValueError) as exc:
+        console.print(f"{NOT_EVIDENCE} | backtest refused: {type(exc).__name__}: {exc}", markup=False)
+        return EXIT_ERROR
+    m = output.result.to_dict()["metrics"]
+    console.print(" | ".join(output.manifest["labels"]), markup=False)
+    console.print(f"saved {output.dir}", markup=False)
+    console.print(f"  result_sha256 {output.result_sha256}", markup=False)
+    console.print(f"  cumulative net return {m['cumulative_net_return']}, max drawdown {m['max_drawdown']:.6f}, "
+                  f"legs {m['trade_counts']['legs']} (descriptive only)", markup=False)
+    return EXIT_OK
+
+
+def cmd_backtest_verify(args: argparse.Namespace, settings: Settings) -> int:
+    rep = verify_run(args.run_dir, code_state=backtest_code_state())
+    if args.json:
+        console.print_json(json.dumps(rep.to_dict()))
+    else:
+        console.print(f"{NOT_EVIDENCE} | backtest-verify {args.run_dir}: {'OK' if rep.ok else 'FAILED'}", markup=False)
+        for name, c in rep.checks.items():
+            state = "PASS" if c["ok"] is True else "FAIL" if c["ok"] is False else "NOTE"
+            console.print(f"  {state} {name}: {c['detail']}", markup=False)
+    return EXIT_OK if rep.ok else EXIT_ERROR
+
+
+def cmd_backtest_report(args: argparse.Namespace, settings: Settings) -> int:
+    """Metrics and benchmarks B1-B4 of a verified run, into a new report directory (BT-2b-3)."""
+    out = args.out or settings.processed_dir / "backtest_reports-fixture"
+    console.print(f"{NOT_EVIDENCE} | backtest-report {args.run_dir} -> {out} (descriptive only, no p-values)",
+                  markup=False)
+    try:
+        rep = build_report(args.run_dir, out, seed=args.seed, draws=args.b1_draws, code_state=backtest_code_state(),
+                           now=datetime.now(UTC))
+    except (ReportError, RunError, DataIntegrityError, AccountingError, OSError, ValueError) as exc:
+        console.print(f"backtest-report refused: {type(exc).__name__}: {exc}", markup=False)
+        return EXIT_ERROR
+    b = rep.body["benchmarks"]
+    console.print(f"saved {rep.dir}", markup=False)
+    console.print(f"  report_sha256 {rep.report_sha256}", markup=False)
+    console.print(f"  benchmarks: {b['status']}" + ("" if b["status"] == "compared" else f" ({'; '.join(b['reasons'])})"),
+                  markup=False)
+    return EXIT_OK
+
+
+def cmd_backtest_report_verify(args: argparse.Namespace, settings: Settings) -> int:
+    rep = check_report(args.report_dir, args.run_dir, code_state=backtest_code_state())
+    if args.json:
+        console.print_json(json.dumps(rep.to_dict()))
+    else:
+        console.print(f"{NOT_EVIDENCE} | backtest-report-verify {args.report_dir}: {'OK' if rep.ok else 'FAILED'}",
+                      markup=False)
+        for name, c in rep.checks.items():
+            console.print(f"  {'PASS' if c['ok'] else 'FAIL'} {name}: {c['detail']}", markup=False)
+    return EXIT_OK if rep.ok else EXIT_ERROR
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="moneylab", description="MoneyLab - prediction market research (read-only)")
     p.add_argument("--version", action="version", version=f"moneylab {__version__}")
@@ -857,6 +979,44 @@ def build_parser() -> argparse.ArgumentParser:
     vs.add_argument("--truth-years", type=int, default=400, help="length of the long path for the scenario truth")
     vs.add_argument("--out", type=Path, default=None, help="default data/processed/research_v06_sim/<stamp>")
     vs.set_defaults(func=cmd_research_v06_sim)
+
+    be = sub.add_parser("bars-export", help="backtest: stored FIXTURE candle pull -> verified bar files (offline)")
+    be.add_argument("pull_dir", type=Path, help="candle pull directory (fixture provenance only)")
+    be.add_argument("--out", type=Path, default=None, help="default data/processed/backtest_bars-fixture")
+    be.set_defaults(func=cmd_bars_export)
+
+    bt = sub.add_parser("backtest", help="backtest: one long/cash rule on exported SYNTHETIC/fixture bars (offline)")
+    bt.add_argument("--daily", type=Path, required=True, help="exported daily bar directory")
+    bt.add_argument("--hourly", type=Path, required=True, help="exported hourly bar directory")
+    bt.add_argument("--rule", choices=sorted(BACKTEST_RULES), required=True)
+    bt.add_argument("--first-day", required=True, help="first signal day, YYYY-MM-DD (UTC)")
+    bt.add_argument("--last-day", required=True, help="last signal day, YYYY-MM-DD (UTC)")
+    bt.add_argument("--fee-bps", type=int, choices=[0, 5, 15, 25], default=25, help="per side, ASSUMED (default 25)")
+    bt.add_argument("--fee-basis", choices=["inclusive", "on_top"], default="inclusive")
+    bt.add_argument("--scenario", choices=sorted(BACKTEST_SCENARIOS), default="E0")
+    bt.add_argument("--no-impact", action="store_true", help="drop the market impact assumption")
+    bt.add_argument("--fill-substitution", choices=list(BACKTEST_SUBSTITUTION), default="none")
+    bt.add_argument("--settings", type=Path, default=BACKTEST_SETTINGS, help="cost settings (configs/backtest_costs.toml)")
+    bt.add_argument("--out", type=Path, default=None, help="default data/processed/backtest-fixture")
+    bt.set_defaults(func=cmd_backtest)
+
+    bv = sub.add_parser("backtest-verify", help="backtest: re-check and recompute a run directory (writes nothing)")
+    bv.add_argument("run_dir", type=Path)
+    bv.add_argument("--json", action="store_true")
+    bv.set_defaults(func=cmd_backtest_verify)
+
+    br = sub.add_parser("backtest-report", help="backtest: metrics and benchmarks B1-B4 of a verified run (offline)")
+    br.add_argument("run_dir", type=Path)
+    br.add_argument("--seed", type=int, required=True, help="B1 seed, 0 <= seed < 2**64 (rule bt-seed/1; no default)")
+    br.add_argument("--b1-draws", type=int, default=999, help="B1 placements (default 999)")
+    br.add_argument("--out", type=Path, default=None, help="default data/processed/backtest_reports-fixture")
+    br.set_defaults(func=cmd_backtest_report)
+
+    bq = sub.add_parser("backtest-report-verify", help="backtest: re-check a report against its run (writes nothing)")
+    bq.add_argument("report_dir", type=Path)
+    bq.add_argument("run_dir", type=Path)
+    bq.add_argument("--json", action="store_true")
+    bq.set_defaults(func=cmd_backtest_report_verify)
 
     rb = sub.add_parser("research-build", help="v0.4: raw Upbit dataset -> grid/features/labels/split (offline)")
     rb.add_argument("dataset", type=Path, help="Upbit dataset directory (.../<session>/KRW-BTC)")

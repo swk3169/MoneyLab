@@ -1,0 +1,24 @@
+# MoneyLab backtest cost and market impact settings (BT-2b-2). ASSUMED values.
+# The Upbit account fee and how Upbit charges it are NOT confirmed: status stays FEE_UNCONFIRMED.
+# The market impact rule is the v0.6 draft assumption (iota = ref_bps * sqrt(C / ref_capital_krw)),
+# unverified above capacity_limit_krw (CAPACITY_UNVERIFIED).
+# Results computed with these settings are SYNTHETIC / NOT_EVIDENCE until real data is allowed (BT-5).
+# Decimal values are strings or integers (no binary floats). kappa must equal backtest.execution.SCENARIOS.
+
+[fees]
+scenarios_bps = [0, 5, 15, 25]
+basis = "inclusive"
+status = "FEE_UNCONFIRMED"
+
+[kappa_bps]
+E0 = 5
+E1 = 10
+E2 = 10
+E3 = 10
+DIAG = 5
+
+[impact]
+ref_bps = "1"
+ref_capital_krw = 1000000
+capacity_limit_krw = 10000000
+status = "ASSUMED"
