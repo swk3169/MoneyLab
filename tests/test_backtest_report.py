@@ -9,7 +9,7 @@ import hashlib
 import json
 import math
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 from test_backtest_run import CODE, NOW, bars, make_run  # noqa: F401  (bars is a fixture)
@@ -56,7 +56,7 @@ def test_report_files_labels_and_definitions(tmp_path, run):
     assert raw == report_bytes(out.body) and hashlib.sha256(raw).hexdigest() == out.report_sha256
     b = body_of(out.dir)
     assert b["evidence"] == NOT_EVIDENCE and NOT_EVIDENCE in b["labels"] and "DESCRIPTIVE_ONLY" in b["labels"]
-    assert b["metrics_definition"]["version"] == "bt-metrics/1" and b["metrics_definition"]["annualization_days"] == 365
+    assert b["metrics_definition"]["version"] == "bt-metrics/2" and b["metrics_definition"]["annualization_days"] == 365
     assert b["metrics_definition"]["risk_free_rate"] == 0.0 and "generally differ" in b["metrics_definition"]["mdd_note"]
     s = b["seed"]
     assert s["algorithm"] == "bt-seed/1" and s["seed"] == str(SEED) and s["labels"] == ["B1", "sma20", "E0"]
@@ -268,3 +268,128 @@ def test_cli_report_and_verify(tmp_path, run, monkeypatch, capsys):
     assert main(["backtest-report", str(run.dir), "--seed", "-1", "--out", str(root)]) == 1
     assert main(["backtest-report", str(run.dir), "--seed", "7", "--out", str(tmp_path / "plain")]) == 1
     assert not (tmp_path / "plain").exists()
+
+
+# --- BT-2b-4: schema /2 sections -------------------------------------------------------------------------
+
+def test_v2_schema_and_sections(tmp_path, run):
+    out = report(run.dir, tmp_path / "reports-fixture")
+    b = body_of(out.dir)
+    assert b["schema"] == "moneylab.backtest.report/2" and b["seed"]["algorithm"] == "bt-seed/1"
+    assert b["p_values"] == "not computed" and b["verdict"] == "not computed"
+    assert b["labels"] == [*json.loads((run.dir / "manifest.json").read_text())["labels"], "DESCRIPTIVE_ONLY"]
+    c = b["cost_analysis"]
+    assert c["consistent"] is True and c["basis"] == "log" and c["decomposition_error"] < 1e-9
+    assert c["break_even_fee"]["condition"] == "m_s = 0" and c["break_even_fee"]["fee_basis"] == "inclusive"
+    assert c["costs_krw"]["total"] == json.loads((run.dir / "metrics.json").read_text())["cost_totals"]["total"]
+    t = b["round_trips"]
+    trades = [json.loads(x) for x in (run.dir / "trades.jsonl").read_text().splitlines()]
+    assert t["unit"] == "KRW" and t["count"] == len(trades) // 2
+    assert [row["virtual_close"] for row in t["rows"]] == [x["virtual"] for x in trades if x["side"] == "sell"]
+    assert t["invariant"]["holds"] is True
+    with localcontext() as ctx:  # exact: the default 28-digit context would round the 50-digit ledger values
+        ctx.prec = 100
+        change = Decimal(b["metrics"]["final_equity"]) - Decimal(b["metrics"]["initial_cash"])
+    assert Decimal(t["invariant"]["final_minus_initial"]) == change
+    y = b["yearly"]
+    assert [r["year"] for r in y["years"]] == [2025] and y["years"][0]["partial_year"] is True
+    assert y["positive_year_ratio_full_years"]["reason"] == "no_full_years" and y["verdict"] == "not computed"
+    assert sum(r["n_returns"] for r in y["years"]) == b["metrics"]["n_returns"]
+    md = (out.dir / "report.md").read_text(encoding="utf-8")
+    for heading in ("## Costs and break-even fee (log basis)", "## UTC years (net, no verdict)",
+                    "## Round trips (KRW net P&L)"):
+        assert heading in md
+    assert check_report(out.dir, run.dir, code_state=CODE).status == "OK"
+
+
+def test_v2_sections_without_trades_and_when_not_aligned(tmp_path, bars):
+    from test_backtest_run import config
+    from moneylab.backtest.run import run_backtest
+    from moneylab.backtest.settings import DEFAULT_SETTINGS_FILE
+    cfg = config()
+    short = type(cfg)(cfg.rule, datetime(2025, 6, 2, tzinfo=UTC), datetime(2025, 6, 12, tzinfo=UTC),
+                      cfg.initial_cash, cfg.costs, scenario=cfg.scenario, capacity_verified=cfg.capacity_verified)
+    r = run_backtest(bars["day"], bars["hour"], short, tmp_path / "runs-fixture", code_state=CODE,
+                     settings_file=DEFAULT_SETTINGS_FILE, now=NOW)
+    b = report(r.dir, tmp_path / "reports-fixture").body
+    assert b["cost_analysis"]["break_even_fee"]["reason"] == "no_round_trips"
+    assert b["cost_analysis"]["gross_to_cost_ratio"]["reason"] == "zero_cost"
+    assert b["round_trips"]["count"] == 0 and b["round_trips"]["invariant"]["holds"] is True
+    assert b["round_trips"]["views"]["including_virtual_close"]["profit_factor"]["reason"] == "no_round_trips"
+    diag = make_run(bars, tmp_path / "runs-fixture", scenario="DIAG", now=NOW + timedelta(seconds=1))
+    d = report(diag.dir, tmp_path / "reports-fixture").body
+    assert d["benchmarks"]["status"] == "not_aligned"
+    assert d["cost_analysis"]["consistent"] is True  # the decomposition does not need alignment
+    assert d["round_trips"]["invariant"]["holds"] is True
+
+
+def test_run_result_bytes_survive_the_v2_report(tmp_path, run):
+    before = (run.dir / "result.json").read_bytes()
+    report(run.dir, tmp_path / "reports-fixture")
+    assert (run.dir / "result.json").read_bytes() == before
+    assert hashlib.sha256(before).hexdigest() == run.result_sha256 == rpt.recompute_run(
+        run.dir, json.loads((run.dir / "manifest.json").read_text())).sha256()
+
+
+# --- BT-2b-4: legacy /1 reports (V2' integrity only) ------------------------------------------------------
+
+def make_legacy(out_dir):
+    """Turn a /2 report into the /1 shape (no BT-2b-4 sections, /1 versions), with consistent hashes."""
+    b = body_of(out_dir)
+    for k in ("cost_analysis", "yearly", "round_trips", "verdict"):
+        b.pop(k)
+    b["schema"] = "moneylab.backtest.report/1"
+    b["metrics_definition"]["version"] = "bt-metrics/1"
+    (out_dir / "report.json").write_bytes(report_bytes(b))
+    (out_dir / "report.md").write_text("# legacy /1 report\n", encoding="utf-8")
+    meta = json.loads((out_dir / "report_meta.json").read_text(encoding="utf-8"))
+    meta["report_sha256"] = hashlib.sha256((out_dir / "report.json").read_bytes()).hexdigest()
+    (out_dir / "report_meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    resum(out_dir)
+
+
+def test_legacy_report_is_integrity_checked_only(tmp_path, run):
+    out = report(run.dir, tmp_path / "reports-fixture")
+    make_legacy(out.dir)
+    before = tree_hashes(out.dir)
+    rep = check_report(out.dir, run.dir, code_state=CODE)
+    assert [rep.checks[k]["ok"] for k in ("files", "meta", "versions", "run_refs")] == [True] * 4
+    assert rep.checks["run_verify"]["ok"] is None and rep.checks["content"]["ok"] is None
+    assert rep.checks["run_verify"]["detail"].startswith("LEGACY_REQUIRES_COMMIT_09504cd: not a corruption")
+    assert "09504cd9dacd37cc18ac5a65ecf69fb5f5661286" in rep.checks["content"]["detail"]
+    assert rep.ok is False and rep.status == "LEGACY_REQUIRES_COMMIT_09504cd"
+    d = rep.to_dict()
+    assert d["status"] == "LEGACY_REQUIRES_COMMIT_09504cd" and "09504cd9dacd" in d["legacy"]
+    assert "legacy, integrity checks only" in rep.checks["versions"]["detail"]
+    assert tree_hashes(out.dir) == before  # nothing written, nothing recomputed
+
+
+def test_corrupt_legacy_report_is_failed_not_legacy(tmp_path, run):
+    out = report(run.dir, tmp_path / "reports-fixture")
+    make_legacy(out.dir)
+    md = out.dir / "report.md"
+    md.write_text("tampered\n", encoding="utf-8")  # SHA256SUMS no longer matches
+    rep = check_report(out.dir, run.dir, code_state=CODE)
+    assert rep.checks["files"]["ok"] is False and rep.status == "FAILED" and "legacy" not in rep.to_dict()
+    out2 = report(run.dir, tmp_path / "reports2-fixture")
+    make_legacy(out2.dir)
+    b = body_of(out2.dir)
+    b["metrics_definition"]["version"] = "bt-metrics/2"  # /1 schema with a /2 definition
+    (out2.dir / "report.json").write_bytes(report_bytes(b))
+    meta = json.loads((out2.dir / "report_meta.json").read_text(encoding="utf-8"))
+    meta["report_sha256"] = hashlib.sha256((out2.dir / "report.json").read_bytes()).hexdigest()
+    (out2.dir / "report_meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    resum(out2.dir)
+    rep2 = check_report(out2.dir, run.dir, code_state=CODE)
+    assert rep2.checks["versions"]["ok"] is False and rep2.status == "FAILED"
+
+
+def test_cli_legacy_report_exits_1(tmp_path, run, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "backtest_code_state", lambda *a, **k: dict(CODE))
+    out = report(run.dir, tmp_path / "reports-fixture")
+    make_legacy(out.dir)
+    assert main(["backtest-report-verify", str(out.dir), str(run.dir)]) == 1
+    text = capsys.readouterr().out
+    assert "LEGACY_REQUIRES_COMMIT_09504cd: not a corruption" in text and "PASS files" in text
+    assert main(["backtest-report-verify", str(out.dir), str(run.dir), "--json"]) == 1
+    assert '"status": "LEGACY_REQUIRES_COMMIT_09504cd"' in capsys.readouterr().out
