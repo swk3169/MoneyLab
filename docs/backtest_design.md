@@ -52,6 +52,8 @@ tests: research/v06의 procedures·synthetic는 **테스트에서만** 기준 �
 - 의존 방향은 `providers/upbit → domain ← backtest`이다. `backtest/`는 provider를 모른다.
   기존 `providers/upbit/research_export.py`(raw → domain `MarketEvent`)와 같은 형태다.
 - `backtest/`가 쓰는 기존 모듈은 `domain`, `analytics.metrics`, `storage.atomic`, `core`(예외, 로깅)뿐이다.
+- `vault.py`(BT-3d)는 검증된 bars/1 디렉터리와 `BarSeries`를 받는 backtest 라이브러리다. provider를 import하지 않으며, 그림의
+  `bar_export` "구간 분리·vault 기록"(원본에서 vault로 바로 쓰기)은 BT-5에서 연결한다(10.3절).
 
 ## 3. 데이터 흐름
 
@@ -64,7 +66,7 @@ tests: research/v06의 procedures·synthetic는 **테스트에서만** 기준 �
 [변환, 신규] providers/upbit/bar_export.py
       │  Candle(Decimal) → Bar, 출처(BarProvenance) 부착
       │  중복·결측 보고, 확정 규칙 재확인, 구간 분리(확증 / holdout / 제외 / forward)
-      │  holdout·forward 구간은 vault로만 기록 (BT-3)
+      │  holdout·forward 구간은 vault로만 기록 (BT-3; BT-3d vault는 backtest 라이브러리, bar_export 연결은 BT-5)
       ▼
 data/processed/backtest_bars/<bars_id>/  bars_<interval>.jsonl + bars_manifest.json + SHA256SUMS.txt
       ▼
@@ -169,8 +171,8 @@ data/processed/backtest/<run_id>/  trades.jsonl, equity.jsonl, metrics.json, man
     engine_self_check는 그대로 검사하고, identity(필드 없음)와 기록과 다른 커밋의 code, 현재 엔진으로 재현되지 않는 reproducibility는
     NOTE로 둔다. 실패가 없으면 상태 `LEGACY_REQUIRES_COMMIT_<기록 커밋 7자리>`(ok = false, exit 1)이고 완전 검증은 기록 커밋에서 한다.
     실패가 있으면 `FAILED`다. CLI 머리줄은 상태(OK, FAILED, SOURCE_UNAVAILABLE, LEGACY_…)를 출력한다.
-  - 잠금 vault(open_once, seal, 접근 기록, 초안 19.1–19.5)는 BT-3d, 사전등록·study config 고정은 BT-4다. 모든 segment와 run은
-    SYNTHETIC / NOT_EVIDENCE다.
+  - 잠금 vault(open_once, seal, 접근 기록, 초안 19.1–19.4)는 BT-3d에서 구현했다(10.3절 "BT-3d 구현"). guard(19.5)는 U9, 사전등록·study
+    config 고정은 BT-4다. 모든 segment, vault, run은 SYNTHETIC / NOT_EVIDENCE다.
 - 위반 시도(미래 인덱스, horizon 밖 시각)는 `LookAheadError`를 낸다. 경고로 넘기지 않는다.
 
 ## 5. 전략 계층
@@ -386,7 +388,8 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 
 ### 10.3 Holdout 격리 (BT-3)
 
-- 구현 상태: 상한 segment와 입력·config 식별은 BT-3c(4절)에 있다. 아래 vault 잠금은 BT-3d에서 구현한다(사전등록 16-0: 고정 전 완료).
+- 구현 상태: 상한 segment와 입력·config 식별은 BT-3c(4절)에 있다. vault 잠금은 BT-3d에서 `backtest/vault.py` 라이브러리로
+  구현했다(아래 "BT-3d 구현"). 사전등록 16-0의 "고정 전 잠금 완료"는 DP1(위험 한도 확인)만큼 남아 있다. SYNTHETIC / NOT_EVIDENCE.
 
 - 구간: 확증 평가(warmup 끝 – 2024-03-31), historical holdout(2024-04-01 – H_end), 제외 구간, forward(동결 후). 초안 8절과 같다.
 - `bar_export`가 구간을 나눌 때 holdout·forward Bar는 **vault 디렉터리에만** 쓰고, 확증 평가용 Bar 파일에는 넣지 않는다.
@@ -394,6 +397,53 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
   남기고 재개봉을 거부한다.
 - **raw 페이지에는 전체 기간 가격이 들어 있다.** 에이전트가 raw나 vault 파일을 직접 읽지 않도록 하는 guard 규칙은 초안 19.5절
   사양에 있고, 적용은 사용자 결정이다(16절 U9).
+- **BT-3d 구현 (`backtest/vault.py`, 계약 `docs/tasks/BT-3D/WORK_ORDER.md` D1–D19, CLI 없음).**
+  - 입력과 경계: 검증된 bars/1 디렉터리 두 개(`load_bars`)와 `VaultSpec`. 경계 C(`confirmatory_data_end_utc`), H(`holdout_end_utc`,
+    배타적 끝 = H_end + 1일), L(`locked_end_utc`, 동결일 00:00), forward 분석 끝 `forward_interim_end_utc`·`forward_final_end_utc`
+    (None이면 그 분석 없음), prereg·config SHA. 모두 명시적 입력이고 기본값이 없다. 시각은 UTC 00:00, C < H ≤ L, W_end > L,
+    interim < final.
+  - 분할(end_utc 기준): PUBLIC = end ≤ C, HOLDOUT_EVAL = C < end ≤ H, EXCLUDED = H < end ≤ L(H = L이면 없음). 입력에 end > L인
+    행이 있으면 구성을 거부한다. 그래서 PUBLIC ⊎ locked = 입력이고 버리는 행이 없다. 제외 구간은 locked 파일에 들어가고 개봉 때
+    `EXCLUDED` 표시가 붙는다(평가에 쓰지 않음, lookback용).
+  - 배치 `<root>/<vault_id>/`(fixture·synthetic은 root 이름이 `-fixture`로 끝남): 봉인 집합 = `vault_manifest.json`
+    (`moneylab.backtest.vault/1`), `SHA256SUMS.txt`, `public/<입력 디렉터리 이름>/`(표준 bars/1 두 개), `locked/holdout_<iv>.jsonl`.
+    상태 항목 = `build_record.json`, `evidence/`, `access/`, `locked_forward/forward_YYYYMM/`. public은 `load_bars`, `backtest-segment`,
+    `backtest`, `backtest-verify`가 수정 없이 읽고(부모에 segment manifest가 없으므로 전체 입력), run의 segment 필드는 null이다.
+  - 봉인(seal): 내용 바이트 생성 + manifest·SUMS 확정 + 임시 디렉터리에서 rename 한 번으로 게시. 봉인된 바이트는 다시 쓰지 않는다.
+  - 식별: `vault_content_sha256` = 정규 JSON SHA(schema, market, provenance, spec, interval별 public 디렉터리 이름·public SHA·
+    건수, locked SHA·holdout_eval 건수·excluded 건수). 파일 이름은 interval에서 정해지므로 식별에 넣지 않는다.
+    `vault_id` = `vault_<market>_lock<L>_<sha 12자리>`. 입력 계보는 manifest에만 있고, `source_locator`·경로·시각은 없다(경로와 무관).
+    접근 상태는 `access/`·`evidence/` 기록에서 유도하며 content 식별·id·SUMS를 바꾸지 않는다. forward 월은
+    `forward_seal_content_sha256`(month, vault_content_sha256, interval별 SHA·건수)으로 따로 식별한다.
+  - 기록: `evidence/<kind>.json`(confirmatory_results, row9_strategy, q12_done)과 `access/<holdout_open|forward_interim|forward_final>.json`은
+    임시 파일 + fsync + `os.link`로 한 번만 배타적으로 만든다. 존재·형식·vault 결속만 검사하고 증거의 참 여부는 검사하지 않는다.
+    접근 기록의 키는 정확히 kind, vault_content_sha256, preregistration_sha256, config_sha256, evidence, files, opened_at_utc,
+    caller다. 키 집합이 다르거나 kind·vault 결속이 맞지 않는 기록은 `RECORD_UNREADABLE`이며, 그래도 1회 사용으로 센다.
+  - 공개 API는 모듈의 `__all__`(VaultSpec, build_vault, vault_status, record_evidence, HistoricalHoldoutVault, ForwardVault, 예외
+    5종, 상태 상수 10개)뿐이다. 반환 객체의 타입 이름, 행 표시값 상수, schema·파일 상수, import 이름은 비공개다.
+  - `HistoricalHoldoutVault.open_once`: 기록 전 검사(봉인 집합과 모든 해시, real 아님, 접근 기록 없음, prereg·config SHA 일치,
+    증거 3종) → 접근 기록 → 잠금 파일을 한 번 읽어 재해시·파싱 → 표시 붙은 행 반환. 기록 전 실패는 사용이 아니고, 기록 후의 모든
+    실패와 중단은 1회 사용이다.
+  - `ForwardVault.seal(day, hour, YYYYMM)`: 창 (max(월 시작, L), 다음 달 시작], 그 달이 입력에서 끝났어야 하고 창이 비면 거부.
+    창 밖 행은 건수만 기록. `open_analysis(kind)`: holdout 개봉 뒤, kind별 1회, month(L)부터 month(W_end − 1초)까지 모든 달이
+    봉인되어 있어야 하며 forward 행 L < end ≤ W_end와 locked holdout 행(lookback)만 반환한다. 봉인 창과 분석 자격은 다른 개념이다.
+  - 이미 있는 vault(IDENTICAL_EXISTING): 쓰기 없이 봉인 집합 바이트와 구조만 비교한다. 같으면 `ALREADY_SEALED_IDENTICAL`(접근·증거·
+    forward 상태 유지, 잠금 행 반환 없음), 처음 보는 항목이나 다른 바이트면 `VaultExistsError`. forward 월도 같다.
+  - 정보 누출: 잠금 행을 반환하는 공개 API는 `open_once`와 `open_analysis`뿐이다. `vault_status`는 id, content SHA, provenance,
+    spec 값, public 건수, interval별 holdout_eval·excluded 건수와 locked SHA, 무결성 PASS/FAIL(봉인 집합과 모든 봉인 월), 접근 상태,
+    증거 유무, 봉인 월 목록과 월별 건수만 낸다(초안 19.4). 예외는 모두 `VaultError` 계열이고 입력·파일 오류는 예외 타입 이름만
+    남긴다(행 값·시각 없음).
+  - 보장하지 않는 것: 경로 직접 읽기(현재 guard의 `/locked/` 규칙은 `locked_forward/`를 덮지 않음), 기록 파일 삭제, 다른 경로에 재구성,
+    원본·전체 기간 source bars 노출, 증거의 참 여부, 같은 프로세스 안의 악의적 코드.
+  - 미룬 항목(BT-4·BT-5 승인 아님):
+    - DP1: forward 월별 위험 한도 확인(초안 19.3 셋째 항목)은 확증 MDD와 forward 평가 엔진이 있는 별도 task. 그 목적으로 forward 행을
+      반환하는 API는 없다(fail-closed).
+    - DP2: locked 파일은 interval별 gzip 없는 canonical JSONL이다. 초안 19.1·부록 A의 `*.jsonl.gz` 단일 파일 문구와 다르며 BT-4 고정 때
+      반영한다.
+    - DP3: 접근 기록은 manifest를 다시 쓰지 않고 `access/*.json`으로 남긴다. 초안 19.2 "manifest에 먼저 쓴다" 문구와 다르며 BT-4 고정 때
+      반영한다.
+    - DP4: "forward 12개월", "T_F개월"을 W_end 값으로 바꾸는 해석은 BT-4 study·config 고정에서 한다. vault는 개월 수를 날짜로 바꾸지 않는다.
+  - `bar_export`가 vault로 바로 쓰는 연결(전체 기간 bars 디렉터리를 남기지 않는 것)은 BT-5에서 한다.
 
 ### 10.4 다중 전략 비교와 선택 편향
 
@@ -555,3 +605,4 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 | BT-3a | 2026-10-16 | 사전등록 v0.6 규칙 `M20/M60/M120/R5`를 별도 rule ID로 구현(5.1절, 16절 U1 후속). `R5`와 `r5`는 신호가 같지만 별개 전략. 스키마·초안 변경 없음, 합성·fixture 전용(SYNTHETIC / NOT_EVIDENCE) |
 | BT-3b | 2026-10-16 | 평가 구간 경계(4절): G = [F + 2일, E + 3일), 평가 끝 R(E + 1) ≤ G_end를 유도, 엔진 guard(`bar.end_utc ≤ G_end`), 1시간봉이 평가 끝 전에 끝나면 거부, `backtest-verify`의 독립 `boundary` 검사. "이중 차단"과 "(현금 유지)" 문구를 실제 동작에 맞게 정정(U4는 미결). 적재 단계 분할·vault는 BT-3c. 스키마·초안 변경 없음, SYNTHETIC / NOT_EVIDENCE |
 | BT-3c | 2026-10-16 | 입력 segment와 식별(4절): `backtest-segment`(segment/1, `end_utc ≤ last_day + 3일`, 하한 없음, source 계보·content SHA·id·manifest SHA 분리. 계약 v1.2: content SHA에서 source 계보 제외), run manifest run/2(`config_sha256`, `boundary`, consumed 해시, segment 필드), `backtest-verify`의 독립 `identity` 검사, `SOURCE_UNAVAILABLE`과 run/1 legacy 상태. result·report/2·bt-metrics/2·bt-seed/1·bars/1 형식 변경 없음. vault 잠금은 BT-3d, 고정은 BT-4. SYNTHETIC / NOT_EVIDENCE |
+| BT-3d | 2026-10-17 | vault 잠금(10.3절, Work Order `docs/tasks/BT-3D/WORK_ORDER.md`): `backtest/vault.py` 라이브러리(CLI 없음). public bars/1 + 봉인된 locked holdout, `HistoricalHoldoutVault.open_once`, `ForwardVault.seal`·`open_analysis`(명시적 W_end), 증거·접근 기록(배타적 1회 생성, 기록 후 읽기), content 식별과 접근 상태 분리, IDENTICAL_EXISTING. 미룬 항목 DP1–DP4. 기존 스키마·코드 변경 없음, guard 변경 없음. SYNTHETIC / NOT_EVIDENCE |
