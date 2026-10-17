@@ -389,7 +389,8 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 ### 10.3 Holdout 격리 (BT-3)
 
 - 구현 상태: 상한 segment와 입력·config 식별은 BT-3c(4절)에 있다. vault 잠금은 BT-3d에서 `backtest/vault.py` 라이브러리로
-  구현했다(아래 "BT-3d 구현"). 사전등록 16-0의 "고정 전 잠금 완료"는 DP1(위험 한도 확인)만큼 남아 있다. SYNTHETIC / NOT_EVIDENCE.
+  구현했다(아래 "BT-3d 구현"). DP1(월별 위험 한도 확인)의 장치는 BT-3e에서 구현했고(아래 "BT-3e 구현"), 그 정책 값은 BT-4가
+  고정한다. SYNTHETIC / NOT_EVIDENCE.
 
 - 구간: 확증 평가(warmup 끝 – 2024-03-31), historical holdout(2024-04-01 – H_end), 제외 구간, forward(동결 후). 초안 8절과 같다.
 - `bar_export`가 구간을 나눌 때 holdout·forward Bar는 **vault 디렉터리에만** 쓰고, 확증 평가용 Bar 파일에는 넣지 않는다.
@@ -420,7 +421,8 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
     접근 기록의 키는 정확히 kind, vault_content_sha256, preregistration_sha256, config_sha256, evidence, files, opened_at_utc,
     caller다. 키 집합이 다르거나 kind·vault 결속이 맞지 않는 기록은 `RECORD_UNREADABLE`이며, 그래도 1회 사용으로 센다.
   - 공개 API는 모듈의 `__all__`(VaultSpec, build_vault, vault_status, record_evidence, HistoricalHoldoutVault, ForwardVault, 예외
-    5종, 상태 상수 10개)뿐이다. 반환 객체의 타입 이름, 행 표시값 상수, schema·파일 상수, import 이름은 비공개다.
+    5종, 상태 상수 10개)뿐이다. 반환 객체의 타입 이름, 행 표시값 상수, schema·파일 상수, import 이름은 비공개다. BT-3e가 7개 이름을
+    더해 28개가 되었다(아래 "BT-3e 구현").
   - `HistoricalHoldoutVault.open_once`: 기록 전 검사(봉인 집합과 모든 해시, real 아님, 접근 기록 없음, prereg·config SHA 일치,
     증거 3종) → 접근 기록 → 잠금 파일을 한 번 읽어 재해시·파싱 → 표시 붙은 행 반환. 기록 전 실패는 사용이 아니고, 기록 후의 모든
     실패와 중단은 1회 사용이다.
@@ -436,14 +438,60 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
   - 보장하지 않는 것: 경로 직접 읽기(현재 guard의 `/locked/` 규칙은 `locked_forward/`를 덮지 않음), 기록 파일 삭제, 다른 경로에 재구성,
     원본·전체 기간 source bars 노출, 증거의 참 여부, 같은 프로세스 안의 악의적 코드.
   - 미룬 항목(BT-4·BT-5 승인 아님):
-    - DP1: forward 월별 위험 한도 확인(초안 19.3 셋째 항목)은 확증 MDD와 forward 평가 엔진이 있는 별도 task. 그 목적으로 forward 행을
-      반환하는 API는 없다(fail-closed).
+    - DP1: forward 월별 위험 한도 확인(초안 19.3 셋째 항목). 장치는 BT-3e에서 구현했다(아래). 비율, 지표, 비용, 구간, F 규칙 같은
+      정책 값은 BT-4가 고정하고 실제 확인은 BT-6이 한다. forward 행을 반환하는 위험 API는 없다.
     - DP2: locked 파일은 interval별 gzip 없는 canonical JSONL이다. 초안 19.1·부록 A의 `*.jsonl.gz` 단일 파일 문구와 다르며 BT-4 고정 때
       반영한다.
     - DP3: 접근 기록은 manifest를 다시 쓰지 않고 `access/*.json`으로 남긴다. 초안 19.2 "manifest에 먼저 쓴다" 문구와 다르며 BT-4 고정 때
       반영한다.
     - DP4: "forward 12개월", "T_F개월"을 W_end 값으로 바꾸는 해석은 BT-4 study·config 고정에서 한다. vault는 개월 수를 날짜로 바꾸지 않는다.
   - `bar_export`가 vault로 바로 쓰는 연결(전체 기간 bars 디렉터리를 남기지 않는 것)은 BT-5에서 한다.
+- **BT-3e 구현 (월별 forward 위험 확인 장치, 계약 `docs/tasks/BT-3E/WORK_ORDER.md` E1–E19, fixture 전용, CLI 없음).**
+  - 공개 API: `record_risk_policy`, `record_risk_strategies`, `risk_status`, `ForwardVault.check_risk`, 상수 `UNCHECKED`,
+    `CONSUMED_NO_RESULT`, `COMPLETED`, `VIOLATION`(`__all__` 28개). 계산은 비공개 순수 모듈 `backtest/risk_check.py`(`__all__ = []`)가
+    맡는다. 의존 방향은 vault → risk_check → backtest portfolio·costs·performance·data와 domain이고 research는 import하지 않는다.
+  - 두 단계 바인딩: `record_risk_policy`는 holdout 개봉 전에만, `record_risk_strategies`(실제 F, 후보의 부분집합, 정렬·중복 없음)는
+    개봉 후·첫 forward 접근(위험 확인이나 forward 분석) 전에만 기록된다. 둘 다 `evidence/risk_policy.json`, `evidence/risk_strategies.json`에
+    한 번만 배타적으로 만들고, 같은 내용이면 `ALREADY_RECORDED_IDENTICAL`, 다르면 `VaultExistsError`다. 개봉 전에 정책을 기록하지
+    않았으면 위험 확인은 계속 불가능하다(fail-closed). 기존 증거 3종, `open_once`, `vault_status`, D14는 바뀌지 않는다.
+  - 정책 값(metric_id, threshold_ratio, comparison_operator, accumulation_mode, window_mapping_id, 후보별 scenario·initial_cash·fee_bps·
+    kappa_bps·impact_bps·fill_substitution·capacity_verified, f_rule_sha256, confirmatory_first_day·last_day, check_window_end_utc)에는
+    기본값이 없다. 값을 빼면 거부한다(check_window_end_utc=None은 "경계 없음"을 명시한 값). 지원 값은 지표 `MAX_DRAWDOWN_LOG`, 날짜
+    대응 `ENGINE_WINDOW_BT3B`, 비교 `gt`·`ge`, 누적 `CUMULATIVE_FROM_L`·`MONTH_ONLY`뿐이다. 지원한다는 것은 연구가 그 값을 골랐다는
+    뜻이 아니다(BT-4). 후보별 `config_sha256`은 날짜와 무관한 후보 평가 설정 7개(scenario, initial_cash, fee_bps, kappa_bps,
+    impact_bps, fill_substitution, capacity_verified, 기록된 값 그대로)의 정규 JSON SHA-256(`storage.atomic.sha256_of`)이다(ERRATA-001).
+    전략 ID, 확증·forward 날짜, caller, 시각은 넣지 않는다. 같은 식별이 확증 재계산과 forward 평가를 함께 묶는다. `engine_semantics_id`는
+    현재 엔진 의미(gap-free 창 신호, BT-3b 경계, 시나리오 기준 시각)를 기록하는 식별자일 뿐 스위치가 아니며, BT4-Q18을 해결하지 않는다.
+  - 확증 기준: 호출자가 넘기지 않는다. vault의 public bars로 같은 설정·지표·엔진을 써서 내부에서 다시 계산한다. 확증 엔진 구간의
+    G_end(confirmatory_last_day + 3일)는 C 이하여야 한다. 정책 기록 때 모든 후보의 확증 계산이 public 데이터에서 되는지 먼저 확인한다.
+  - `MAX_DRAWDOWN_LOG`: `simulate`의 일별 원장 equity(시나리오 기준 시각)로 만든 로그수익률(첫 값은 초기 현금 대비)의 최대 낙폭 비율
+    (`performance.max_drawdown_log`와 같은 공식). 판정은 forward 값 > (또는 ≥) 비율 × 확증 기준이면 VIOLATION.
+  - `ENGINE_WINDOW_BT3B`: 보호 구간 시작 P(누적이면 L, 월 단독이면 max(월 시작, L))에서 엔진 first_day F = P − 2일, 다음 달 시작 N에서
+    엔진 last_day = N − 3일(엔진 G_end = N). 첫 엔진 기준 시각은 P보다 앞설 수 있고 그 값은 허용된 lookback 행에서 온다. 월말 하루의
+    수익률은 엔진의 다음 날·다음 달로 넘어갈 수 있다.
+  - 누적 방식(`CUMULATIVE_FROM_L`)의 과학적 평가 구간은 L부터 대상 월까지이고, month(L)부터 대상 월까지 모든 달이 봉인되어야 한다.
+  - 월 단독 방식(`MONTH_ONLY`, ERRATA-001)의 과학적 평가 구간은 대상 월뿐이다. 이전 forward 달은 엔진이 결정적으로 필요로 하는 최소
+    lookback만 쓴다: n_max = F에 속한 전략의 엔진 일봉 창 길이(`strategy.RULES[rule].bars_needed`) 최댓값, T_day = F − (n_max − 1)일,
+    T_hour = F, T_req = min(T_day, T_hour). 필요한 달은 month(L) ≤ m′ < m 이고 next(m′) > T_req 인 달이다. 필요한 달은 소비 전에 봉인과
+    무결성(해시)을 확인하고, 없거나 손상되면 접근 기록을 만들기 전에 거부한다(건너뛰거나 엔진의 신호 결측 처리로 대신하지 않음). 필요하지
+    않은 이전 달은 요구하지도, 읽지도, 접근 기록 files에 넣지도 않는다. 소비 뒤 엔진에는 필요한 달의 일봉 중 시작 ≥ T_day, 1시간봉 중
+    시작 ≥ T_hour인 행만 넘긴다. public과 locked holdout lookback은 그대로다.
+  - `check_risk(month)`: 사용하지 않는 검사(봉인 집합, 정책·F, holdout 개봉, prereg·config SHA, 그 달의 기록 없음, 접근 없는 결과 없음,
+    month(L) 이상, check_window_end_utc 안, 위 방식별 필요한 봉인 월의 존재와 무결성, 확증 기준 계산)를 모두
+    통과한 뒤 `access/risk_YYYYMM.json`을 배타적으로 만든다. 이것이 소비 시점이다. 그 뒤에만 보호 행을 읽어 계산하고, 결정적 결과 기록
+    `access/risk_YYYYMM.result.json`을 게시하고, 전략 → PASS | VIOLATION 맵만 반환한다. 기록 후의 모든 실패와 BaseException은 그 달을
+    소비한다. 같은 달의 두 번째 확인은 상태와 무관하게 `VaultLockedError`이며 보호 행을 다시 읽지 않는다. 결과 게시 충돌은 같은
+    바이트면 받아들이고 다르면 `VaultIntegrityError`다.
+  - 기록 스키마(닫힌 키 집합): risk_policy(kind, vault_content_sha256, preregistration_sha256, config_sha256, 위 정책 값, candidates,
+    f_rule_sha256), risk_strategies(kind, vault_content_sha256, risk_policy_sha256, strategies, basis_sha256), 월별 접근(kind, month,
+    vault_content_sha256, risk_policy_sha256, risk_strategies_sha256, preregistration_sha256, config_sha256, files, checked_at_utc, caller),
+    월별 결과(kind, month, access_record_sha256, risk_policy_sha256, risk_strategies_sha256, decisions). 정책·F·결과 기록에는 시각이 없다.
+    어떤 기록에도 MDD 값, 행, 가격, 수익률, 행 시각, 행 수가 없다.
+  - `risk_status`: policy·strategies(RECORDED/ABSENT), integrity(PASS/FAIL), 기록이 있는 달마다 state(UNCHECKED, CONSUMED_NO_RESULT,
+    COMPLETED)와 decisions(완료된 달만). 접근 없는 결과나 이상한 기록은 integrity FAIL이다. MDD·행·가격·시각·경로·오류 문자열은 없다.
+  - 보장하지 않는 것: state 삭제를 암호학적으로 막지 못한다(N2), 실데이터 보안, 기존 vault 모델 이상의 OS 수준 방어, BT-4 정책 값 선택,
+    BT4-Q18 해결, study 수준 중단·REJECT 절차(위반 뒤의 달도 확인할 수 있음), Monte Carlo, 실제 BT-6 월별 확인. 엔진 실패(예: 대상 월
+    1시간봉이 평가 끝까지 닿지 않음)는 보호 행을 읽은 뒤에야 드러나므로 그 달을 소비한다. MC-V06은 같은 지표·대응·누적 의미를 따라야 한다.
 
 ### 10.4 다중 전략 비교와 선택 편향
 
@@ -606,3 +654,4 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 | BT-3b | 2026-10-16 | 평가 구간 경계(4절): G = [F + 2일, E + 3일), 평가 끝 R(E + 1) ≤ G_end를 유도, 엔진 guard(`bar.end_utc ≤ G_end`), 1시간봉이 평가 끝 전에 끝나면 거부, `backtest-verify`의 독립 `boundary` 검사. "이중 차단"과 "(현금 유지)" 문구를 실제 동작에 맞게 정정(U4는 미결). 적재 단계 분할·vault는 BT-3c. 스키마·초안 변경 없음, SYNTHETIC / NOT_EVIDENCE |
 | BT-3c | 2026-10-16 | 입력 segment와 식별(4절): `backtest-segment`(segment/1, `end_utc ≤ last_day + 3일`, 하한 없음, source 계보·content SHA·id·manifest SHA 분리. 계약 v1.2: content SHA에서 source 계보 제외), run manifest run/2(`config_sha256`, `boundary`, consumed 해시, segment 필드), `backtest-verify`의 독립 `identity` 검사, `SOURCE_UNAVAILABLE`과 run/1 legacy 상태. result·report/2·bt-metrics/2·bt-seed/1·bars/1 형식 변경 없음. vault 잠금은 BT-3d, 고정은 BT-4. SYNTHETIC / NOT_EVIDENCE |
 | BT-3d | 2026-10-17 | vault 잠금(10.3절, Work Order `docs/tasks/BT-3D/WORK_ORDER.md`): `backtest/vault.py` 라이브러리(CLI 없음). public bars/1 + 봉인된 locked holdout, `HistoricalHoldoutVault.open_once`, `ForwardVault.seal`·`open_analysis`(명시적 W_end), 증거·접근 기록(배타적 1회 생성, 기록 후 읽기), content 식별과 접근 상태 분리, IDENTICAL_EXISTING. 미룬 항목 DP1–DP4. 기존 스키마·코드 변경 없음, guard 변경 없음. SYNTHETIC / NOT_EVIDENCE |
+| BT-3e | 2026-10-17 | 월별 forward 위험 확인 장치(10.3절, Work Order `docs/tasks/BT-3E/WORK_ORDER.md`): `record_risk_policy`(holdout 개봉 전), `record_risk_strategies`(개봉 후·첫 forward 접근 전), `ForwardVault.check_risk`(달마다 F 전체 1회, 기록 후 읽기, 전략별 PASS/VIOLATION만), `risk_status`, 비공개 `backtest/risk_check.py`. 확증 기준은 public 데이터로 내부 재계산. 정책 값 기본값 없음(지원: MAX_DRAWDOWN_LOG, ENGINE_WINDOW_BT3B). `vault_status`·D14·기존 증거 3종 그대로. DP1 장치 구현(정책 값은 BT-4), DP2–DP4 미해결. SYNTHETIC / NOT_EVIDENCE |
