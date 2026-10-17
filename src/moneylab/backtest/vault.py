@@ -20,8 +20,13 @@ read: any failure after the record exists consumes the use. Status and error mes
 pass/fail only, never locked prices or bar times.
 
 "forward N months" is not interpreted here: the analysis ends come from VaultSpec as explicit UTC boundaries (the
-conversion belongs to the BT-4 config freeze). The monthly forward risk-limit check is not implemented (deferred).
-All vaults of fixture or synthetic bars are SYNTHETIC / NOT_EVIDENCE.
+conversion belongs to the BT-4 config freeze).
+
+BT-3e (docs/tasks/BT-3E/WORK_ORDER.md) adds the monthly forward risk check: record_risk_policy (before the holdout
+is opened), record_risk_strategies (after it, before any forward access), ForwardVault.check_risk (one consuming
+check per month for the bound strategy set, record before read, strategy -> PASS | VIOLATION only) and risk_status.
+The calculation lives in the private module backtest/risk_check.py. Policy values have no defaults; supported values
+do not select study policy (BT-4). All vaults of fixture or synthetic bars are SYNTHETIC / NOT_EVIDENCE.
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ from decimal import Decimal as _Decimal
 from pathlib import Path as _Path
 from typing import Any as _Any
 
+from moneylab.backtest import risk_check as _risk_check
 from moneylab.backtest.bars_io import MANIFEST_FILE as _BARS_MANIFEST_FILE
 from moneylab.backtest.bars_io import REFUSED_KINDS as _REFUSED_KINDS
 from moneylab.backtest.bars_io import SCHEMA as _BARS_SCHEMA
@@ -63,6 +69,9 @@ __all__ = [
     "VaultError", "VaultLockedError", "VaultPreconditionError", "VaultIntegrityError", "VaultExistsError",
     "CREATED", "ALREADY_SEALED_IDENTICAL", "RECORDED", "ALREADY_RECORDED_IDENTICAL", "UNOPENED", "OPENED",
     "RECORD_UNREADABLE", "ABSENT", "PASS", "FAIL",
+    # BT-3e (docs/tasks/BT-3E/WORK_ORDER.md E1)
+    "record_risk_policy", "record_risk_strategies", "risk_status",
+    "UNCHECKED", "CONSUMED_NO_RESULT", "COMPLETED", "VIOLATION",
 ]
 
 _SCHEMA = "moneylab.backtest.vault/1"
@@ -92,6 +101,23 @@ RECORDED, ALREADY_RECORDED_IDENTICAL = "RECORDED", "ALREADY_RECORDED_IDENTICAL"
 UNOPENED, OPENED, RECORD_UNREADABLE = "UNOPENED", "OPENED", "RECORD_UNREADABLE"
 ABSENT = "ABSENT"
 PASS, FAIL = "PASS", "FAIL"
+UNCHECKED, CONSUMED_NO_RESULT, COMPLETED = "UNCHECKED", "CONSUMED_NO_RESULT", "COMPLETED"
+VIOLATION = "VIOLATION"
+
+# BT-3e risk records (E4, E15): one-time records inside the existing state directories.
+_RISK_POLICY_FILE, _RISK_STRATEGIES_FILE = "risk_policy.json", "risk_strategies.json"
+_RISK_POLICY_KEYS = ("kind", "vault_content_sha256", "preregistration_sha256", "config_sha256", "metric_id",
+                     "threshold_ratio", "comparison_operator", "accumulation_mode", "window_mapping_id",
+                     "engine_semantics_id", "confirmatory_first_day", "confirmatory_last_day", "check_window_end_utc",
+                     "candidates", "f_rule_sha256")
+_RISK_POLICY_FIELDS = _RISK_POLICY_KEYS[4:14]  # the policy values validated by risk_check
+_RISK_STRATEGIES_KEYS = ("kind", "vault_content_sha256", "risk_policy_sha256", "strategies", "basis_sha256")
+_RISK_ACCESS_KEYS = ("kind", "month", "vault_content_sha256", "risk_policy_sha256", "risk_strategies_sha256",
+                     "preregistration_sha256", "config_sha256", "files", "checked_at_utc", "caller")
+_RISK_RESULT_KEYS = ("kind", "month", "access_record_sha256", "risk_policy_sha256", "risk_strategies_sha256",
+                     "decisions")
+_RISK_ACCESS_NAME = _re.compile(r"risk_(\d{6})\.json")
+_RISK_RESULT_NAME = _re.compile(r"risk_(\d{6})\.result\.json")
 
 _HEX64 = _re.compile(r"[0-9a-f]{64}")
 _MONTH = _re.compile(r"(\d{4})(\d{2})")
@@ -899,6 +925,334 @@ class ForwardVault:
                 rows.extend(_read_locked(path, rec["sha256"], rec["bars"], view.manifest["market"], iv))
             forward[iv] = tuple(b for b in rows if lk < b.end_utc <= w_end)
         return _ForwardAnalysis(kind, view.manifest["vault_id"], w_end, lookback, forward)
+
+    def check_risk(self, month: str, *, preregistration_sha256: str, config_sha256: str,
+                   caller: str = "") -> dict[str, str]:
+        """BT-3e monthly forward risk check (E3, E6, E7, E10, E16). Every check that does not consume comes first;
+        creating access/risk_YYYYMM.json consumes the month; only then are protected rows read. Returns
+        strategy -> PASS | VIOLATION for the bound F and nothing else."""
+        m = _parse_month(month)
+        view = _load(self.vault_dir)
+        policy_doc, policy, policy_sha = _risk_policy(view)
+        strat_doc, strat_sha = _risk_strategies(view, policy, policy_sha)
+        if not _record_present(view.dir / _ACCESS_DIR / f"{_HOLDOUT_OPEN}.json"):
+            raise VaultPreconditionError("the historical holdout must be opened before a risk check")
+        _check_hashes(view, preregistration_sha256, config_sha256)
+        name = _month_name(m)
+        access_path = view.dir / _ACCESS_DIR / f"risk_{name}.json"
+        result_path = view.dir / _ACCESS_DIR / f"risk_{name}.result.json"
+        if _record_present(access_path):
+            raise VaultLockedError(f"the risk check of month {name} was already used; it is single-use")
+        if _record_present(result_path):
+            raise VaultIntegrityError(f"a risk result of month {name} exists without its access record")
+        lk = view.spec.locked_end_utc
+        if m < _month_start(lk):
+            raise VaultPreconditionError("month is before the month of locked_end_utc")
+        if policy.check_window_end_utc is not None and m >= policy.check_window_end_utc:
+            raise VaultPreconditionError("month is outside check_window_end_utc")
+        strategies = strat_doc["strategies"]
+        cumulative = policy.accumulation_mode == _risk_check._CUMULATIVE
+        protected_start = lk if cumulative else max(m, lk)
+        lookback: tuple[_datetime, _datetime] | None = None
+        t_req = lk
+        if not cumulative:  # ERRATA-001 E6: target month plus only the deterministic minimal forward lookback
+            try:
+                t_day, t_hour, t_req = _risk_check._month_only_lookback(policy, strategies, protected_start,
+                                                                        _next_month(m))
+            except _risk_check._RiskSpecError as exc:
+                raise VaultPreconditionError(str(exc)) from None
+            lookback = (t_day, t_hour)
+        required: list[_datetime] = []
+        mm = _month_start(lk)
+        while mm <= m:
+            if cumulative or mm == m or _next_month(mm) > t_req:
+                required.append(mm)
+            mm = _next_month(mm)
+        # every required month must be sealed and intact (missing: precondition, corrupt: integrity); irrelevant
+        # earlier months are neither required nor touched. Hashes only: no protected row is parsed here.
+        seals: dict[_datetime, dict[str, _Any]] = {mm: _load_seal(view, mm) for mm in required}
+        public_day, public_hour = _public_bars(view)
+        kind = view.manifest["provenance"]
+        try:  # public data only: a failure here consumes nothing
+            references = {rule: _risk_check._confirmatory_reference(policy, rule, public_day, public_hour, kind)
+                          for rule in strategies}
+        except VaultError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - mapped to a precondition, the type name only
+            raise VaultPreconditionError(f"the confirmatory reference cannot be computed ({type(exc).__name__})") \
+                from None
+        files = {f"{_PUBLIC_DIR}/{view.manifest['intervals'][iv]['public_dir']}/{_public_file(iv)}":
+                 view.manifest["intervals"][iv]["public_bars_sha256"] for iv in _INTERVALS}
+        files.update({_locked_file(iv): view.manifest["intervals"][iv]["locked_sha256"] for iv in _INTERVALS})
+        for sm, seal in seals.items():
+            for iv in _INTERVALS:
+                files[f"{_FORWARD_DIR}/forward_{_month_name(sm)}/{_forward_file(iv)}"] = seal["intervals"][iv]["sha256"]
+        values = ("risk_check", name, view.manifest["vault_content_sha256"], policy_sha, strat_sha,
+                  preregistration_sha256, config_sha256, files, _now(), str(caller))
+        access_bytes = _json_bytes(dict(zip(_RISK_ACCESS_KEYS, values, strict=True)))
+        if not _create_exclusive(access_path, access_bytes):
+            raise VaultLockedError(f"the risk check of month {name} was already used; it is single-use")
+        return _after_record(_risk_evaluate, view, policy, strategies, references, seals, protected_start, m,
+                             access_bytes, result_path, policy_sha, strat_sha, lookback)
+
+
+# --- BT-3e risk records and evaluation --------------------------------------------------------------------------
+
+def _risk_policy(view: _View) -> tuple[dict[str, _Any], _Any, str]:
+    """The recorded risk policy, checked for the closed key set, binding and every policy value (E15)."""
+    path = view.dir / _EVIDENCE_DIR / _RISK_POLICY_FILE
+    if not path.exists():
+        raise VaultPreconditionError("the risk policy is not recorded")
+    try:
+        doc = _json.loads(path.read_bytes().decode("utf-8"))
+        ok = isinstance(doc, dict) and set(doc) == set(_RISK_POLICY_KEYS) and doc["kind"] == "risk_policy" and \
+            doc["vault_content_sha256"] == view.manifest["vault_content_sha256"] and \
+            doc["preregistration_sha256"] == view.spec.preregistration_sha256 and \
+            doc["config_sha256"] == view.spec.config_sha256 and \
+            isinstance(doc["f_rule_sha256"], str) and bool(_HEX64.fullmatch(doc["f_rule_sha256"]))
+        policy = _risk_check._policy_from_fields({k: doc[k] for k in _RISK_POLICY_FIELDS},
+                                                 view.spec.confirmatory_data_end_utc) if ok else None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        ok, policy = False, None
+    if not ok or policy is None:
+        raise VaultPreconditionError("the risk policy is unreadable or malformed")
+    return doc, policy, _sha256_of(doc)
+
+
+def _risk_strategies(view: _View, policy: _Any, policy_sha: str) -> tuple[dict[str, _Any], str]:
+    """The recorded realized strategy set F, checked for the closed key set, binding and canonical form (E15)."""
+    path = view.dir / _EVIDENCE_DIR / _RISK_STRATEGIES_FILE
+    if not path.exists():
+        raise VaultPreconditionError("the realized strategy set is not recorded")
+    try:
+        doc = _json.loads(path.read_bytes().decode("utf-8"))
+        ok = isinstance(doc, dict) and set(doc) == set(_RISK_STRATEGIES_KEYS) and doc["kind"] == "risk_strategies" and \
+            doc["vault_content_sha256"] == view.manifest["vault_content_sha256"] and \
+            doc["risk_policy_sha256"] == policy_sha and isinstance(doc["basis_sha256"], str) and \
+            bool(_HEX64.fullmatch(doc["basis_sha256"])) and \
+            _risk_check._canonical_strategies(doc["strategies"], policy) == doc["strategies"]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        ok = False
+    if not ok:
+        raise VaultPreconditionError("the realized strategy set is unreadable or malformed")
+    return doc, _sha256_of(doc)
+
+
+def _public_bars(view: _View) -> tuple[list[_Bar], list[_Bar]]:
+    out = []
+    for iv in _INTERVALS:
+        d = view.dir / _PUBLIC_DIR / view.manifest["intervals"][iv]["public_dir"]
+        try:
+            out.append(list(_load_bars(d).bars))
+        except (_DataIntegrityError, OSError) as exc:
+            raise VaultIntegrityError(f"public {iv} bars cannot be read ({type(exc).__name__})") from None
+    return out[0], out[1]
+
+
+def _risk_evaluate(view: _View, policy: _Any, strategies: list[str], references: dict[str, float],
+                   seals: dict[_datetime, dict[str, _Any]], protected_start: _datetime, month: _datetime,
+                   access_bytes: bytes, result_path: _Path, policy_sha: str, strat_sha: str,
+                   lookback: tuple[_datetime, _datetime] | None) -> dict[str, str]:
+    """After the access record: read the required protected rows once, decide, publish the deterministic result
+    record. With MONTH_ONLY (lookback = (T_day, T_hour)) the months before the target month supply only daily rows
+    starting at or after T_day and hourly rows starting at or after T_hour (ERRATA-001 E6)."""
+    daily, hourly = _public_bars(view)
+    for iv, target in (("day", daily), ("hour", hourly)):
+        rec = view.manifest["intervals"][iv]
+        target.extend(_read_locked(view.dir / _locked_file(iv), rec["locked_sha256"],
+                                   rec["holdout_eval_bars"] + rec["excluded_bars"], view.manifest["market"], iv))
+        for sm, seal in sorted(seals.items()):
+            srec = seal["intervals"][iv]
+            rows = _read_locked(view.dir / _FORWARD_DIR / f"forward_{_month_name(sm)}" / _forward_file(iv),
+                                srec["sha256"], srec["bars"], view.manifest["market"], iv)
+            if lookback is not None and sm != month:
+                floor = lookback[0] if iv == "day" else lookback[1]
+                rows = tuple(b for b in rows if b.start_utc >= floor)
+            target.extend(rows)
+    decisions = _risk_check._forward_decisions(policy, strategies, references, daily, hourly,
+                                               view.manifest["provenance"], protected_start, _next_month(month))
+    decisions = {rule: decisions[rule] for rule in sorted(decisions)}
+    values = ("risk_result", _month_name(month), _sha(access_bytes), policy_sha, strat_sha, decisions)
+    data = _json_bytes(dict(zip(_RISK_RESULT_KEYS, values, strict=True)))
+    if not _create_exclusive(result_path, data):
+        try:
+            same = result_path.read_bytes() == data
+        except OSError:
+            same = False
+        if not same:
+            raise VaultIntegrityError(f"a different risk result of month {_month_name(month)} already exists")
+    return dict(decisions)
+
+
+def _forward_access_exists(view: _View) -> bool:
+    access = view.dir / _ACCESS_DIR
+    if any(_record_present(access / f"forward_{k}.json") for k in _ANALYSIS_KINDS):
+        return True
+    try:
+        return access.is_dir() and any(_RISK_ACCESS_NAME.fullmatch(p.name) for p in access.iterdir())
+    except OSError:
+        return True  # fail closed
+
+
+def _record_once(path: _Path, data: bytes, what: str) -> str:
+    if _create_exclusive(path, data):
+        return RECORDED
+    try:
+        same = path.read_bytes() == data
+    except OSError:
+        same = False
+    if same:
+        return ALREADY_RECORDED_IDENTICAL
+    raise VaultExistsError(f"the {what} is already recorded with different content")
+
+
+_MISSING = object()  # marks an omitted policy value; never a policy default (E14)
+
+
+def record_risk_policy(vault_dir: _Path, *, preregistration_sha256: _Any = _MISSING, config_sha256: _Any = _MISSING,
+                       metric_id: _Any = _MISSING, threshold_ratio: _Any = _MISSING,
+                       comparison_operator: _Any = _MISSING, accumulation_mode: _Any = _MISSING,
+                       window_mapping_id: _Any = _MISSING, engine_semantics_id: _Any = _MISSING,
+                       confirmatory_first_day: _Any = _MISSING, confirmatory_last_day: _Any = _MISSING,
+                       check_window_end_utc: _Any = _MISSING, candidates: _Any = _MISSING,
+                       f_rule_sha256: _Any = _MISSING) -> str:
+    """Stage 1 of the risk binding (E5): record every risk-policy value once, before the holdout is opened.
+    No value has a default: an omitted value is refused (check_window_end_utc=None is an explicit value).
+    The confirmatory evaluation of every candidate is tried on public data first."""
+    given = {"preregistration_sha256": preregistration_sha256, "config_sha256": config_sha256,
+             "metric_id": metric_id, "threshold_ratio": threshold_ratio, "comparison_operator": comparison_operator,
+             "accumulation_mode": accumulation_mode, "window_mapping_id": window_mapping_id,
+             "engine_semantics_id": engine_semantics_id, "confirmatory_first_day": confirmatory_first_day,
+             "confirmatory_last_day": confirmatory_last_day, "check_window_end_utc": check_window_end_utc,
+             "candidates": candidates, "f_rule_sha256": f_rule_sha256}
+    missing = sorted(k for k, v in given.items() if v is _MISSING)
+    if missing:
+        raise VaultPreconditionError(f"risk policy values are required and have no default: {missing}")
+    view = _load(vault_dir)
+    if _record_present(view.dir / _ACCESS_DIR / f"{_HOLDOUT_OPEN}.json"):
+        raise VaultPreconditionError("the risk policy must be recorded before the historical holdout is opened")
+    _check_hashes(view, preregistration_sha256, config_sha256)
+    _require_hex(f_rule_sha256, "f_rule_sha256")
+    try:
+        fields = _risk_check._policy_record_fields(
+            metric_id=metric_id, threshold_ratio=threshold_ratio, comparison_operator=comparison_operator,
+            accumulation_mode=accumulation_mode, window_mapping_id=window_mapping_id,
+            engine_semantics_id=engine_semantics_id, confirmatory_first_day=confirmatory_first_day,
+            confirmatory_last_day=confirmatory_last_day, check_window_end_utc=check_window_end_utc,
+            candidates=candidates, public_end=view.spec.confirmatory_data_end_utc)
+        policy = _risk_check._policy_from_fields(fields, view.spec.confirmatory_data_end_utc)
+    except _risk_check._RiskSpecError as exc:
+        raise VaultPreconditionError(str(exc)) from None
+    public_day, public_hour = _public_bars(view)
+    try:  # every candidate must be evaluable on public data before the policy is fixed
+        for rule in policy.candidates:
+            _risk_check._confirmatory_reference(policy, rule, public_day, public_hour, view.manifest["provenance"])
+    except Exception as exc:  # noqa: BLE001 - mapped to a precondition, the type name only
+        raise VaultPreconditionError(f"the confirmatory evaluation fails on public data ({type(exc).__name__})") \
+            from None
+    doc = {"kind": "risk_policy", "vault_content_sha256": view.manifest["vault_content_sha256"],
+           "preregistration_sha256": preregistration_sha256, "config_sha256": config_sha256, **fields,
+           "f_rule_sha256": f_rule_sha256}
+    return _record_once(view.dir / _EVIDENCE_DIR / _RISK_POLICY_FILE, _json_bytes(doc), "risk policy")
+
+
+def record_risk_strategies(vault_dir: _Path, *, strategies: list[str], basis_sha256: str,
+                           preregistration_sha256: str, config_sha256: str) -> str:
+    """Stage 2 of the risk binding (E5): record the realized strategy set F once, after the holdout is opened
+    and before any forward access (risk check or forward analysis). F is a subset of the frozen candidates."""
+    view = _load(vault_dir)
+    _doc, policy, policy_sha = _risk_policy(view)
+    if not _record_present(view.dir / _ACCESS_DIR / f"{_HOLDOUT_OPEN}.json"):
+        raise VaultPreconditionError("the realized strategy set is recorded only after the holdout is opened")
+    if _forward_access_exists(view):
+        raise VaultPreconditionError("the realized strategy set must be recorded before any forward access")
+    _check_hashes(view, preregistration_sha256, config_sha256)
+    _require_hex(basis_sha256, "basis_sha256")
+    try:
+        canon = _risk_check._canonical_strategies(strategies, policy)
+    except _risk_check._RiskSpecError as exc:
+        raise VaultPreconditionError(str(exc)) from None
+    doc = {"kind": "risk_strategies", "vault_content_sha256": view.manifest["vault_content_sha256"],
+           "risk_policy_sha256": policy_sha, "strategies": canon, "basis_sha256": basis_sha256}
+    return _record_once(view.dir / _EVIDENCE_DIR / _RISK_STRATEGIES_FILE, _json_bytes(doc), "realized strategy set")
+
+
+def _risk_month_state(d: _Path, name: str, content: str | None, policy_sha: str | None, strat_doc: dict | None,
+                      strat_sha: str | None) -> tuple[dict[str, _Any], bool]:
+    """(month entry, consistent) for one month; consistent is False for malformed or unbound records."""
+    access_path, result_path = d / _ACCESS_DIR / f"risk_{name}.json", d / _ACCESS_DIR / f"risk_{name}.result.json"
+    if not access_path.exists():
+        return {"state": UNCHECKED, "decisions": None}, not result_path.exists()
+    try:
+        access_bytes = access_path.read_bytes()
+        acc = _json.loads(access_bytes.decode("utf-8"))
+        acc_ok = isinstance(acc, dict) and set(acc) == set(_RISK_ACCESS_KEYS) and acc["kind"] == "risk_check" and \
+            acc["month"] == name and content is not None and acc["vault_content_sha256"] == content and \
+            acc["risk_policy_sha256"] == policy_sha and acc["risk_strategies_sha256"] == strat_sha
+    except (OSError, ValueError, KeyError, TypeError):
+        acc_ok = False
+    if not acc_ok:
+        return {"state": CONSUMED_NO_RESULT, "decisions": None}, False
+    if not result_path.exists():
+        return {"state": CONSUMED_NO_RESULT, "decisions": None}, True
+    try:
+        res = _json.loads(result_path.read_bytes().decode("utf-8"))
+        res_ok = isinstance(res, dict) and set(res) == set(_RISK_RESULT_KEYS) and res["kind"] == "risk_result" and \
+            res["month"] == name and res["access_record_sha256"] == _sha(access_bytes) and \
+            res["risk_policy_sha256"] == policy_sha and res["risk_strategies_sha256"] == strat_sha and \
+            strat_doc is not None and isinstance(res["decisions"], dict) and \
+            list(res["decisions"]) == strat_doc["strategies"] and \
+            all(v in (PASS, VIOLATION) for v in res["decisions"].values())
+    except (OSError, ValueError, KeyError, TypeError):
+        res_ok = False
+    if not res_ok:
+        return {"state": CONSUMED_NO_RESULT, "decisions": None}, False
+    return {"state": COMPLETED, "decisions": dict(res["decisions"])}, True
+
+
+def risk_status(vault_dir: _Path) -> dict[str, _Any]:
+    """Minimal risk state (E8): policy and strategies presence, integrity PASS/FAIL and, for months with records,
+    UNCHECKED / CONSUMED_NO_RESULT / COMPLETED with the strategy decisions. No metric values, rows, prices,
+    timestamps, paths or error text. vault_status is unchanged."""
+    d = _Path(vault_dir)
+    ok = True
+    view: _View | None = None
+    try:
+        view = _load(d)
+    except VaultError:
+        ok = False
+    content = None if view is None else view.manifest["vault_content_sha256"]
+    policy_present = (d / _EVIDENCE_DIR / _RISK_POLICY_FILE).exists()
+    strat_present = (d / _EVIDENCE_DIR / _RISK_STRATEGIES_FILE).exists()
+    policy = policy_sha = strat_doc = strat_sha = None
+    if view is not None and policy_present:
+        try:
+            _pdoc, policy, policy_sha = _risk_policy(view)
+        except VaultError:
+            ok = False
+    if view is not None and strat_present:
+        try:
+            if policy is None:
+                raise VaultPreconditionError("no valid policy")
+            strat_doc, strat_sha = _risk_strategies(view, policy, policy_sha)
+        except VaultError:
+            ok = False
+    names: set[str] = set()
+    try:
+        if (d / _ACCESS_DIR).is_dir():
+            for p in (d / _ACCESS_DIR).iterdir():
+                mt = _RISK_ACCESS_NAME.fullmatch(p.name) or _RISK_RESULT_NAME.fullmatch(p.name)
+                if mt:
+                    names.add(mt.group(1))
+    except OSError:
+        ok = False
+    months: dict[str, dict[str, _Any]] = {}
+    for name in sorted(names):
+        entry, consistent = _risk_month_state(d, name, content, policy_sha, strat_doc, strat_sha)
+        months[name] = entry
+        ok = ok and consistent
+    return {"policy": RECORDED if policy_present else ABSENT, "strategies": RECORDED if strat_present else ABSENT,
+            "integrity": PASS if ok else FAIL, "months": months}
 
 
 # --- status -----------------------------------------------------------------------------------------------------

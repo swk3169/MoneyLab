@@ -599,6 +599,9 @@ D1_PUBLIC = {
     "VaultError", "VaultLockedError", "VaultPreconditionError", "VaultIntegrityError", "VaultExistsError",
     "CREATED", "ALREADY_SEALED_IDENTICAL", "RECORDED", "ALREADY_RECORDED_IDENTICAL", "UNOPENED", "OPENED",
     "RECORD_UNREADABLE", "ABSENT", "PASS", "FAIL",
+    # BT-3e additions (docs/tasks/BT-3E/WORK_ORDER.md E1): 21 + 7 = 28 names
+    "record_risk_policy", "record_risk_strategies", "risk_status",
+    "UNCHECKED", "CONSUMED_NO_RESULT", "COMPLETED", "VIOLATION",
 }
 
 
@@ -613,7 +616,7 @@ def test_r1_r8_public_api_is_exactly_the_d1_enumeration():
                  "VaultBuild", "HoldoutOpening", "LabeledBar", "ForwardSeal", "ForwardAnalysis", "content_payload"):
         assert not hasattr(vmod, name), name
     assert {n for n in vars(HistoricalHoldoutVault) if not n.startswith("_")} == {"open_once"}
-    assert {n for n in vars(ForwardVault) if not n.startswith("_")} == {"seal", "open_analysis"}
+    assert {n for n in vars(ForwardVault) if not n.startswith("_")} == {"seal", "open_analysis", "check_risk"}
     assert all(getattr(vmod, n) == n for n in D1_PUBLIC if n.isupper())  # status constants keep their values
     # returned objects keep their shape although their type names are private
     assert [f.name for f in dataclasses.fields(vmod._LabeledBar)] == ["label", "bar"]
