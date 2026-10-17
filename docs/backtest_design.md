@@ -502,6 +502,47 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 - 보고: 4개 전략의 지표 표, 최고 Sharpe 전략의 deflated Sharpe(시도 수 9, 초안 6.1), 승자의 저주 경고.
 - 효과 크기는 forward(L3) 추정치로만 주장한다(초안 2절).
 
+### 10.5 MC-V06 합성 Monte Carlo의 위험 의미 (research 계층)
+
+계약: `docs/tasks/MC-V06/WORK_ORDER.md`. 구현: `research/v06/risk_model.py`(위험 모델), `research/v06/montecarlo.py`(harness).
+모든 출력은 **SYNTHETIC / NOT_EVIDENCE**이며 사전등록 판정·D1–D9 선택·BT-4 정책 값에 쓰지 않는다.
+
+- **의존 방향:** research → backtest, backtest → research 런타임 import는 둘 다 금지 그대로다. 위험 모델은 research 계층의 독립 순수
+  구현이고, 패키지 간 비교는 테스트(`tests/test_v06_risk_model.py`)에서만 public `ForwardVault.check_risk`, public `portfolio.simulate`,
+  `performance.max_drawdown_log`로 한다. 비공개 `backtest/risk_check.py`에는 의존하지 않는다.
+- **규범적 동치 범위 (주어진 일별 로그수익률 기준):** `MAX_DRAWDOWN_LOG`(누적 로그수익률의 `1 − exp(−worst)`, 엔진과 같은
+  `−expm1(−worst)` 계산), 달력 월 구분(관측 t의 UTC 날짜 = L + t일), `CUMULATIVE_FROM_L`(L부터 대상 월 끝까지), `MONTH_ONLY`(대상 월만,
+  시작은 max(월 시작, L)), `gt`·`ge`(값 >(≥) 비율 × 확증 기준이면 VIOLATION). 기준값 경계(확증 기준 0에서 `ge`는 값 0도 위반)를 포함한다.
+- **제외 항목 (한계, 결과에도 표시):** 엔진이 만드는 equity, 1시간봉 엔진 경로, 시나리오 기준 시각, ENGINE_WINDOW_BT3B의 F = P − 2일과
+  last_day = N − 3일 이동. 동치 테스트 fixture는 월 경계 앞뒤 4일의 가격을 평평하게 두어 결과가 이 이동에 좌우되지 않게 했고, 그런
+  사례만 규범 동치로 표시한다. MC의 forward 수익률은 합성 경로의 연속 mark-to-market 수익률이다(월마다 엔진을 새로 시작하지 않음). 엔진
+  수준 동치는 주장하지 않으며 **BT4-Q18은 미해결**이다.
+- **기준과 forward의 비대칭 (한계, 범위 경계):** 확증 기준 MDD는 확증 segment 수익률(8.1 가상 진입·청산 비용 포함, 마지막 날의 가상
+  청산 포함)로 계산한다. forward 위험 수익률은 가상 진입은 포함하지만 월별 가상 청산이 없고 월마다 엔진을 다시 시작하지도 않는다. 이
+  비대칭은 그대로 두고 보고하며, 이를 없애려고 수익률 생성 방식을 바꾸지 않는다.
+- **시뮬레이션 달력 (NOT_A_BT4_DECISION):** 주 규칙 `PRIMARY_MONTH_START`는 L = 2026-12-01(UTC 월 첫날; holdout 끝 2026-10-02 뒤 제외
+  구간 60일 = 노출 40일 이상을 다음 월 시작으로 올림), 합성 일별 관측은 달력 날짜로 하루씩, 위험 확인은 달력 월 단위다. forward 창은 L부터
+  12/24/36개월(365/731/1096일), 중간 분석은 12개월이다. `SENSITIVITY_MID_MONTH`(L = 2026-12-16)는 같은 관측의 위험 월 구분만 바꾼 제한된
+  민감도이고 판정 격자에 들어가지 않는다. 이전 harness의 30일 누적 확인은 `LEGACY_30D_COMPARISON` 키 아래에만 비교용으로 남고 규범 키와
+  공유하지 않는다. 이 달력은 DP4(개월 수 → W_end 변환)를 정하지 않는다.
+- **판정 순서:** forward 사건은 시간 순서로 판정한다(초안 11.3: 위험 한도는 매월, 무익성은 중간·최종 분석 시점에만). 중간 분석까지의
+  위험 위반 → 중간 무익성 → T_F까지의 위험 위반 → 최종 무익성 → S_F.
+- **반복 축 (서로 대신하지 않음, manifest에 따로 기록):** R_OUTER = 10,000(합성 경로), B_BOOT = 9,999(stationary bootstrap),
+  K_RAND = 9,999(B1 무작위 배치), TRUTH_YEARS = 400(정답·보정 경로), TARGET_MAX_MC_SE = 0.005, 적응적 중단 금지. 규범 실행 여부는
+  manifest `repetition_axes`·`normative_run`에 기록한다.
+- **격자:** D1–D7 후보와 위험 정책(누적 2 × 비교 2, 비율 1.5)은 반복별 기록(p값, 위험 결과)에 대한 결정적 후처리로 모두 평가한다(공통
+  난수, 추가 시뮬레이션 없음). T_F = 12는 중간 분석이 없다. D8·D9는 MC 차원이 아니고(BT-4), D10은 범위 밖이다. REJECT 경계 시나리오는
+  D1 후보마다 하나씩(`boundary_theta_0p3/0p5/0p7`) 두고 나머지 tier1 시나리오는 그대로다.
+- **산출물 (`moneylab.research_v06_sim/2`):** `write_study`가 새 디렉터리에 `manifest.json`(seed·파생 seed 규칙, 반복 축, 시나리오·DGP,
+  Procedure·Layout, 달력, 격자, 소스 SHA-256(작업 트리 바이트, LF 정규화, git blob), Python·버전, 재현 정보), `scenarios/<name>/summary.json`,
+  `scenarios/<name>/records.jsonl`(반복마다 정규 JSON 한 줄), `execution.json`(UTC 시작·끝, 실행 Git 식별(파일에서 읽음, subprocess
+  없음), workers), `SHA256SUMS`를 쓴다. `execution.json`을 뺀 파일은 같은 소스·Python·설정·seed에서 바이트가 같고 workers와 무관하다.
+  checkpoint/resume은 없다. `research-v06-sim` CLI(변경 없음)는 개발 경로로 summary와 records를 한 파일의 별도 키에 쓴다.
+- **단일 검정 결과 (`summary.test_level`):** 판정 격자와 별도로, 모든 반복에 대한 무조건 단일 검정 기각률과 MC SE를 보고한다(Holm·R1-A
+  결합·경제성 조건·선택 없음, 초안 10.6·10.7 근사표 비교용): 확증 E0 무익성(θ × α_fut, 반복 기록 `p_fut_E0`, max-T와 별개), holdout
+  무익성(θ × α_fut), forward H1·H2·max(p1, p2) 통과(T_F × α_F), forward 무익성(중간 12개월과 각 T_F의 최종, θ × 시점별 α ∈ {α_fut/2, α_fut}).
+  D4는 판정 격자 차원으로 남는다.
+
 ## 11. 재현성과 무결성
 
 | 항목 | 방법 |
@@ -655,3 +696,4 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 | BT-3c | 2026-10-16 | 입력 segment와 식별(4절): `backtest-segment`(segment/1, `end_utc ≤ last_day + 3일`, 하한 없음, source 계보·content SHA·id·manifest SHA 분리. 계약 v1.2: content SHA에서 source 계보 제외), run manifest run/2(`config_sha256`, `boundary`, consumed 해시, segment 필드), `backtest-verify`의 독립 `identity` 검사, `SOURCE_UNAVAILABLE`과 run/1 legacy 상태. result·report/2·bt-metrics/2·bt-seed/1·bars/1 형식 변경 없음. vault 잠금은 BT-3d, 고정은 BT-4. SYNTHETIC / NOT_EVIDENCE |
 | BT-3d | 2026-10-17 | vault 잠금(10.3절, Work Order `docs/tasks/BT-3D/WORK_ORDER.md`): `backtest/vault.py` 라이브러리(CLI 없음). public bars/1 + 봉인된 locked holdout, `HistoricalHoldoutVault.open_once`, `ForwardVault.seal`·`open_analysis`(명시적 W_end), 증거·접근 기록(배타적 1회 생성, 기록 후 읽기), content 식별과 접근 상태 분리, IDENTICAL_EXISTING. 미룬 항목 DP1–DP4. 기존 스키마·코드 변경 없음, guard 변경 없음. SYNTHETIC / NOT_EVIDENCE |
 | BT-3e | 2026-10-17 | 월별 forward 위험 확인 장치(10.3절, Work Order `docs/tasks/BT-3E/WORK_ORDER.md`): `record_risk_policy`(holdout 개봉 전), `record_risk_strategies`(개봉 후·첫 forward 접근 전), `ForwardVault.check_risk`(달마다 F 전체 1회, 기록 후 읽기, 전략별 PASS/VIOLATION만), `risk_status`, 비공개 `backtest/risk_check.py`. 확증 기준은 public 데이터로 내부 재계산. 정책 값 기본값 없음(지원: MAX_DRAWDOWN_LOG, ENGINE_WINDOW_BT3B). `vault_status`·D14·기존 증거 3종 그대로. DP1 장치 구현(정책 값은 BT-4), DP2–DP4 미해결. SYNTHETIC / NOT_EVIDENCE |
+| MC-V06 | 2026-10-18 | 합성 Monte Carlo 위험 의미(10.5절, Work Order `docs/tasks/MC-V06/WORK_ORDER.md`): research 계층 독립 위험 모델 `research/v06/risk_model.py`(MAX_DRAWDOWN_LOG, 달력 월, CUMULATIVE_FROM_L, MONTH_ONLY, gt, ge), public ForwardVault와의 테스트 전용 동치, 제외 항목(엔진 equity, 1시간봉 경로, ENGINE_WINDOW_BT3B −2/−3일 이동) 한계, 시뮬레이션 달력 PRIMARY_MONTH_START(NOT_A_BT4_DECISION), 반복 축 R_OUTER·B_BOOT·K_RAND·TRUTH_YEARS 분리, 단일 검정 결과 `test_level`, 스키마 `moneylab.research_v06_sim/2`. backtest 코드·BT-3e 변경 없음, BT4-Q18 미해결. SYNTHETIC / NOT_EVIDENCE |
