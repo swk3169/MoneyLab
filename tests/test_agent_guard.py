@@ -336,6 +336,179 @@ def test_gitattributes_edit_needs_approval(root):
     assert action(file_call("Write", root / ".gitattributes"), root) == "ask"
 
 
+# ------------------------------------------------------ GitHub CLI spellings and published bodies
+# In-process classification only: nothing here runs gh or touches the network.
+
+GH_EXE = "\"/c/Program Files/GitHub CLI/gh.exe\""
+GH_EXE_WIN = "\"C:\\Program Files\\GitHub CLI\\gh.exe\""
+GH_SPELLINGS = ["gh.exe", "GH.EXE", GH_EXE, GH_EXE_WIN, "C:\\tools\\gh.exe", "C:/tools/gh.exe"]
+
+
+def classify(cmd):
+    d = guard.check_command(cmd)
+    return d.action, d.rule
+
+
+def shell(tool, cmd, root):
+    d = guard.decide({"tool_name": tool, "tool_input": {"command": cmd}}, root)
+    return d.action, d.rule
+
+
+def quoted_body(text):
+    return f"gh pr create --body-file - <<'EOF'\n{text}\nEOF"
+
+
+@pytest.mark.parametrize("exe", GH_SPELLINGS)
+@pytest.mark.parametrize("args", ["pr create --title x", "pr merge 3", "pr view 3", "pr list", "pr checks 3",
+                                  "--version", "auth status"])
+def test_gh_spellings_classify_like_bare_gh(exe, args):
+    assert classify(f"{exe} {args}") == classify(f"gh {args}"), exe
+
+
+def test_gh_powershell_call_operator_classifies_like_bare_gh(root):
+    assert shell("PowerShell", f"& {GH_EXE_WIN} pr create --title x", root) == ("ask", "github")
+    assert shell("PowerShell", f"& {GH_EXE_WIN} pr view 3", root) == classify("gh pr view 3") == ("pass", "")
+
+
+def test_gh_directory_name_is_not_shortened():
+    assert guard.normalize(GH_EXE_WIN) == "c:/program files/github gh"
+    assert guard.normalize("ls \"C:/Program Files/GitHub CLI\"") == "ls c:/program files/github cli"
+
+
+@pytest.mark.parametrize("cmd", [
+    "gh pr create --title x", "gh.exe pr create --title x", "GH.EXE pr create --title x",
+    f"{GH_EXE} pr create --title x", f"{GH_EXE_WIN} pr create --title x",
+    "C:\\tools\\gh.exe pr create --title x", "C:/tools/gh.exe pr create --title x",
+    f"cd C:/MoneyLab-x && {GH_EXE} pr create --title x",
+    "gh pr edit 3 --title x", "gh pr comment 3 --body-file - <<'EOF'\nok\nEOF",
+    "gh issue create --title x", "gh issue edit 3 --title x", "gh issue comment 3 --body-file - <<'EOF'\nok\nEOF",
+    "gh pr merge 3",
+])
+def test_gh_mutations_ask(cmd):
+    assert classify(cmd) == ("ask", "github"), cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "gh --version", "gh auth status", "gh pr view 3", "gh pr list --state all", "gh pr status", "gh pr diff 3",
+    "gh pr checks 3", "gh run view 1", "gh run list",
+    *[f"{exe} {args}" for exe in ("gh.exe", GH_EXE, GH_EXE_WIN)
+      for args in ("pr view 3", "pr list", "pr checks 3", "--version")],
+])
+def test_gh_read_only_passes(cmd):
+    assert classify(cmd) == ("pass", ""), cmd
+
+
+PROSE = "MoneyLab access record\nrecord and recorded\nno real data"
+
+
+@pytest.mark.parametrize("cmd", [
+    f"cd C:/MoneyLab-x && gh pr create --base main --head f --body-file - <<'EOF'\n{PROSE}\nEOF",
+    f"cd C:/MoneyLab-x && {GH_EXE} pr create --base main --head f --body-file - <<'EOF'\n{PROSE}\nEOF",
+    f"cd C:/MoneyLab-x && gh pr create --base main --head f -F - <<'EOF'\n{PROSE}\nEOF",
+    f"cd C:/MoneyLab-x && gh pr create --base main --head f --body-file - <<\"EOF\"\n{PROSE}\nEOF",
+])
+def test_gh_published_prose_is_not_a_moneylab_command(cmd):
+    d = guard.check_command(cmd)
+    assert d.rule != "record-live"
+    assert (d.action, d.rule) == ("ask", "github"), cmd
+
+
+@pytest.mark.parametrize("text", ["never git push origin main", "we did not move raw files", "do not run w32tm /resync"])
+def test_gh_published_prose_is_not_checked_as_commands(text):
+    assert classify(quoted_body(text)) == ("ask", "github"), text
+
+
+@pytest.mark.parametrize("text, rule", [
+    ("see .env.local", "env"), ("UPBIT_ACCESS_KEY placeholder", "trading"),
+    ("seed phrase placeholder", "trading"), ("call place_order here", "trading"),
+    # ERRATA-001: the body is not passed through normalize()'s git commit message removal
+    ("git commit -m '.env.local'", "env"),
+    ("git commit -m 'call place_order here'", "trading"),
+    ("git commit is how we ship\nsee -m 'UPBIT_ACCESS_KEY placeholder'", "trading"),
+])
+def test_gh_published_body_secrets_are_denied(text, rule):
+    assert classify(quoted_body(text)) == ("deny", rule), text
+
+
+@pytest.mark.parametrize("cmd", [
+    "gh pr create --body-file - <<EOF\n$(rm -rf data/raw)\nEOF",
+    "gh pr create --body-file - <<\\EOF\n$(rm -rf data/raw)\nEOF",
+    "gh pr create --body-file - <<E\"O\"F\n$(rm -rf data/raw)\nEOF",
+    "gh pr create --body-file - <<'EOF'\r\nrm -rf data/raw\r\nEOF\r\n",
+    "gh pr create --body-file - <<'EOF'\nrm -rf data/raw\n",
+    "@'\nrm -rf data/raw\n'@ | gh pr create --body-file -",
+    "gh pr create --body-file=- <<'EOF'\nrm -rf data/raw\nEOF",
+])
+def test_gh_unvalidated_heredoc_is_checked_whole(cmd):
+    assert classify(cmd) == ("deny", "protected-path"), cmd
+
+
+def test_powershell_here_string_body_is_checked_whole(root):
+    assert shell("PowerShell", "@'\nrm -rf data/raw\n'@ | gh pr create --body-file -", root) == ("deny", "protected-path")
+
+
+@pytest.mark.parametrize("cmd", [
+    # bash syntax that would make the "body" lines run as commands: never split
+    "gh() { bash; }; gh pr create --body-file - <<'EOF'\nrm -rf data/raw\nEOF",
+    "true #; gh pr create --body-file - <<'EOF'\nrm -rf data/raw\nEOF",
+    "python -c \"x='''\ngh pr create --body-file - <<'EOF'\n'''\nimport shutil; shutil.rmtree('data/raw')\nEOF\n\"",
+    "gh pr create --body-file - <<'EOF' && python -c \"\nimport shutil; shutil.rmtree('data/raw')\nEOF\n\"",
+    "gh pr create --body-file - <<'EOF' \\\nrm -rf data/raw\nEOF",
+    "gh pr create --body-file - <<'EOF'\nprose\nEOF\nbash <<'X'\nrm -rf data/raw\nX",
+])
+def test_gh_heredoc_split_fails_closed(cmd):
+    assert classify(cmd)[0] == "deny", cmd
+
+
+def test_gh_heredoc_is_not_split_for_powershell(root):
+    assert shell("PowerShell", quoted_body("rm -rf data/raw"), root) == ("deny", "protected-path")
+    assert shell("Bash", quoted_body("rm -rf data/raw"), root) == ("ask", "github")
+
+
+@pytest.mark.parametrize("cmd", [
+    "gh pr create --body-file - <<'EOF' && rm -rf data/raw\nprose\nEOF",
+    "gh pr create --body-file - <<'EOF'\nprose\nEOF\n&& rm -rf data/raw",
+    "gh pr create --body-file - <<'EOF'\nprose\nEOF\nrm -rf data/raw",
+    "gh pr create --body-file - <<'EOF' > data/raw/x.json\nprose\nEOF",
+])
+def test_gh_chains_and_redirects_stay_operational(cmd):
+    assert classify(cmd) == ("deny", "protected-path"), cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "python - <<'EOF'\nimport shutil; shutil.rmtree('data/raw')\nEOF",
+    "bash <<'EOF'\nrm -rf data/raw\nEOF",
+    "gh pr create --body-file - && bash <<'EOF'\nrm -rf data/raw\nEOF",
+    "gh pr view 1 <<'EOF'\nrm -rf data/raw\nEOF",
+    "cat <<'EOF' > .claude/hooks/guard.py\nx\nEOF",
+])
+def test_heredocs_not_feeding_a_gh_mutation_are_checked_whole(cmd):
+    assert classify(cmd)[0] == "deny", cmd
+
+
+def test_gh_published_body_split_keeps_every_other_byte():
+    cmd = "cd C:/MoneyLab-x && gh pr create -F - <<-'EOF' > out.txt\nline 1\n\tEOF x\n\tEOF\nrm -rf build"
+    assert guard.gh_published_body(cmd) == (
+        "cd C:/MoneyLab-x && gh pr create -F - <<-'EOF' > out.txt\n\tEOF\nrm -rf build", "line 1\n\tEOF x\n")
+    for unsplit in ("gh pr create --body-file - <<EOF\nx\nEOF", "git commit -F - <<'EOF'\nx\nEOF", "gh pr view 3"):
+        assert guard.gh_published_body(unsplit) is None
+
+
+@pytest.mark.parametrize("cmd, expected", [
+    ("python -m moneylab record", ("ask", "record-live")),
+    ("python -m moneylab record --provider upbit --duration 21600", ("ask", "record-live")),
+    ("python -m moneylab record --provider upbit --source live", ("ask", "record-live")),
+    ("python -m moneylab record --provider upbit --source fixture", ("pass", "")),
+    ("sed -n 1,5p .claude/hooks/guard.py", ("deny", "protected-path")),
+    ("sed -i s/x/y/ .claude/settings.json", ("deny", "protected-path")),
+    ("cat .claude/hooks/guard.py", ("pass", "")),
+    ("grep -n x .claude/hooks/guard.py", ("pass", "")),
+    ("git commit -F - <<EOF\n$(rm -rf data/raw)\nEOF", ("ask", "git-commit")),
+])
+def test_behaviour_outside_gh_is_unchanged(cmd, expected):
+    assert classify(cmd) == expected, cmd
+
+
 # ----------------------------------------------------------------------- known gaps (documented)
 
 
@@ -347,6 +520,16 @@ def test_known_gap_path_built_from_pieces():
 @pytest.mark.xfail(strict=True, reason="a script written to disk first is opaque to the guard")
 def test_known_gap_script_file():
     assert guard.check_command("python tools/cleanup.py").action == "deny"
+
+
+@pytest.mark.xfail(strict=True, reason="GUARD-HEREDOC-01: an unquoted git commit heredoc body is removed before "
+                                       "matching, so $(...) inside it is not seen")
+def test_known_gap_git_commit_unquoted_heredoc():
+    assert guard.check_command("git commit -F - <<EOF\n$(rm -rf data/raw)\nEOF").action == "deny"
+
+
+def test_git_commit_unquoted_heredoc_is_still_escalated():
+    assert guard.check_command("git commit -F - <<EOF\n$(rm -rf data/raw)\nEOF").action == "ask"
 
 
 def test_known_gaps_are_at_least_escalated_to_the_user(repo):

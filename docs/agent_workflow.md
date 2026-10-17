@@ -54,6 +54,20 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
 - 파일 도구: `locked`, `env`, `frozen`, `raw-or-git`, `claude-settings` (deny), `protected-edit` (ask)
 - 입력 오류: `malformed` (deny)
 
+GitHub CLI:
+
+- `gh`, `gh.exe`, 절대 경로 표기(`"/c/Program Files/GitHub CLI/gh.exe"`, `"C:\Program Files\GitHub CLI\gh.exe"`,
+  `C:/tools/gh.exe`, PowerShell `& "…\gh.exe"`)는 모두 `gh`로 정규화된다. `github` ask 규칙과 읽기 전용 allowlist
+  (`--version`, `auth status`, `pr view/list/status/diff/checks`, `run view/list`)가 모든 표기에 같이 적용된다.
+- gh `pr`/`issue` `create`/`edit`/`comment`에 `--body-file -` 또는 `-F -`로 넘기는 인용 heredoc(`<<'WORD'`, `<<"WORD"`,
+  `<<-`) 본문은 명령이 아니라 게시 텍스트로 취급한다. 조건: Bash 도구, 명령 전체에 heredoc이 하나, gh 앞에는 `cd DIR &&`만,
+  gh부터 `<<`까지 `;` `&` `|` `(` `)` backtick `$(` 줄바꿈 없음, 따옴표·주석·줄 이어짐이 모호하지 않음, `WORD`와 정확히 같은
+  닫는 줄(CRLF `\r`이면 닫힘으로 보지 않음)이 있음. 하나라도 어긋나면 분리하지 않고 명령 전체를 검사한다.
+- 게시 본문도 `env`와 `trading`으로 검사한다. 본문은 텍스트를 지우는 정규화(`git commit` 메시지 제거, 실행 파일 축약 등)를
+  거치지 않는다. 본문 밖의 모든 텍스트(체인, redirect, 닫는 줄 이후)는 명령으로 검사되고, gh mutation은 여전히 `github` ask다.
+- 비인용·부분 인용 heredoc(`<<EOF`, `<<\EOF`, `<<E"O"F`), gh 이외 명령(bash, python, cat, 읽기 전용 gh 등)의 heredoc,
+  PowerShell here-string(`@'…'@`), `--body-file=-`는 전체를 검사한다.
+
 알려진 오탐 (안전 쪽, 정책 미수정):
 
 - `git stash list` 같은 읽기 전용 stash 명령도 `git-history`로 ask된다. Skill에서는 stash를 쓰지 않는다.
@@ -61,6 +75,15 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
 - `.env` 문자열이 들어간 명령은 `ls`라도 deny된다.
 - `locked/` 경로는 단독 `sha256sum`·`ls`만 허용된다. `&&`로 다른 명령과 묶거나 `<run>` 같은 꺾쇠 자리표시자를 쓰면
   deny된다. Skill에서는 `data/processed/research/*/locked/test.jsonl.gz`처럼 glob을 쓴다.
+- 인라인 `--title`/`-t`, `--body`/`-b` 텍스트는 여전히 명령 텍스트로 검사된다. 긴 본문은 인용 heredoc(`--body-file -`)으로 넘긴다.
+- 게시 본문의 `place_order`·`/v1/orders`·`.env.local`·`UPBIT_ACCESS_KEY`처럼 `trading`·`env`에 매치되는 표현은 deny된다.
+
+알려진 한계:
+
+- `.claude/settings.json`의 `Bash(gh pr *)` 권한 규칙은 전체 경로 gh 표기와 매치되지 않는다(defense in depth 한계).
+  전체 경로 표기는 guard의 `github` 규칙으로만 ask된다.
+- `git commit`의 비인용 heredoc 본문은 검사 전에 제거되어, 본문의 `$(…)`가 deny 대신 `git-commit` ask로 내려간다.
+  후속 작업으로 미뤘다(`tests/test_agent_guard.py`의 strict xfail).
 
 ## 5. Skill 작성 규칙
 
