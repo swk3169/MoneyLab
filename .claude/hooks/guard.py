@@ -110,16 +110,126 @@ def normalize(cmd: str) -> str:
     joins split spellings such as "data"/"raw" or d'a'ta/raw back into one token."""
     if re.match(r"\s*git\s+commit\b", cmd):  # the message text is not a command
         cmd = _COMMIT_MSG.sub(" ", _HEREDOC.sub(" ", cmd))
-    c = cmd.lower().replace("\\", "/")
-    c = re.sub(r"[\"'`^]", "", c)
-    c = re.sub(r"/+", "/", c)
-    c = re.sub(r"\s+", " ", c).strip()
-    # full-path executables (/usr/bin/git, c:/program files/git/cmd/git.exe) -> bare names
-    c = re.sub(r"[^\s;&|()]*/(git|python[\d.]*|py|powershell|pwsh|bash|sh|cmd|node)(\.exe)?(?=[\s;&|)]|$)", r"\1", c)
-    c = re.sub(r"\b(git|python[\d.]*|py|powershell|pwsh|bash|cmd|node)\.exe\b", r"\1", c)
+    c = short_executables(plain_text(cmd))
     # git global options before the subcommand (git -C . push, git -c k=v push, git --git-dir=x push)
     return re.sub(r"\bgit((\s+(-c\s+\S+|--git-dir(=|\s+)\S+|--work-tree(=|\s+)\S+|--namespace(=|\s+)\S+"
                   r"|--no-pager|-p|--paginate|--bare|--no-replace-objects|--literal-pathspecs))+)(?=\s)", "git", c)
+
+
+def plain_text(text: str) -> str:
+    """The steps of normalize() that never delete text. The gh published body is checked with this
+    alone: commit-message removal, executable shortening and git option folding can drop prose."""
+    c = text.lower().replace("\\", "/")
+    c = re.sub(r"[\"'`^]", "", c)
+    c = re.sub(r"/+", "/", c)
+    return re.sub(r"\s+", " ", c).strip()
+
+
+# full-path executables (/usr/bin/git, c:/program files/git/cmd/git.exe, c:/tools/gh.exe) -> bare names
+_EXE_PATH = r"[^\s;&|()]*/(git|python[\d.]*|py|powershell|pwsh|bash|sh|cmd|node|gh)(\.exe)?(?=[\s;&|)]|$)"
+_EXE_SUFFIX = r"\b(git|python[\d.]*|py|powershell|pwsh|bash|cmd|node|gh)\.exe\b"
+
+
+def short_executables(c: str) -> str:
+    """c is lower case with '/' separators. Shared by normalize() and the gh check in gh_published_body()."""
+    return re.sub(_EXE_SUFFIX, r"\1", re.sub(_EXE_PATH, r"\1", c))
+
+
+# `gh pr|issue create|edit|comment --body-file -` (or -F -) publishes what it reads on stdin. A quoted
+# heredoc feeding it is published text, not a command: only `env` and `trading` check it. Anything
+# uncertain is not split, and then the whole command is checked as one text.
+_HEREDOC_OP = r"(?<!<)<<(?!<)"
+_QUOTED_HEREDOC = re.compile(r"<<(-?)[ \t]*(['\"])(\w+)\2(?=[ \t\n]|$)")
+_SEPARATORS = ("&&", ";", "\n")
+
+
+def _shell_words(text: str) -> list[tuple[int, int]] | None:
+    """Spans of the shell words in text; an unquoted newline is a word of its own. None unless the text
+    is plain: no open quote, comment, command substitution, $'..' / $".." or backslash continuation."""
+    words: list[tuple[int, int]] = []
+    start, quote, i = None, "", 0
+    while i < len(text):
+        ch = text[i]
+        if quote == "'":
+            quote = "" if ch == "'" else quote
+        elif ch == "`" or (ch == "$" and text[i + 1:i + 2] in ("(", "'", "\"")):
+            return None
+        elif ch == "\\":
+            if text[i + 1:i + 2] in ("", "\n"):
+                return None
+            start = i if start is None else start
+            i += 1
+        elif quote == "\"":
+            quote = "" if ch == "\"" else quote
+        elif ch == "#":
+            return None
+        elif ch in " \t\n":
+            if start is not None:
+                words.append((start, i))
+                start = None
+            if ch == "\n":
+                words.append((i, i + 1))
+        else:
+            quote = ch if ch in "'\"" else ""
+            start = i if start is None else start
+        i += 1
+    if quote:
+        return None
+    if start is not None:
+        words.append((start, len(text)))
+    return words
+
+
+def _is_gh(word: str) -> bool:
+    w = plain_text(word)
+    short = short_executables(w)
+    return short == "gh" or (short != w and short.endswith(" gh"))
+
+
+def gh_published_body(cmd: str) -> tuple[str, str] | None:
+    """(operational text, published body) for `[cd DIR && ...] gh pr|issue create|edit|comment ...
+    --body-file -|-F - <<'WORD'` (or <<"WORD", <<-) with exactly one heredoc that closes; else None.
+    Every byte outside the body stays in the operational text."""
+    ops = [m.start() for m in re.finditer(_HEREDOC_OP, cmd)]
+    if len(ops) != 1 or "@'" in cmd or "@\"" in cmd:  # one heredoc, no PowerShell here-string
+        return None
+    op = ops[0]
+    spans = _shell_words(cmd[:op])
+    if spans is None:
+        return None
+    words = [cmd[a:b] for a, b in spans]
+    k = 0
+    while True:  # only `cd DIR` may come before gh (nothing that can redefine gh)
+        while k < len(words) and words[k] == "\n":
+            k += 1
+        if (k + 2 < len(words) and words[k] == "cd" and words[k + 2] in _SEPARATORS
+                and not re.search(r"[(){}<>;&|\n]", words[k + 1])):
+            k += 3
+            continue
+        break
+    if k >= len(words) or not _is_gh(words[k]):
+        return None
+    if re.search(r"[;&|()`\n]|\$\(", cmd[spans[k][0]:op]):
+        return None
+    args = words[k + 1:]
+    if len(args) < 2 or args[0] not in ("pr", "issue") or args[1] not in ("create", "edit", "comment"):
+        return None
+    if not any(a in ("--body-file", "-F") and b == "-" for a, b in zip(args, args[1:])):
+        return None
+    m = _QUOTED_HEREDOC.match(cmd, op)
+    nl = cmd.find("\n", m.end()) if m else -1
+    if nl < 0 or _shell_words(cmd[m.end():nl]) is None:
+        return None
+    dash, word = m.group(1), m.group(3)
+    pos = nl + 1
+    while pos < len(cmd):
+        end = cmd.find("\n", pos)
+        end = len(cmd) if end < 0 else end
+        line = cmd[pos:end]
+        if line == word or (dash and line.lstrip("\t") == word):  # a trailing \r never closes it
+            return cmd[:nl + 1] + cmd[pos:], cmd[nl + 1:pos]
+        pos = end + 1
+    return None
 
 
 PROTECTED = (r"(data/raw\b|/locked\b|locked/|research_v04\.toml|research_v04_preregistration"
@@ -227,13 +337,21 @@ def _untracked_scripts(c: str, root: Path, cwd: str | None) -> list[str]:
     return out
 
 
-def check_command(cmd: str, root: Path = ROOT, cwd: str | None = None) -> Decision:
+def check_command(cmd: str, root: Path = ROOT, cwd: str | None = None, bash: bool = True) -> Decision:
+    split = gh_published_body(cmd) if bash else None  # heredocs are bash syntax
+    if split is not None:
+        cmd, body = split
     if re.search(r"\bgit\s+branch\s+(.*\s)?-[a-zA-Z]*D", cmd):  # case matters: -D force-deletes, -d does not
         return Decision(DENY, "git", "blocked by guard rule 'git' (force branch delete)")
     c = normalize(cmd)
     for rule, pattern in DENY_RULES:
         if re.search(pattern, c):
             return Decision(DENY, rule, f"blocked by guard rule '{rule}'")
+    if split is not None:
+        b = plain_text(body)
+        for rule, pattern in DENY_RULES:
+            if rule in ("env", "trading") and re.search(pattern, b):
+                return Decision(DENY, rule, f"blocked by guard rule '{rule}' (published body)")
     if re.search(PROTECTED, c):
         # locked/: hashing or listing is allowed, any other access is not
         if re.search(r"/locked\b|locked/", c) and not re.fullmatch(
@@ -267,7 +385,7 @@ def decide(payload: dict, root: Path = ROOT) -> Decision:
         if not isinstance(cmd, str):
             return Decision(DENY, "malformed", "shell tool call without a command")
         cwd = payload.get("cwd")
-        return check_command(cmd, root, cwd if isinstance(cwd, str) else None)
+        return check_command(cmd, root, cwd if isinstance(cwd, str) else None, bash=tool == "Bash")
     if tool in WRITE_TOOLS or tool in READ_TOOLS:
         path = tool_input.get("file_path") or tool_input.get("notebook_path") or tool_input.get("path")
         if not path:
