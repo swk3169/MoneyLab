@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.17", "mypy>=2.4", "coverage>=7.17"]
 
 [project.scripts]
 moneylab = "moneylab.cli:main"
@@ -32,3 +32,22 @@ markers = [
     "network: tests that hit the real network (skipped by default; run with -m network)",
 ]
 addopts = "-m 'not network'"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+# Required gate covers only packages with zero mypy errors at baseline. Imported modules outside
+# this scope are still analyzed for types, but their own errors are not reported (debt).
+[tool.mypy]
+files = [
+    "src/moneylab/execution",
+    "src/moneylab/pnl",
+    "src/moneylab/scanner",
+    "src/moneylab/sizing",
+]
+follow_imports = "silent"
+
+# Measurement only: no fail_under.
+[tool.coverage.run]
+source = ["moneylab"]
+branch = true

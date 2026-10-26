@@ -40,7 +40,6 @@ from moneylab.providers.polymarket.clob_parser import (
     parse_clob_market_info,
     parse_order_book,
     parse_rewards,
-    parse_timestamp,
 )
 from moneylab.recording.core import checksum_ok, iso, with_checksum  # noqa: F401 - re-exported
 from moneylab.storage.atomic import atomic_write_json, cleanup_tmp, sha256_of

@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -35,7 +35,7 @@ from moneylab.backtest.segment import (
     read_segment,
 )
 from moneylab.backtest.settings import DEFAULT_SETTINGS_FILE, cost_model, load_cost_settings
-from moneylab.domain.bars import NOT_EVIDENCE, bars_sha256, canonical_bar_rows
+from moneylab.domain.bars import NOT_EVIDENCE, canonical_bar_rows
 from moneylab.providers.upbit.bar_export import export_bars
 from moneylab.storage.atomic import sha256_file
 
