@@ -5,8 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "moneylab"
 version = "0.3.0"
-description = "Data-driven prediction-market strategy research (Polymarket scanner + offline order-book strategy simulation)"
+description = "Quantitative research and backtesting platform: preregistered, cost-aware strategy evaluation (research stage, no live trading)"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "requests>=2.32",

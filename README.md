@@ -1,42 +1,184 @@
-# MoneyLab
+# MoneyLab — Quantitative Research & Backtesting Platform
 
-데이터 기반 투자·예측시장 전략을 분석하고 수익 기회를 탐색하는 Python 프로젝트.
+**Python · Statistical Testing · Monte Carlo Simulation · CI · AI-assisted Engineering**
 
-최종 목표는 **검증된 수익성을 가진 자동매매 시스템**이며, 다음 순서로 단계적으로 진행한다.
+MoneyLab is a Python research platform for testing whether simple market strategies keep an edge **after
+transaction costs**, using preregistered hypotheses, locked holdout data and simulation studies of the statistical
+procedures themselves.
 
-```
-Scanner (v0.1) → 호가창 전략 연구·오프라인 시뮬레이션 (v0.2) → 실데이터 Recorder·Replay (v0.3, Upbit v0.3.1) → Paper Trading(실데이터) → Live Execution
-```
-
-> **현재 MoneyLab은 연구·검증 단계다.** 실제 주문, 지갑 연결, 개인키 사용, 자동매매, 실거래 자금 운용 기능은 구현·활성화되어 있지 않다.
-
-## 🚧 개발 현황
-
-기준: 2026-10-18
-
-MoneyLab은 현재 **백테스트와 위험검증 인프라를 구축하는 단계**다. 백테스트 단계(BT-1–BT-4)의 실행 결과는 모두 합성 데이터 기반(`SYNTHETIC / NOT_EVIDENCE`)이며 수익성의 근거가 아니다. 실데이터 백테스트는 BT-5부터다.
-
-| 개발 영역 | 상태 |
-|---|---|
-| 백테스트 엔진·비용·지표 (BT-1–BT-2b) | ✅ 완료 |
-| 사전등록 규칙·평가 경계·입력 재현성 (BT-3a–BT-3c) | ✅ 완료 |
-| Holdout / Forward Vault 잠금 (BT-3d) | ✅ 완료 |
-| Work Order 기반 개발 통제 체계 | ✅ 완료 |
-| 월별 Forward 위험 확인 장치 (BT-3e) | 🟡 구현 완료, 리뷰·CI 대기 |
-| 개발 에이전트 안전장치 적용 확인 | 🔵 다음 단계 |
-| v0.6 Monte Carlo 검증 | ⏳ 예정 |
-| v0.6 사전등록·설정 고정 (BT-4) | ⏳ 예정 (사전등록 초안 작성, 미고정) |
-| 실데이터 검증 (BT-5) | 🔒 대기 |
-
-바로 다음 단계 (계획):
-
-안전장치 적용 확인 → BT-3e PR·CI → v0.6 Monte Carlo 검증 → BT-4 사전등록·설정 고정 → BT-5 실데이터 검증
-
-단계 정의는 [docs/backtest_design.md](docs/backtest_design.md)에, 장기 버전 방향은 아래 [로드맵](#로드맵) 절에 있다.
+> **Research stage. No live trading.** Real order placement, wallet connection, private-key use, automated trading
+> and real-money execution are not implemented or enabled. Nothing in this repository is evidence of profitability.
 
 ---
 
-## v0.1: Polymarket Scanner
+## Problem / Motivation
+
+Strategy backtests are easy to make look profitable: too many variants are tried, the test data is reused, costs are
+underestimated, and future information leaks into past decisions. MoneyLab treats "is there a net edge after
+costs?" as a hypothesis test and builds the infrastructure to answer it honestly, including when the answer is no.
+
+The first real-data study (v0.4, Upbit KRW-BTC order-book microstructure) is an example: order-book features showed
+statistically significant predictive power, but the predicted moves were far smaller than round-trip costs, so the
+preregistered rule rejected them ([details](docs/research_v05_preregistration_draft.md)).
+
+## Architecture
+
+```
+cli ─► scanner ─► providers.base (MarketDataProvider) ◄─ providers.polymarket, providers.upbit
+                     │
+                     ▼
+                  domain  ◄─ strategy / risk / backtest / paper / research / analytics
+                                       (provider imports forbidden, enforced by tests)
+providers.* ─► recording (shared recorder core)        research ◄/► backtest: runtime imports forbidden both ways
+```
+
+- **Provider-neutral core.** Data sources implement `MarketDataProvider` and return domain objects; scanner,
+  strategy and research code never import a concrete provider. `tests/test_architecture_and_cli.py` checks this.
+- **Recorder / replay.** Public market data is recorded with atomic writes, checksums and integrity verification,
+  then replayed deterministically.
+- **Backtest engine** (`src/moneylab/backtest/`): bars, cost model, fills, ledger, metrics, yearly and round-trip
+  reports, evaluation-boundary guards, input identity (content SHA) and a locked holdout / forward data vault.
+- **Research layer** (`src/moneylab/research/`): as-of feature grid, labels, time-ordered splits with a test lock,
+  statistics, and the v0.6 Monte Carlo study (`research/v06/`).
+
+Design documents: [docs/backtest_design.md](docs/backtest_design.md),
+[docs/live_execution_design.md](docs/live_execution_design.md) (design only, not implemented).
+
+## Engineering Highlights
+
+1. **Layered, provider-neutral architecture** with dependency rules enforced by tests.
+2. **Research integrity by construction:** preregistration pinned by SHA-256, test splits that can be opened once,
+   holdout / forward vaults that refuse re-opening, evaluation boundaries guarded in the engine.
+3. **Cost-aware statistical evaluation:** decisions use net (after fees, spread, slippage) results; stationary
+   block bootstrap, HAC, FDR control, Holm / IUT multiple-testing procedures.
+4. **Simulation-based validation of the procedures themselves** (Monte Carlo operating characteristics), reported
+   with their failures, not only their successes.
+5. **Reproducibility and safety:** an offline test suite on Windows CI, secret redaction in all diagnostics, atomic
+   writes, deterministic seeds, pinned requirements, and a fail-closed guard around the development agent.
+
+## Research & Validation Methodology
+
+- **Preregistration.** Each study fixes hypotheses, metrics, thresholds and analysis branches before data is looked
+  at ([v0.4](docs/research_v04_preregistration.md), [v0.6 draft](docs/research_v06_preregistration_draft.md)).
+  Changing a preregistration means a new study.
+- **Net, not gross.** Fees, spread and slippage are subtracted; until the account fee is confirmed, the most
+  expensive fee scenario is used for decisions.
+- **Leakage control.** Rows only use information available at that time; splits are time-ordered with embargo and
+  purge; the test split is locked and opened once per run.
+- **Statistics.** Spearman IC, stationary block bootstrap confidence intervals, Newey-West HAC,
+  Benjamini-Hochberg FDR (v0.4); futility tests, Holm / IUT and randomization tests (v0.6 draft).
+- **Validating the validator.** The v0.6 decision procedures were run through a normative Monte Carlo study
+  (MC-V06) on synthetic paths to estimate their error rates before any real-data use
+  ([evidence review](docs/research_bt4_01_evidence_review.md)).
+- **Evidence labels.** Results are labelled, e.g. `SYNTHETIC / NOT_EVIDENCE`, `INSUFFICIENT_EVIDENCE`,
+  `NEGATIVE_EVIDENCE`, so synthetic or under-powered output is never reported as a finding.
+
+## AI-assisted Engineering Workflow
+
+Claude Code has been used as an engineering assistant in this project. Design decisions, approvals and final
+judgment remain with the author. The engineering controls around the assistant were introduced progressively and
+matured alongside the project:
+
+- **Fail-closed guard** (introduced 2026-10-10): a repository-level hook (`.claude/hooks/guard.py`,
+  regression-tested in `tests/test_agent_guard.py`) blocks, or asks for confirmation before, risky commands such as
+  force push, history rewrite, writes to protected data, access to secrets files and system clock changes.
+- **CI** (introduced 2026-10-11): GitHub Actions runs the offline test suite on pull requests.
+- **Immutable Work Orders** (Work Order v1, introduced 2026-10-17): tasks run under Work Order v1 have a fixed
+  contract with allowed and protected files ([docs/tasks/](docs/tasks/README.md)), changed only through numbered
+  ERRATA. Work Order rules require merge commits for pull requests and forbid amend and force push.
+- **Human authorization gates:** since the adoption of Work Order v1, implementation, commit, push, PR, merge and
+  audit transitions are controlled by explicit human authorization gates; reports separate Git-verifiable facts, CI
+  results and the assistant's own claims.
+
+Rules for the assistant: [CLAUDE.md](CLAUDE.md), [docs/agent_workflow.md](docs/agent_workflow.md). AI-assisted
+commits can be identified by `Co-Authored-By` trailers where those trailers are recorded in Git history.
+
+## Current Project Status
+
+| Area | Status | Source |
+|---|---|---|
+| v0.4 real-data microstructure study (Upbit KRW-BTC, one 6-hour session) | **REJECT** (cost-adjusted): 112 of 116 feature/horizon combinations `NEGATIVE_EVIDENCE`, 4 `RESEARCH_MORE`, 0 `PAPER_CANDIDATE`; max gross 1.2 bp vs. costs of 52–55 bp | [v0.5 draft §1](docs/research_v05_preregistration_draft.md) |
+| Backtest engine, preregistered rules, evaluation boundaries, input identity, holdout / forward vault, monthly forward risk check (BT-1 – BT-3e) | Implemented and tested **on synthetic data only** (`SYNTHETIC / NOT_EVIDENCE`) | [backtest_design.md](docs/backtest_design.md) |
+| MC-V06 Monte Carlo study of the v0.6 procedures | Complete. Result **MIXED / DESIGN-INFORMATIVE**; BT4 readiness **READY_WITH_CAUTION**. The futility procedure was **anti-conservative at the boundary** (rejected more often than nominal) in the synthetic settings; the cause is unresolved | [evidence review](docs/research_bt4_01_evidence_review.md) |
+| BT4-DESIGN-01 (decision inventory and validation design before freezing v0.6) | **Design only, complete.** BT4 freeze NOT PERFORMED, validation NOT STARTED, implementation NOT STARTED | [bt4_design_01.md](docs/bt4_design_01.md) |
+| v0.6 preregistration | Draft, not frozen | [v0.6 draft](docs/research_v06_preregistration_draft.md) |
+| Real-data backtest (BT-5), forward evaluation (BT-6) | Not started | [backtest_design.md](docs/backtest_design.md) |
+| Live trading | Not implemented (interface and design document only) | [live_execution_design.md](docs/live_execution_design.md) |
+
+## Limitations / What this project is NOT
+
+- **Not a trading system** and not production-ready. There is no live order path.
+- **No profitability claim.** Backtest results so far come from synthetic data and are not evidence. The only
+  real-data study so far (v0.4) was rejected after costs, and it used a single session.
+- **Statistical procedures are still being validated:** the v0.6 futility test showed boundary size distortion in
+  simulation, and the v0.6 preregistration is not frozen.
+- **Account fees are unconfirmed;** decisions use a conservative 25 bp assumption.
+- **Polymarket:** in the development environment the public Polymarket API returned HTTP 451, so only synthetic
+  fixtures written from the official documentation were used. The cause was not determined. No access-restriction
+  bypass is implemented, by design.
+
+## Repository Structure
+
+```
+src/moneylab/
+├── cli.py, __main__.py   CLI entry point (scan, record, replay, candles, backtest, research, ...)
+├── core/                 HTTP client (timeout, retry, diagnostics), errors, secret redaction, logging
+├── domain/               provider-neutral market, order book, trade, bar and event types
+├── providers/            polymarket/ and upbit/ clients, parsers, recorders, candle collection
+├── recording/            shared recorder core (state, failure classes, backoff, checksums)
+├── storage/              atomic writes, raw / processed storage
+├── analytics/            metrics and cost models
+├── backtest/             backtest engine, reports, segments, vault, risk check
+├── research/             v0.4 pipeline and v06/ (Monte Carlo study, procedures, synthetic DGPs)
+├── strategy/, risk/, sizing/, paper/, pnl/, scanner/, display/
+└── execution/            interface only; no live implementation
+tests/                    offline tests and synthetic fixtures (provenance in tests/fixtures/README.md)
+docs/                     design, preregistration, evidence review, tasks (Work Orders)
+configs/                  preregistered study configuration
+```
+
+## Tests / CI
+
+```powershell
+python -m pytest            # offline tests, no network needed
+python -m pytest -m network # optional real-network tests (Upbit public WebSocket, ~60 s)
+```
+
+GitHub Actions ([ci-tests.yml](.github/workflows/ci-tests.yml)) runs the full offline suite on Windows with
+Python 3.14.8 in a repository-root virtual environment for every pull request.
+
+## Getting Started
+
+Python 3.12 or newer is required (developed and verified on 3.14.8).
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements-dev.txt
+pip install -e . --no-deps
+
+python -m pytest                              # run the offline test suite
+python -m moneylab scan --source fixture      # scanner on synthetic sample data
+python -m moneylab simulate --strategy mm     # offline order-book simulation on synthetic fixtures
+python -m moneylab backtest --help            # backtest CLI
+```
+
+No secrets are needed for the offline commands. Secrets, if ever used, come only from environment variables and
+are never committed.
+
+## License
+
+[MIT](LICENSE) © 2026 Son Woo Kyu
+
+---
+
+## Appendix: Development history (v0.1–v0.4, original notes in Korean)
+
+The sections below preserve selected sections from the earlier README (original Korean text), with heading levels
+adjusted for placement here. They are not a complete copy of the earlier README; the current state is in
+[Current Project Status](#current-project-status).
+
+### v0.1: Polymarket Scanner
 
 - Polymarket Gamma 공개 API에서 활성 시장을 조회한다 (페이지네이션, timeout, 재시도 포함).
 - 시장명, YES/NO 가격, bid/ask spread, 24시간 거래량, 누적 거래량, 유동성, 종료일, Market ID를 표로 출력한다.
@@ -46,7 +188,7 @@ MoneyLab은 현재 **백테스트와 위험검증 인프라를 구축하는 단�
 - API 접근이 실패하면 status, headers, body를 포함한 진단을 출력하고 정상 종료한다 (traceback 없음).
 - `diagnose` 명령으로 연결 상태를 진단한다. 사실(observations)과 가설(hypotheses)을 분리해서 보여준다.
 
-### 알려진 제약
+#### 알려진 제약
 
 개발 환경(2026-10-04)에서는 Polymarket의 모든 공개 엔드포인트가 **HTTP 451**을 반환한다
 (Cloudflare `error_code=1026`, `error_category=legal`). 원인이 되는 클라이언트 속성은 서버가 밝히지 않으므로 단정하지 않는다.
@@ -58,7 +200,7 @@ Polymarket 이용약관과 거주 지역 규정을 직접 확인할 것.
 
 ---
 
-## v0.2: 호가창 기반 전략 연구 (오프라인 시뮬레이션)
+### v0.2: 호가창 기반 전략 연구 (오프라인 시뮬레이션)
 
 Polymarket CLOB V2(2026-04-28부터 운영)의 공개 읽기 전용 엔드포인트를 기준으로 만들었다.
 HTTP 451 상태에서도 fixture timeline으로 전체 전략을 오프라인에서 시뮬레이션한다.
@@ -80,7 +222,7 @@ HTTP 451 상태에서도 fixture timeline으로 전체 전략을 오프라인에
 | kill switch (7가지 조건, 발동 시 주문 전량 취소) | `risk/kill_switch.py` |
 | 실거래 adapter | **설계 문서만 있음**: [docs/live_execution_design.md](docs/live_execution_design.md) |
 
-### PnL 분해
+#### PnL 분해
 
 ```
 gross_trading_pnl          = spread_captured − slippage + inventory_pnl   (= 현금흐름 + 포지션×평가가, 테스트로 검증)
@@ -94,7 +236,7 @@ all_in_realized_pnl        = net_trading_pnl_after_cost + realized_maker_rebate 
 **채택 규칙**: 인센티브를 뺀 `net_trading_pnl_after_cost`가 0 이하인 전략은 `REJECT`한다.
 합성 데이터이거나 거래 수가 부족하면 결과가 양수여도 `INSUFFICIENT_EVIDENCE`로 판정한다.
 
-### 실제 데이터로 교체하기
+#### 실제 데이터로 교체하기
 
 timeline JSON은 실제 CLOB 응답 형식을 그대로 담는다 (`snapshots[].books[]` = `GET /book` 응답).
 API에 합법적으로 접근할 수 있게 되면 `/books` 응답을 같은 형식으로 기록하고 `simulate --timeline <파일>`로 실행한다.
@@ -102,7 +244,7 @@ API에 합법적으로 접근할 수 있게 되면 `/books` 응답을 같은 형
 
 ---
 
-## v0.3: Real Market Data Recorder + Replay
+### v0.3: Real Market Data Recorder + Replay
 
 실제 Polymarket CLOB 호가를 오랜 기간 기록하고, 기록한 데이터를 v0.2 paper engine에 그대로 재생한다.
 
@@ -124,7 +266,7 @@ Recorder (REST /books, 추후 WebSocket) → data/raw/polymarket/recordings/<con
 | replay (lazy, error 레코드 → kill switch에 전달) | `recorder/replay.py`, `paper/book_stream.ReplayBookStream` |
 | 오프라인 source (fixture timeline을 1 poll = 1 snapshot으로 제공) | `recorder/fixture_source.py` |
 
-### 저장 형식
+#### 저장 형식
 
 ```
 data/raw/polymarket/recordings/<condition_id>/       (git 제외: data/raw/*)
@@ -144,7 +286,7 @@ data/raw/polymarket/recordings/<condition_id>/       (git 제외: data/raw/*)
 - 모든 파일은 temp → fsync → `os.replace` 순서로 원자적으로 쓴다. 중단 후 다시 시작하면 남은 `.tmp`를 지우고,
   디스크에 실제로 남은 마지막 seq와 hash에서 이어서 기록한다. 실제 데이터와 synthetic 데이터는 같은 dataset에 섞지 않는다.
 
-### 오류 처리 (우회 기능 없음)
+#### 오류 처리 (우회 기능 없음)
 
 | 상황 | 동작 |
 |---|---|
@@ -156,7 +298,7 @@ data/raw/polymarket/recordings/<condition_id>/       (git 제외: data/raw/*)
 
 replay에서 `error` 레코드는 error event가 되므로, kill switch가 기록 당시의 장애를 실시간과 똑같이 본다.
 
-### 사용법
+#### 사용법
 
 ```powershell
 python -m moneylab record --source fixture                         # 오프라인 (recordings-synthetic/)
@@ -173,7 +315,7 @@ python -m moneylab simulate --strategy mm --recording data\raw\polymarket\record
 (`tests/test_replay.py`). 기록 데이터에는 외부 signal(`fair_yes`)이 없으므로 fair-value 전략은 동작하지 않는다.
 maker rebate 비율은 CLOB가 제공하지 않는다. `--rebate-rate`로 지정하지 않으면 0으로 두고, metadata의 `rebate_rate_source`에 출처를 남긴다.
 
-### 미검증 사항
+#### 미검증 사항
 
 `/books`, `/clob-markets`, `/rewards/markets` 응답의 필드 해석은 v0.2와 같은 공식 문서 기준이며, 실제 응답으로는 검증하지 못했다.
 특히 다음은 실제 응답을 받은 뒤 확인해야 한다.
@@ -184,7 +326,7 @@ maker rebate 비율은 CLOB가 제공하지 않는다. `--rebate-rate`로 지정
 
 ---
 
-## v0.3.1: Upbit Public WebSocket Recorder + Replay
+### v0.3.1: Upbit Public WebSocket Recorder + Replay
 
 Upbit 공개 WebSocket으로 실제 KRW-BTC의 orderbook(30호가)과 trade를 받아 저장하고 replay한다.
 **공개 시세만 사용한다.** API Key, Secret, JWT, 계좌, 주문, 입출금 코드는 없다.
@@ -196,7 +338,7 @@ Upbit Public WebSocket → parser → UpbitRecorder → data/raw/upbit/recording
   → UpbitRecordingReader → paper.book_stream.ReplayBookStream
 ```
 
-### 공식 문서 (2026-10-06 확인)
+#### 공식 문서 (2026-10-06 확인)
 
 | 항목 | 내용 | 출처 |
 |---|---|---|
@@ -223,7 +365,7 @@ MoneyLab은 `DEFAULT` format으로 `KRW-BTC.30` orderbook과 `KRW-BTC` trade를 
 | 오프라인 scripted session (SYNTHETIC) | `recorder/fixture_source.py`, `tests/fixtures/upbit_ws_timeline_synthetic.json` |
 | market list provider | `providers/upbit/provider.py` (`UpbitMarketDataProvider`) |
 
-### 저장 형식
+#### 저장 형식
 
 ```
 data/raw/upbit/recordings/<market>/            실제 데이터 (provenance=real, git 제외)
@@ -247,7 +389,7 @@ data/raw/upbit/recordings-fixture/<name>/...   fixture 재생 결과 (provenance
   재시작하면 `.tmp`를 지우고 디스크의 마지막 `local_sequence`부터 이어서 쓰며, 최근 `sequential_id`를 다시 읽어 중복을 막는다.
 - real과 fixture, origin, orderbook 단위가 다른 데이터는 같은 dataset에 섞지 않는다(`DatasetMismatch`).
 
-### 연결과 오류 처리
+#### 연결과 오류 처리
 
 | 상황 | 동작 |
 |---|---|
@@ -259,7 +401,7 @@ data/raw/upbit/recordings-fixture/<name>/...   fixture 재생 결과 (provenance
 | 끊김, 네트워크 오류, 서버 error 메시지 | 지수 backoff + jitter(1초~60초), 연결 간격 최소 1초. 시장 데이터 없이 연속 10회 실패하면 `failed` |
 | 메시지 전송 | 연결당 초당 5회, 분당 100회 이하로 제한 (`core/ratelimit.py`) |
 
-### 사용법
+#### 사용법
 
 ```powershell
 python -m moneylab record --provider upbit --duration 60                   # 실제 KRW-BTC (Ctrl+C로 중단, 다시 실행하면 이어서 기록)
@@ -272,14 +414,14 @@ python -m pytest -m network tests/test_upbit_live_smoke.py                 # 실
 
 기본 market은 `MONEYLAB_UPBIT_MARKETS`(기본 `KRW-BTC`), 호가 수는 `MONEYLAB_UPBIT_ORDERBOOK_UNITS`(기본 30)로 바꾼다.
 
-### 실제 데이터로 확인한 것 (2026-10-06, KRW-BTC 90초)
+#### 실제 데이터로 확인한 것 (2026-10-06, KRW-BTC 90초)
 
 - 메시지는 UTF-8 JSON **binary frame**으로 왔다. 서버가 `permessage-deflate`를 제안했다.
 - orderbook 720건 모두 30 units, `level` 0. REALTIME 메시지도 30 units 전체였다(delta가 아님).
 - trade의 `sequential_id`는 17자리 정수였다. 같은 스트림 안에서 exchange timestamp 역전은 없었다.
 - `"PING"` 텍스트 4회를 보내는 동안 `{"status":"UP"}`를 7번 받았다(첫 수신 후 10초 간격).
 
-### 미검증 사항
+#### 미검증 사항
 
 - `ask_bid`가 aggressor(taker) 방향인지는 문서에 명시되어 있지 않다. 그래서 `ASK→sell`, `BID→buy`로만 바꾼다.
 - `sequential_id`가 단조 증가하는지는 문서에 없다(문서에는 unique라고만 되어 있다). 중복 판정에만 사용한다.
@@ -290,7 +432,7 @@ python -m pytest -m network tests/test_upbit_live_smoke.py                 # 실
 
 ---
 
-## v0.4 (Phase 1): Upbit KRW-BTC microstructure research pipeline
+### v0.4 (Phase 1): Upbit KRW-BTC microstructure research pipeline
 
 질문: t 시점의 orderbook/trade 상태가 t+1s/5s/10s/30s 가격 움직임을 **거래비용을 넘을 만큼** 예측하는가.
 사전등록: `docs/research_v04_preregistration.md` + `configs/research_v04.toml` (두 파일의 SHA-256이 모든 run manifest에 기록된다).
@@ -320,7 +462,7 @@ python -m moneylab research-final data\processed\research\<run>                #
 
 ---
 
-## 설치
+### 설치
 
 Python 3.12 이상이 필요하다 (개발과 검증은 3.14.8에서 진행).
 
@@ -333,7 +475,7 @@ pip install -e . --no-deps
 
 `.env`는 선택 사항이다. 필요하면 `.env.example`을 복사해서 사용한다. v0.1에는 비밀정보가 필요 없다.
 
-## 사용법
+### 사용법
 
 ```powershell
 python -m moneylab scan                                   # 실제 API 스캔
@@ -362,77 +504,10 @@ python -m moneylab simulate --timeline data\raw\polymarket\clob\<recorded>.json 
 
 터미널 폭이 130칸 미만이면 Spread, Volume, Flags 열을 숨긴다.
 
-## 테스트
 
-```powershell
-python -m pytest            # 오프라인 테스트 (네트워크 불필요)
-python -m pytest -m network # 실제 네트워크 테스트 (Upbit 공개 WebSocket, 약 60초)
-```
-
----
-
-## 구조
-
-```
-src/moneylab/
-├── config.py               환경변수 설정 (비밀정보 없음)
-├── cli.py, __main__.py     CLI 진입점
-├── core/                   HTTP(timeout, 재시도, 진단), 예외, 비밀정보 마스킹, 로깅, rate limiter
-├── domain/                 공급자 중립 Market/Outcome, OrderBook, TradeTick, MarketEvent(research)
-├── recording/              공급자 중립 recorder core (상태, 실패 분류, backoff, checksum)
-├── providers/
-│   ├── base.py             MarketDataProvider, RecordedBookSource 인터페이스
-│   ├── polymarket/         Gamma/CLOB client, 파서, provider 어댑터, recorder/ (기록·무결성·replay)
-│   └── upbit/              공개 WebSocket transport, 파서, market list provider, recorder/ (기록·무결성·replay)
-├── scanner/                공급자 독립 스캐너 (필터, 정렬, 플래그)
-├── analytics/              metrics(MDD, spread, microprice, depth), costs(fee/rebate), spot_costs, rewards, ev
-├── research/               v0.4 as-of grid, features, labels, split/test lock, stats, leaderboard, pipeline
-├── storage/                data/raw JSON, data/processed CSV, atomic write
-├── display/                rich 콘솔 출력
-├── strategy/               Strategy→Signal, MarketMakingStrategy→Quote, MispricingStrategy→TradeIntent
-├── risk/                   inventory risk, kill switch, RiskCheck
-├── sizing/                 capped fractional Kelly
-├── paper/                  paper engine, maker fill model, book stream, simulation runner
-├── pnl/                    ledger (PnL 분해), report (채택 규칙)
-├── execution/  (인터페이스만, 실거래 구현 없음 - docs/live_execution_design.md)
-├── backtest/   (예정)
-tests/                      오프라인 단위 테스트 + fixtures
-data/raw, data/processed    생성 데이터 (git 제외)
-```
-
-### 의존성 방향
-
-```
-cli → scanner → providers.base (MarketDataProvider) ← providers.polymarket, providers.upbit
-         ↘ domain ↙
-strategy / risk / backtest / paper / execution / research → domain, analytics   (공급자 import 금지)
-providers.* → recording (공통 core). providers.upbit와 providers.polymarket은 서로 import하지 않는다
-```
-
-새 데이터 소스를 추가할 때는 `MarketDataProvider`를 구현해서 `Market`을 반환하게 하면 된다.
-스캐너와 전략 코드는 수정할 필요가 없다.
-
-## 보안 원칙
+### 보안 원칙
 
 - API Key, private key, seed phrase를 코드, 로그, fixture, 커밋에 넣지 않는다.
 - `.env`는 `.gitignore`에 등록되어 있다. 예시는 `.env.example`만 커밋한다.
 - 로그와 진단 출력은 `core/redaction.py`를 거친다. 64자리 hex 키, `key=value` 형태의 비밀값, seed phrase 형태의 문자열, IP 주소, 인증·쿠키 헤더를 마스킹한다.
 - HTTP 세션은 `trust_env=False`로 생성하므로 환경변수 프록시를 자동으로 사용하지 않는다.
-
-## 로드맵
-
-| 단계 | 내용 |
-|---|---|
-| v0.1 | Scanner, 진단, 오프라인 테스트 ✅ |
-| v0.2 | CLOB 호가 reader, 비용·리베이트·리워드 모델, MM/mispricing 전략, paper engine, PnL 분해, kill switch (fixture 기반 오프라인) ✅ |
-| v0.3 | Real Market Data Recorder (REST), atomic 저장, resume, 451 중단, 무결성 검사, ReplayBookStream ✅ (실제 수집은 접근 가능해진 뒤) |
-| v0.3.1 | Upbit 공개 WebSocket recorder (KRW-BTC orderbook 30호가 + trade), 공통 recording core, replay 검증 ✅ (실제 데이터로 확인) |
-| v0.3.x | Polymarket WebSocket recorder, 일 단위 압축, 실제 기록으로 fixture 교체, queue-position fill 모델, 현물 시장용 비용 모델·전략 |
-| v0.4 | 실데이터 microstructure 연구 pipeline (Phase 1 구현, 6시간 수집 전) → Paper trading, PnL tracking, 지표 리포트 |
-| v0.5 | Risk management, position sizing, kill switch |
-| v1.0 | Live execution. 별도 검토, 명시적 opt-in, 소액 한도를 전제로 하며, 합법적으로 접근 가능한 환경에서만 진행 |
-
-## Git / GitHub
-
-- 기본 브랜치는 `main`이다. 기능은 브랜치에서 개발하고 PR로 병합한다.
-- 커밋 전에 `python -m pytest`를 통과시키고, `git status`에 `.env`나 데이터 파일이 없는지 확인한다.
