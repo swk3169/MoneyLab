@@ -2,6 +2,7 @@
 # repo-root .venv, pinned requirements*.txt, editable install without deps, `python -m pytest`.
 # pyproject.toml adds `-m 'not network'`, so tests that hit real APIs are skipped.
 # No secrets, no write permissions, no research data (data/ is not in git).
+# Quality gates (ruff, mypy) run once, in the required Windows job; their scope lives in pyproject.toml.
 name: ci-tests
 
 on:
@@ -39,6 +40,47 @@ jobs:
       - name: Install moneylab (editable, no deps)
         run: '& .\.venv\Scripts\python.exe -m pip install -e . --no-deps'
 
+      - name: Lint (ruff)
+        run: '& .\.venv\Scripts\python.exe -m ruff check --no-cache --select E4,E7,E9,F src tests'
+
+      # No path arguments: files and follow_imports come from [tool.mypy] in pyproject.toml.
+      - name: Type check (mypy)
+        run: '& .\.venv\Scripts\python.exe -m mypy'
+
       # -rsx prints skip and xfail reasons, so silently skipped tests show up in the log.
+      # Branch coverage of moneylab is set in [tool.coverage.run]; there is no fail-under threshold.
+      - name: Run tests (under coverage)
+        run: '& .\.venv\Scripts\python.exe -m coverage run -m pytest -rsx'
+
+      - name: Coverage report
+        run: '& .\.venv\Scripts\python.exe -m coverage report -m'
+
+  # Experimental and non-blocking: shows how the suite behaves on Linux. The two agent-guard wrapper
+  # tests are expected to fail here, because the hook command uses .venv/Scripts/python.exe.
+  pytest-linux-experimental:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14.8"
+
+      - name: Create .venv
+        run: python -m venv .venv
+
+      - name: Install pinned dependencies
+        run: .venv/bin/python -m pip install -r requirements-dev.txt
+
+      - name: Install moneylab (editable, no deps)
+        run: .venv/bin/python -m pip install -e . --no-deps
+
       - name: Run tests
-        run: '& .\.venv\Scripts\python.exe -m pytest -rsx'
+        run: .venv/bin/python -m pytest -rsx

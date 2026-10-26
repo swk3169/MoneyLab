@@ -10,7 +10,7 @@ from moneylab.research.book_state import CROSSED, GAP, LOCKED, NO_BOOK, STALE, W
 from moneylab.research.features import FEATURES, REGISTRY, book_features, trade_features
 from moneylab.research.labels import compute_labels, exec_label_name
 from moneylab.research.sampling import GridParams, build_grid
-from research_helpers import T0, TICK, book, local, session, span, trade
+from research_helpers import T0, TICK, book, local, session, span
 
 nan = math.isnan
 

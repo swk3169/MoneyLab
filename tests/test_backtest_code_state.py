@@ -75,7 +75,7 @@ def test_classify_separates_tracked_untracked_and_ignored():
 
 # --- verify_run under the policy --------------------------------------------------------------------------
 
-def test_review_documents_only_do_not_fail_verification(tmp_path, bars):
+def test_review_documents_only_do_not_fail_verification(tmp_path, bars):  # noqa: F811
     state = classify_worktree(COMMIT, DOCS)
     out = make_run(bars, tmp_path / "runs-fixture", code=state)
     m = json.loads((out.dir / "manifest.json").read_text(encoding="utf-8"))
@@ -89,7 +89,7 @@ def test_review_documents_only_do_not_fail_verification(tmp_path, bars):
 
 @pytest.mark.parametrize("extra", [("??", "scratch.py"), ("??", "src/moneylab/backtest/patch.py"),
                                    ("??", "configs/backtest_costs_alt.toml"), ("??", "notes.md")])
-def test_untracked_execution_files_fail_now_and_at_run_time(tmp_path, bars, extra):
+def test_untracked_execution_files_fail_now_and_at_run_time(tmp_path, bars, extra):  # noqa: F811
     bad = classify_worktree(COMMIT, [*DOCS, extra])
     out = make_run(bars, tmp_path / "runs-fixture")
     rep = verify_run(out.dir, code_state=bad)
@@ -102,19 +102,19 @@ def test_untracked_execution_files_fail_now_and_at_run_time(tmp_path, bars, extr
 
 
 @pytest.mark.parametrize("xy", [" M", "M ", "MM", " D", "A "])
-def test_tracked_changes_fail(tmp_path, bars, xy):
+def test_tracked_changes_fail(tmp_path, bars, xy):  # noqa: F811
     out = make_run(bars, tmp_path / "runs-fixture")
     rep = verify_run(out.dir, code_state=classify_worktree(COMMIT, [(xy, "src/moneylab/backtest/portfolio.py")]))
     assert rep.checks["code"]["ok"] is False and "now: tracked changes" in rep.checks["code"]["detail"]
 
 
-def test_commit_change_fails(tmp_path, bars):
+def test_commit_change_fails(tmp_path, bars):  # noqa: F811
     out = make_run(bars, tmp_path / "runs-fixture", code=classify_worktree(COMMIT, DOCS))
     rep = verify_run(out.dir, code_state=classify_worktree("b" * 40, DOCS))
     assert rep.checks["code"]["ok"] is False and "!= run commit" in rep.checks["code"]["detail"]
 
 
-def test_settings_change_fails_in_settings_and_code(tmp_path, bars):
+def test_settings_change_fails_in_settings_and_code(tmp_path, bars):  # noqa: F811
     s = tmp_path / "costs.toml"
     s.write_bytes(DEFAULT_SETTINGS_FILE.read_bytes())
     out = make_run(bars, tmp_path / "runs-fixture", settings_file=s)
@@ -126,7 +126,7 @@ def test_settings_change_fails_in_settings_and_code(tmp_path, bars):
     assert rep.checks["code"]["ok"] is False and "configs/backtest_costs.toml" in rep.checks["code"]["detail"]
 
 
-def test_clean_run_reverifies_without_writing(tmp_path, bars):
+def test_clean_run_reverifies_without_writing(tmp_path, bars):  # noqa: F811
     out = make_run(bars, tmp_path / "runs-fixture", code=classify_worktree(COMMIT, DOCS))
     before = tree_hashes(tmp_path / "runs-fixture")
     for _ in range(2):

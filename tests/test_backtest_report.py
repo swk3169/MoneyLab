@@ -32,7 +32,7 @@ def report(run_dir, root, *, now=LATER, seed=SEED, draws=99, code=CODE):
 
 
 @pytest.fixture(scope="module")
-def run(bars, tmp_path_factory):
+def run(bars, tmp_path_factory):  # noqa: F811
     return make_run(bars, tmp_path_factory.mktemp("rep") / "runs-fixture")
 
 
@@ -98,7 +98,7 @@ def test_run_directory_is_unchanged(tmp_path, run):
     assert tree_hashes(run.dir) == before
 
 
-def test_no_trades_report(tmp_path, bars):
+def test_no_trades_report(tmp_path, bars):  # noqa: F811
     from test_backtest_run import config
     from moneylab.backtest.run import run_backtest
     from moneylab.backtest.settings import DEFAULT_SETTINGS_FILE
@@ -118,7 +118,7 @@ def test_no_trades_report(tmp_path, bars):
     assert q["mean"]["value"] == 0.0 and b["benchmarks"]["b1"]["structure"]["trades"] == 0
 
 
-def test_fee_zero_vs_positive(tmp_path, bars):
+def test_fee_zero_vs_positive(tmp_path, bars):  # noqa: F811
     r0 = make_run(bars, tmp_path / "runs-fixture", fee=0)
     r25 = make_run(bars, tmp_path / "runs-fixture", fee=25, now=NOW + timedelta(seconds=1))
     b0 = report(r0.dir, tmp_path / "reports-fixture").body
@@ -130,7 +130,7 @@ def test_fee_zero_vs_positive(tmp_path, bars):
     assert b25["cost_logs"]["buy"] < b0["cost_logs"]["buy"] < 0  # kappa and iota still cost at fee 0
 
 
-def test_not_aligned_run_has_no_comparison(tmp_path, bars):
+def test_not_aligned_run_has_no_comparison(tmp_path, bars):  # noqa: F811
     diag = make_run(bars, tmp_path / "runs-fixture", scenario="DIAG")  # fills at the hour open, valued at the close
     out = report(diag.dir, tmp_path / "reports-fixture")
     b = out.body
@@ -221,7 +221,7 @@ def test_check_report_detects_markdown_and_extra_files(tmp_path, run):
     assert check_report(out.dir, run.dir, code_state=CODE).checks["files"]["ok"] is False
 
 
-def test_check_report_detects_run_tampering(tmp_path, bars):
+def test_check_report_detects_run_tampering(tmp_path, bars):  # noqa: F811
     r = make_run(bars, tmp_path / "runs-fixture")
     out = report(r.dir, tmp_path / "reports-fixture")
     res = r.dir / "result.json"
@@ -302,7 +302,7 @@ def test_v2_schema_and_sections(tmp_path, run):
     assert check_report(out.dir, run.dir, code_state=CODE).status == "OK"
 
 
-def test_v2_sections_without_trades_and_when_not_aligned(tmp_path, bars):
+def test_v2_sections_without_trades_and_when_not_aligned(tmp_path, bars):  # noqa: F811
     from test_backtest_run import config
     from moneylab.backtest.run import run_backtest
     from moneylab.backtest.settings import DEFAULT_SETTINGS_FILE
