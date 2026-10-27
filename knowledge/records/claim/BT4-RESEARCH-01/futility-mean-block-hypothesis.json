@@ -1,0 +1,30 @@
+{
+  "derived_from": [],
+  "evidence": [
+    {
+      "availability": "IN_GIT",
+      "locator": "L580, L583 (section 10.2 HYPOTHESIS)",
+      "path": "docs/research_bt4_01_evidence_review.md",
+      "provenance_class": "GIT_VERIFIABLE",
+      "rev": "2819e708ff70edfb8380d27ddf7077c9b1e91aff",
+      "sha256": "ad724cb20e4d2a981fe7841641bcc2c7910a052b1b6f07b6248b686a032b891a",
+      "type": "git_blob"
+    }
+  ],
+  "id": "claim/BT4-RESEARCH-01/futility-mean-block-hypothesis",
+  "kind": "claim",
+  "labels": {},
+  "layer": "HYPOTHESIS",
+  "payload": {
+    "axis": "SCIENTIFIC",
+    "data_basis": "SYNTHETIC"
+  },
+  "schema": "moneylab.knowledge.record/1",
+  "statement": "Candidate cause, not causally confirmed: the fixed stationary-bootstrap mean_block=20 may be short relative to the regime persistence of the momentum-feedback DGP, as one candidate explanation of the MC-V06 futility over-rejection. This is a hypothesis only; it does not establish profitability, alpha, or live readiness.",
+  "supersedes": [],
+  "title": "Fixed mean_block=20 as a candidate cause of futility over-rejection",
+  "topics": [
+    "futility-calibration",
+    "mc-v06"
+  ]
+}

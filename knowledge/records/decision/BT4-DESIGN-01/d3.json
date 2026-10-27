@@ -1,0 +1,29 @@
+{
+  "derived_from": [],
+  "evidence": [
+    {
+      "availability": "IN_GIT",
+      "locator": "L61, L161",
+      "path": "docs/bt4_design_01.md",
+      "provenance_class": "GIT_VERIFIABLE",
+      "rev": "2819e708ff70edfb8380d27ddf7077c9b1e91aff",
+      "sha256": "1d8950b1be7424207b092367217368d25300098dd1d0f09c5ab3bf6bb7d82bdc",
+      "type": "git_blob"
+    }
+  ],
+  "id": "decision/BT4-DESIGN-01/d3",
+  "kind": "decision",
+  "labels": {},
+  "layer": "SOURCE_FACT",
+  "payload": {
+    "local_id": "D3",
+    "state": "PENDING"
+  },
+  "schema": "moneylab.knowledge.record/1",
+  "statement": "Decision D3, whether to apply Holm to the futility REJECT over the four primaries, is pending; it is classified NEEDS_VALIDATION because the Holm guarantee depends on the validity of the individual p-values.",
+  "supersedes": [],
+  "title": "BT4-DESIGN-01 decision D3 (Holm for futility REJECT)",
+  "topics": [
+    "futility-calibration"
+  ]
+}

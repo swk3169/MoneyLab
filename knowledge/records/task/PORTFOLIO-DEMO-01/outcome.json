@@ -1,0 +1,47 @@
+{
+  "derived_from": [],
+  "evidence": [
+    {
+      "availability": "IN_GIT",
+      "locator": "Metadata",
+      "path": "docs/tasks/PORTFOLIO-DEMO-01/WORK_ORDER.md",
+      "provenance_class": "GIT_VERIFIABLE",
+      "rev": "2819e708ff70edfb8380d27ddf7077c9b1e91aff",
+      "sha256": "42814b35ce127482b9935359fc9f010e2bd7ef8a1adf4cdf83c0d21b05bbca82",
+      "type": "git_blob"
+    },
+    {
+      "availability": "IN_GIT",
+      "locator": "Metadata",
+      "path": "docs/tasks/PORTFOLIO-DEMO-01/ERRATA-001.md",
+      "provenance_class": "GIT_VERIFIABLE",
+      "rev": "2819e708ff70edfb8380d27ddf7077c9b1e91aff",
+      "sha256": "7b1431eb0cfa0023eac699feda9ac9739346bfd7cff8d25d5619cbde3dec7868",
+      "type": "git_blob"
+    },
+    {
+      "availability": "GITHUB",
+      "locator": "github:swk3169/MoneyLab/pull/29",
+      "provenance_class": "INDEPENDENT",
+      "type": "github"
+    }
+  ],
+  "id": "task/PORTFOLIO-DEMO-01/outcome",
+  "kind": "task",
+  "labels": {},
+  "layer": "SOURCE_FACT",
+  "payload": {
+    "implementation_commit": "1413298b78c7f17d30b1c16b11692058c14f05e0",
+    "merge_commit": "2819e708ff70edfb8380d27ddf7077c9b1e91aff",
+    "outcome": "MERGED_TO_MAIN",
+    "task_id": "PORTFOLIO-DEMO-01",
+    "tree": "ed361b0dd3cbb530954653c047ac7099e05dd252"
+  },
+  "schema": "moneylab.knowledge.record/1",
+  "statement": "Task PORTFOLIO-DEMO-01, governed by its WORK_ORDER and ERRATA-001, was merged to main by merge commit 2819e708ff70edfb8380d27ddf7077c9b1e91aff; its implementation commit is 1413298b78c7f17d30b1c16b11692058c14f05e0 and the merged tree is ed361b0dd3cbb530954653c047ac7099e05dd252.",
+  "supersedes": [],
+  "title": "PORTFOLIO-DEMO-01 merged to main",
+  "topics": [
+    "portfolio-demo"
+  ]
+}

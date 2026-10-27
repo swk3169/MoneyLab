@@ -1,0 +1,31 @@
+{
+  "derived_from": [],
+  "evidence": [
+    {
+      "availability": "IN_GIT",
+      "locator": "L36-L39, L61-L66",
+      "path": "docs/tasks/PORTFOLIO-DEMO-01/ERRATA-001.md",
+      "provenance_class": "GIT_VERIFIABLE",
+      "rev": "2819e708ff70edfb8380d27ddf7077c9b1e91aff",
+      "sha256": "7b1431eb0cfa0023eac699feda9ac9739346bfd7cff8d25d5619cbde3dec7868",
+      "type": "git_blob"
+    }
+  ],
+  "id": "decision/PORTFOLIO-DEMO-01/result-hash-policy-errata-001",
+  "kind": "decision",
+  "labels": {},
+  "layer": "SOURCE_FACT",
+  "payload": {
+    "local_id": null,
+    "state": "DECIDED"
+  },
+  "schema": "moneylab.knowledge.record/1",
+  "statement": "PORTFOLIO-DEMO-01 ERRATA-001 supersedes the three original result_sha256 requirements: result_sha256 is a per-run integrity identifier, is not compared to a fixed cross-run golden and is not described as cross-run deterministic.",
+  "supersedes": [
+    "decision/PORTFOLIO-DEMO-01/result-hash-policy-c1"
+  ],
+  "title": "PORTFOLIO-DEMO-01 result_sha256 policy after ERRATA-001",
+  "topics": [
+    "portfolio-demo"
+  ]
+}

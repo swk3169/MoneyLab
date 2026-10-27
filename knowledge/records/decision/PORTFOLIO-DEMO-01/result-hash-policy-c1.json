@@ -1,0 +1,29 @@
+{
+  "derived_from": [],
+  "evidence": [
+    {
+      "availability": "IN_GIT",
+      "locator": "L262, L265, L413",
+      "path": "docs/tasks/PORTFOLIO-DEMO-01/WORK_ORDER.md",
+      "provenance_class": "GIT_VERIFIABLE",
+      "rev": "2819e708ff70edfb8380d27ddf7077c9b1e91aff",
+      "sha256": "42814b35ce127482b9935359fc9f010e2bd7ef8a1adf4cdf83c0d21b05bbca82",
+      "type": "git_blob"
+    }
+  ],
+  "id": "decision/PORTFOLIO-DEMO-01/result-hash-policy-c1",
+  "kind": "decision",
+  "labels": {},
+  "layer": "SOURCE_FACT",
+  "payload": {
+    "local_id": null,
+    "state": "DECIDED"
+  },
+  "schema": "moneylab.knowledge.record/1",
+  "statement": "In the PORTFOLIO-DEMO-01 WORK_ORDER (GOLDEN_HASH_POLICY, STOP_CONDITIONS), result_sha256 was UNKNOWN_AT_C1 and was to be required equal across two independent equivalent runs and then frozen in tests/test_examples_demo.py; a cross-run result_sha256 mismatch was a STOP condition.",
+  "supersedes": [],
+  "title": "PORTFOLIO-DEMO-01 original result_sha256 policy (C1)",
+  "topics": [
+    "portfolio-demo"
+  ]
+}

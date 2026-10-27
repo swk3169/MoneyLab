@@ -1,0 +1,29 @@
+{
+  "derived_from": [],
+  "evidence": [
+    {
+      "availability": "IN_GIT",
+      "locator": "L580 (section 10.2), L339 (question B)",
+      "path": "docs/research_bt4_01_evidence_review.md",
+      "provenance_class": "GIT_VERIFIABLE",
+      "rev": "2819e708ff70edfb8380d27ddf7077c9b1e91aff",
+      "sha256": "ad724cb20e4d2a981fe7841641bcc2c7910a052b1b6f07b6248b686a032b891a",
+      "type": "git_blob"
+    }
+  ],
+  "id": "question/BT4-RESEARCH-01/futility-boundary-cause",
+  "kind": "question",
+  "labels": {},
+  "layer": "SOURCE_FACT",
+  "payload": {
+    "state": "OPEN"
+  },
+  "schema": "moneylab.knowledge.record/1",
+  "statement": "What explains the MC-V06 futility over-rejection (size distortion) at the boundary remains unresolved; the listed candidate causes are not causally confirmed.",
+  "supersedes": [],
+  "title": "Cause of the MC-V06 futility over-rejection",
+  "topics": [
+    "futility-calibration",
+    "mc-v06"
+  ]
+}
