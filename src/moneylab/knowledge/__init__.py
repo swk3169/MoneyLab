@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from moneylab.knowledge.context import ContextRequestError, resolve_context
 from moneylab.knowledge.load import LoadResult, load_records
 from moneylab.knowledge.model import SCHEMA, Record
 from moneylab.knowledge.query import KnowledgeBase
@@ -15,8 +16,8 @@ from moneylab.knowledge.validate import Problem, Report, validate
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-__all__ = ["REPO_ROOT", "SCHEMA", "KnowledgeBase", "LoadResult", "Problem", "Record", "Report", "load_records",
-           "open_knowledge_base", "validate"]
+__all__ = ["REPO_ROOT", "SCHEMA", "ContextRequestError", "KnowledgeBase", "LoadResult", "Problem", "Record", "Report",
+           "load_records", "open_knowledge_base", "resolve_context", "validate"]
 
 
 def open_knowledge_base(root: Path = REPO_ROOT, *, use_git: bool = True,
