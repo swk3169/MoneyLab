@@ -1,0 +1,41 @@
+{
+  "derived_from": [],
+  "evidence": [
+    {
+      "availability": "IN_GIT",
+      "locator": "L58",
+      "path": "docs/tasks/BT4-RESEARCH-01/WORK_ORDER.md",
+      "provenance_class": "GIT_VERIFIABLE",
+      "rev": "2819e708ff70edfb8380d27ddf7077c9b1e91aff",
+      "sha256": "eaf525e5c4469f0b76cd5ad2344c9267bbb240b689c7b9b5a9e89a9028b78720",
+      "type": "git_blob"
+    },
+    {
+      "availability": "IN_GIT",
+      "locator": "L91",
+      "path": "docs/research_bt4_01_evidence_review.md",
+      "provenance_class": "GIT_VERIFIABLE",
+      "rev": "2819e708ff70edfb8380d27ddf7077c9b1e91aff",
+      "sha256": "ad724cb20e4d2a981fe7841641bcc2c7910a052b1b6f07b6248b686a032b891a",
+      "type": "git_blob"
+    }
+  ],
+  "id": "claim/MC-V06/study-verdict",
+  "kind": "claim",
+  "labels": {
+    "bt4_readiness": "READY_WITH_CAUTION",
+    "verdict": "MIXED / DESIGN-INFORMATIVE"
+  },
+  "layer": "SOURCE_FACT",
+  "payload": {
+    "axis": "SCIENTIFIC",
+    "data_basis": "SYNTHETIC"
+  },
+  "schema": "moneylab.knowledge.record/1",
+  "statement": "The MC-V06 synthetic simulation study's scientific conclusion is MIXED / DESIGN-INFORMATIVE and its BT4 readiness label is READY_WITH_CAUTION.",
+  "supersedes": [],
+  "title": "MC-V06 study verdict",
+  "topics": [
+    "mc-v06"
+  ]
+}
