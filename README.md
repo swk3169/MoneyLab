@@ -163,6 +163,22 @@ python -m moneylab simulate --strategy mm     # offline order-book simulation on
 python -m moneylab backtest --help            # backtest CLI
 ```
 
+### Synthetic Backtest Demo
+
+`SYNTHETIC / NOT_EVIDENCE`: a pipeline demonstration on synthetic data. It shows the reproducibility and integrity
+controls of the backtest pipeline, not strategy profitability. With the prerequisites above installed
+(`pip install -r requirements-dev.txt`, `pip install -e . --no-deps`), one offline command runs fixture candles
+through bar export, backtest, verification and report, and checks the outputs against known hashes:
+
+```powershell
+python examples/synthetic_backtest_demo.py                  # temporary outputs, removed afterwards
+python examples/synthetic_backtest_demo.py --workdir <DIR>  # keep outputs and demo_summary.json in <DIR>
+```
+
+Reports require a pinned code state (a clean Git checkout); otherwise the demo stops after verification with
+`PARTIAL_CODE_STATE_UNPINNED`. The architecture and the maturity of each component are described in
+[ARCHITECTURE.md](ARCHITECTURE.md).
+
 No secrets are needed for the offline commands. Secrets, if ever used, come only from environment variables and
 are never committed.
 
