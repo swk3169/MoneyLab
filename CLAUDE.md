@@ -51,7 +51,7 @@ AI 코딩 에이전트를 위한 MoneyLab 작업 지침.
 - 새 동작에는 오프라인 테스트를 추가한다 (`tests/conftest.py`의 `FakeSession`, `make_response` 활용).
 - fixture의 출처(실제 캡처인지 합성인지)를 `tests/fixtures/README.md`에 기록한다.
 
-## Work Order (`docs/tasks/`, 계약 v1.1)
+## Work Order (`docs/tasks/`, 계약 v1.2)
 
 task별 계약은 이 파일에 넣지 않는다. 운영 방법과 템플릿은 `docs/tasks/README.md`, `docs/tasks/TEMPLATE.md`를 따른다.
 

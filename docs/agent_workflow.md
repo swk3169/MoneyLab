@@ -41,6 +41,10 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
    정책 변경은 사용자가 결정한다.
 6. `research-final`은 run당 한 번이다. 실행 전에 manifest로 test가 열리지 않았는지 확인하고, 실패해도 자동 재시도하지 않는다.
 7. 사전등록(`docs/research_v04_preregistration.md`, `configs/research_v04.toml`)을 바꾸면 새 study다. Skill은 이를 바꾸지 않는다.
+8. PR 생성(`gh pr create`)과 merge(`gh pr merge`)는 `github` ask 규칙의 `[B]`다. v1.2 Work Order에서 Gate Authorization이
+   `PR_CREATE: YES` 또는 `MERGE_EXECUTE: YES`를 명시한 경우에만 실행하고, 승인 창에서 다시 승인받는다. merge는
+   `--merge --match-head-commit <SHA>`로만 하며 `--admin`·`--auto`·`--squash`·`--rebase`·`--delete-branch`·`--force`를 쓰지
+   않는다. 조건과 사전 검증은 `docs/tasks/README.md` §13을 따른다.
 
 ## 4. Guard 규칙 목록
 
