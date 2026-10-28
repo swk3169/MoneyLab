@@ -1,4 +1,4 @@
-# Work Order (docs/tasks) — 계약 v1.1
+# Work Order (docs/tasks) — 계약 v1.2
 
 Work Order는 ChatGPT와 Claude Code 사이의 version-controlled 실행 계약이다. task마다 불변 Work Order 하나를 Git에 먼저 고정하고,
 Claude Code는 사용자가 승인한 gate 하나씩만 실행한다. 영구 규칙은 `CLAUDE.md`의 "Work Order" 절, 작성 형식은 `TEMPLATE.md`에 있다.
@@ -44,8 +44,8 @@ DESIGN_INVESTIGATION -> CONTRACT_REVIEW -> WORKSPACE_SETUP -> IMPLEMENTATION -> 
 | COMMIT | 구현 커밋 | `git add -- <ALLOWED 경로>`, `git commit` 하나 | 감사 통과 | 커밋 SHA·parent·tree, 커밋 파일 집합, clean |
 | CLEAN_COMMIT_E2E | clean 커밋 기준 회귀·E2E | ignored 출력만 | HEAD = 구현 커밋, clean | E2E_GATES 결과, reference 산출물 보존 |
 | PUSH | 원격 게시 | 대상 branch 하나만 `git push -u` | 원격 main이 기대값 | 원격 head = 로컬 HEAD, main 불변 |
-| PR_CI | PR과 CI | 없음 (Claude는 compare URL·PR 본문만 제공) | push 완료 | PR 범위(git 기준), CI 결과(사용자 확인) |
-| MERGE | 통합 | 없음 (사용자가 GitHub UI에서 merge commit으로) | CI 성공, 사용자 결정 | merge 방식 = Create a merge commit |
+| PR_CI | PR과 CI | v1.1: 없음 (Claude는 compare URL·PR 본문만 제공). v1.2: §13 조건을 모두 만족하면 `gh pr create` 1회 | push 완료 | PR 범위(git 기준), CI 결과(v1.1: 사용자 확인, v1.2: REQUIRED_CI_CHECKS 확인) |
+| MERGE | 통합 | v1.1: 없음 (사용자가 GitHub UI에서 merge commit으로). v1.2: §13 사전 검증을 모두 통과하면 `gh pr merge <N> -R <repo> --merge --match-head-commit <SHA>` 1회 | CI 성공, 사용자 결정 | merge 방식 = Create a merge commit |
 | POST_MERGE_AUDIT | 통합 구조 감사 | main ref만 fetch(`--prune`, `--all` 금지) | merge 완료 | parent1·parent2 순서, tree 동일, first-parent 범위, ancestry, merge-tree 재계산, branch·worktree 보존 |
 | COMPLETE | 종료 | 없음 (증거 요약은 채팅·PR 본문. 파일 보관은 ACCEPTED ERRATA가 명시할 때만, 11절) | 감사 통과 | 최종 flag |
 
@@ -148,6 +148,28 @@ Claude가 실행한 테스트·E2E는 `CLAUDE_REPORTED`다. gate 보고는 채�
    sha256과 C1 SHA를 보고한다.
 4. 사용자: `GATE_AUTHORIZATION: BT-3d IMPLEMENTATION WO@<C1>`. Claude는 ALLOWED_FILES만 바꾸고 TEST_GATES를 돌리고 보고한다.
 5. PRECOMMIT_AUDIT -> COMMIT -> CLEAN_COMMIT_E2E -> PUSH 를 각각 승인받아 진행한다.
-6. 사용자가 GitHub에서 PR을 만들고 CI를 확인하고 merge commit으로 합친다(PR_CI, MERGE).
+6. PR_CI, MERGE: v1.1 Work Order는 사용자가 GitHub에서 PR을 만들고 CI를 확인하고 merge commit으로 합친다. v1.2 Work Order는 §13에 따라, 승인된 경우 Claude가 `gh pr create`·`gh pr merge --merge`를 실행할 수 있다.
 7. POST_MERGE_AUDIT -> COMPLETE.
 8. 계약 변경이 필요하면 언제든 ChatGPT가 `ERRATA-<NNN>.md`를 쓰고, 사용자가 ACCEPTED로 승인한다.
+
+## 13. PR·merge 실행 규칙 (v1.2)
+
+적용 범위: `WORK_ORDER_CONTRACT_VERSION: v1.2` 이상인 Work Order에만 적용한다. v1.1 Work Order의 PR_CI·MERGE는 v1.1 규칙을 따르며, 이 절의 실행 권한은 소급되지 않는다. v1.1 Work Order가 자기 ALLOWED_ACTIONS에 명시한 권한은 그 Work Order 안에서만 유효하다.
+
+v1.1 규칙(유지): PR_CI에서 Claude는 compare URL·PR 본문만 제공한다. MERGE는 사용자가 GitHub UI에서 merge commit으로 합친다.
+
+v1.2 규칙:
+
+- 결정은 사용자, 실행은 Claude다. 실행 권한은 Gate Authorization 1건당 명령 1회이고, guard ASK 승인 창에서 사용자가 다시 승인해야 한다(§8 세 겹 승인).
+- PR 생성(PR_CI): Gate Authorization에 `PR_CREATE: YES`, 저장소, base, head branch, head SHA, 확정된 PR 제목·본문이 있고, 원격 head = 로컬 HEAD = 승인된 SHA이며, 같은 head/base의 열린 PR이 없을 때만 `gh pr create`를 1회 실행한다.
+- merge(MERGE): Gate Authorization에 `MERGE_EXECUTE: YES`, PR 번호, head SHA가 있고 다음 사전 검증(읽기 전용)을 모두 통과할 때만 `gh pr merge <N> -R <repo> --merge --match-head-commit <SHA>`를 1회 실행한다.
+  1. PR이 OPEN이고 draft가 아니며, base = main, head branch가 일치한다.
+  2. PR head SHA = 승인된 SHA = 원격 branch head다.
+  3. PR 커밋·파일 집합 = Work Order(와 ACCEPTED ERRATA)의 PR 범위다.
+  4. Work Order `REQUIRED_CI_CHECKS`의 모든 job이 그 head SHA에서 SUCCESS다.
+  5. Work Order·ERRATA가 요구한 추가 증거를 사용자가 수락했다.
+  6. mergeable = MERGEABLE이다(merge conflict 없음).
+  7. 원격 main = Work Order가 기대한 base다. 다르면 멈추고 보고한다.
+- merge 방식은 Create a merge commit(`--merge`)만 허용한다. `--admin`, `--auto`, `--squash`, `--rebase`, `--delete-branch`, `--force`는 쓰지 않는다. `gh pr edit`·`gh pr close`, CI 재실행, 자동 재시도는 이 절로 허용되지 않는다.
+- 멈춤: 사전 검증 실패 또는 확인 불가, head SHA 변경, 필수 CI 미성공·진행 중, 중복 PR, 승인문 필수 값 누락, guard deny·ASK 거절, gh 명령 실패. 실패한 gh 명령은 재시도하지 않고 읽기로 상태만 확인해 보고한다.
+- merge 뒤에는 보고하고 멈춘다. POST_MERGE_AUDIT는 별도 Gate Authorization으로 반드시 수행하고, 통과해야 COMPLETE로 간다. 사용자 승인 없는 merge(`--auto`, 예약·반복 실행)는 없다.

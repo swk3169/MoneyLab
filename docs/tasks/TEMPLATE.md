@@ -1,4 +1,4 @@
-# Work Order·ERRATA 템플릿 (계약 v1.1)
+# Work Order·ERRATA 템플릿 (계약 v1.2)
 
 사용법: 아래 "Work Order 템플릿" 블록을 `docs/tasks/<TASK_ID>/WORK_ORDER.md`로 복사해 `<...>`를 채운다. 계약이 바뀌면
 "ERRATA 템플릿" 블록을 `docs/tasks/<TASK_ID>/ERRATA-<NNN>.md`로 복사한다. 형식은 Markdown + `KEY: value` 줄이다(YAML front matter
@@ -16,7 +16,7 @@
 ## Metadata
 
 WORK_ORDER_SCHEMA: moneylab.work_order/1
-WORK_ORDER_CONTRACT_VERSION: v1.1
+WORK_ORDER_CONTRACT_VERSION: v1.2
 WORK_ORDER_ID: <TASK_ID>
 TASK_ID: <로드맵·기능 ID, 예: BT-3d>
 TITLE: <한 줄 제목>
@@ -30,6 +30,7 @@ WORKSPACE_SETUP: <REQUIRED | NOT_REQUIRED (저장소를 바꾸는 gate가 없을
 INITIAL_GATE: <보통 WORKSPACE_SETUP>
 ACCEPTED_ERRATA: NONE
 MERGE_METHOD: Create a merge commit
+REQUIRED_CI_CHECKS: <예: ci-tests / pytest (Windows)>
 
 ## GATE_SEQUENCE
 
@@ -64,8 +65,8 @@ ALLOWED_ACTIONS:
 - COMMIT: ALLOWED_FILES만 경로를 명시해 stage, 커밋 하나
 - CLEAN_COMMIT_E2E: <E2E_GATES 실행, ignored 출력만>
 - PUSH: TARGET_BRANCH 하나만 `git push -u origin <TARGET_BRANCH>`
-- PR_CI: compare URL·PR 본문 제공만
-- MERGE: 사용자 결정(GitHub UI, MERGE_METHOD)
+- PR_CI: v1.2에서 Gate Authorization이 PR_CREATE: YES와 저장소·base·head branch·head SHA·PR 제목·본문을 명시하면 `gh pr create` 1회(README §13). 아니면 compare URL·PR 본문 제공만
+- MERGE: v1.2에서 Gate Authorization이 MERGE_EXECUTE: YES와 PR 번호·head SHA를 명시하고 README §13 사전 검증을 모두 통과하면 `gh pr merge <N> -R <repo> --merge --match-head-commit <SHA>` 1회. 아니면 사용자 결정(GitHub UI, MERGE_METHOD)
 - POST_MERGE_AUDIT: main ref만 fetch, 구조 감사
 - COMPLETE: 최종 보고
 
