@@ -70,6 +70,8 @@ There is no live order path. `execution` defines an interface only.
 ```
 
 Arrows point from importer to imported package. `backtest` imports only `analytics`, `domain` and `storage`.
+`knowledge` and `supervisor` are not shown in the diagram: `knowledge` imports no other MoneyLab package and calls
+`git` read-only (`rev-parse`, `cat-file`) for source checks; `supervisor` imports only `knowledge`.
 
 | Component | Package | Status | Notes |
 |---|---|---|---|
@@ -85,6 +87,8 @@ Arrows point from importer to imported package. `backtest` imports only `analyti
 | Backtest engine | `backtest/` | `PARTIAL / SYNTHETIC-ONLY` | BT-1 to BT-3e: bars, cost model, fills, ledger, metrics, reports, evaluation boundaries, input identity, holdout / forward vault, monthly forward risk check. Tested on synthetic data only. |
 | v0.4 research pipeline | `research/` | `IMPLEMENTED` | As-of features, labels, time-ordered splits with a test lock, statistics. Applied to one real Upbit session; decision REJECT. |
 | MC-V06 Monte Carlo study | `research/v06/` | `IMPLEMENTED` | Synthetic data generating processes, v0.6 procedures, operating-characteristic study. Complete; result MIXED / DESIGN-INFORMATIVE. |
+| Knowledge records and context | `knowledge/` | `IMPLEMENTED` | Git-tracked immutable JSON records in `knowledge/records/` (format: `knowledge/SCHEMA.md`): validation, deterministic queries and context packets marked `DATA_NOT_INSTRUCTIONS` (`knowledge/CONTEXT_CONTRACT.md`). Read-only; no write API. |
+| Supervisor proposals | `supervisor/` | `IMPLEMENTED` | Deterministic research task proposals built from a context packet, marked `NON_AUTHORITATIVE_PROPOSAL` (`docs/supervisor_proposal_contract.md`). A proposal is not a Work Order or an authorization; the package has no execution, dispatch, trading, file-write or network capability. |
 | Execution | `execution/` | `DESIGN_ONLY / INTERFACE_ONLY` | Abstract order / fill types (2 files, 77 lines). Design: `docs/live_execution_design.md`. |
 | Live trading | - | `NOT_IMPLEMENTED` | No order placement, wallet or key handling. |
 
@@ -185,11 +189,14 @@ src/moneylab/
   backtest/             backtest engine, reports, segments, vault, risk check
   research/             v0.4 pipeline; v06/ Monte Carlo study
   strategy/, risk/, sizing/, paper/, pnl/, scanner/, display/
+  knowledge/            knowledge records: load, validate, query, context packets
+  supervisor/           read-only, non-authoritative research task proposals
   execution/            interface only
 examples/               synthetic_backtest_demo.py (offline pipeline demonstration)
 tests/                  offline tests; synthetic fixtures (provenance in tests/fixtures/README.md)
 configs/                backtest cost settings, preregistered study configuration
 docs/                   design, preregistration, evidence review, Work Orders
+knowledge/              Git-tracked knowledge records (records/), SCHEMA.md, CONTEXT_CONTRACT.md
 ```
 
 ## 8. Current Boundaries / Non-Goals
@@ -205,10 +212,9 @@ Current boundaries:
 
 Planned / future (`NOT_IMPLEMENTED`; nothing below exists in the repository):
 
-- a knowledge / context layer;
 - a policy and risk engine;
 - worker agents and tools;
-- a supervisor and task generation;
+- supervisor functions beyond read-only, non-authoritative research task proposals;
 - an autonomous research loop;
 - paper trading against a live venue before any live-readiness work;
 - human capital and risk approval gates for any real-money step.

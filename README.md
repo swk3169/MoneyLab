@@ -40,6 +40,10 @@ providers.* ─► recording (shared recorder core)        research ◄/► back
   reports, evaluation-boundary guards, input identity (content SHA) and a locked holdout / forward data vault.
 - **Research layer** (`src/moneylab/research/`): as-of feature grid, labels, time-ordered splits with a test lock,
   statistics, and the v0.6 Monte Carlo study (`research/v06/`).
+- **Knowledge and supervisor** (`src/moneylab/knowledge/`, `src/moneylab/supervisor/`): Git-tracked immutable
+  knowledge records with validation, deterministic queries and context packets; the supervisor derives read-only
+  research task proposals from that context, marked `NON_AUTHORITATIVE_PROPOSAL`. Nothing in these packages
+  executes, approves or dispatches work.
 
 Design documents: [docs/backtest_design.md](docs/backtest_design.md),
 [docs/live_execution_design.md](docs/live_execution_design.md) (design only, not implemented).
@@ -103,6 +107,7 @@ commits can be identified by `Co-Authored-By` trailers where those trailers are 
 | BT4-DESIGN-01 (decision inventory and validation design before freezing v0.6) | **Design only, complete.** BT4 freeze NOT PERFORMED, validation NOT STARTED, implementation NOT STARTED | [bt4_design_01.md](docs/bt4_design_01.md) |
 | v0.6 preregistration | Draft, not frozen | [v0.6 draft](docs/research_v06_preregistration_draft.md) |
 | Real-data backtest (BT-5), forward evaluation (BT-6) | Not started | [backtest_design.md](docs/backtest_design.md) |
+| Knowledge records, context resolution and supervisor proposals | Implemented; read-only and deterministic. A supervisor proposal is a non-authoritative research suggestion, not a Work Order, an approval or an execution instruction | [SCHEMA.md](knowledge/SCHEMA.md), [proposal contract](docs/supervisor_proposal_contract.md) |
 | Live trading | Not implemented (interface and design document only) | [live_execution_design.md](docs/live_execution_design.md) |
 
 ## Limitations / What this project is NOT
@@ -131,10 +136,13 @@ src/moneylab/
 ├── backtest/             backtest engine, reports, segments, vault, risk check
 ├── research/             v0.4 pipeline and v06/ (Monte Carlo study, procedures, synthetic DGPs)
 ├── strategy/, risk/, sizing/, paper/, pnl/, scanner/, display/
+├── knowledge/            knowledge records: load, validate, query, context packets
+├── supervisor/           read-only, non-authoritative research task proposals
 └── execution/            interface only; no live implementation
 tests/                    offline tests and synthetic fixtures (provenance in tests/fixtures/README.md)
 docs/                     design, preregistration, evidence review, tasks (Work Orders)
 configs/                  preregistered study configuration
+knowledge/                Git-tracked knowledge records (records/), SCHEMA.md, CONTEXT_CONTRACT.md
 ```
 
 ## Tests / CI
