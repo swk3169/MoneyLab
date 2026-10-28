@@ -47,10 +47,10 @@ jobs:
       - name: Type check (mypy)
         run: '& .\.venv\Scripts\python.exe -m mypy'
 
-      # -rsx prints skip and xfail reasons, so silently skipped tests show up in the log.
+      # -rfEsxXp lists every test's node ID and outcome, with skip and xfail reasons, but no captured output.
       # Branch coverage of moneylab is set in [tool.coverage.run]; there is no fail-under threshold.
       - name: Run tests (under coverage)
-        run: '& .\.venv\Scripts\python.exe -m coverage run -m pytest -rsx'
+        run: '& .\.venv\Scripts\python.exe -m coverage run -m pytest -rfEsxXp'
 
       - name: Coverage report
         run: '& .\.venv\Scripts\python.exe -m coverage report -m'
