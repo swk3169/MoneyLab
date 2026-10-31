@@ -2348,7 +2348,7 @@ def test_entry_output_path_boundary(tmp_path, capsys):
 
 def test_entry_smoke_fixture_reproducible_and_never_overwrites(smoked, tmp_path, capsys):
     root0, files, cal_raw, out0 = smoked
-    contracts = {k: hashlib.sha256((fd.repo_root() / rel).read_bytes()).hexdigest()
+    contracts = {k: hashlib.sha256((fd.repo_root() / rel).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
                  for k, rel in fd.CONTRACT_FILES.items()}
     mcv = source_identity()
     assert out0["status"] == "COMPLETE" and out0["verify"]["time_accounting"] == "COMPLETE"
@@ -2385,7 +2385,7 @@ def test_entry_smoke_fixture_reproducible_and_never_overwrites(smoked, tmp_path,
     for bad in ("s1", "g4c-smoke-222222222222", "g4c-smoke-111111111111-attempt2", "g5-pilot-111111111111"):
         code, out = _cli(["smoke", "--run", root2 / bad, "--calibration", root2 / C1, *SMALL], root2, capsys)
         assert (code, out["result"]) in ((2, "STOP"), (3, "STOP_FOR_USER_DECISION")), bad   # R-7 names only
-    assert {k: hashlib.sha256((fd.repo_root() / rel).read_bytes()).hexdigest()
+    assert {k: hashlib.sha256((fd.repo_root() / rel).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
             for k, rel in fd.CONTRACT_FILES.items()} == contracts == fd.CONTRACT_SHA256
     assert source_identity() == mcv
 
