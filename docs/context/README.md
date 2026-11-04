@@ -23,6 +23,7 @@ This directory contains historical research notes and proposals, not operating i
 - ML-CTX-005: Alpha combination, leakage and net performance.
 - ML-CTX-006: AI agent economics and operating costs.
 - ML-CTX-007: LLM Wiki design concepts.
+- ML-CTX-008: GitHub AI development tools as unverified research candidates.
 
 ## Limitations
 
@@ -31,6 +32,8 @@ These files are derived from prior conversation summaries and user-supplied mate
 ## New-PC manual recovery
 
 Clone the approved GitHub repository, set up the project environment according to current repository instructions, and start Claude Code from the intended worktree. Explicitly request the reading order above. Do not infer current gate or worktree state from these historical notes; verify it against Git and the applicable Work Order. No automatic context loading is implemented by this documentation-only task.
+
+A branch created before this directory was added may not contain `docs/context/`. Without checking out or modifying anything, confirm that `origin/main` matches the remote and read the files from it, for example `git show origin/main:docs/context/README.md`.
 
 ## Reference status and claim labels
 
