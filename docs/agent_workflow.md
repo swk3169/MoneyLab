@@ -55,8 +55,31 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
   `recursive-delete`
 - 경로 규칙: `locked`, `protected-path`, `protected-word` (deny), `inline-code`, `untracked-script` (ask)
 - MoneyLab CLI (ask): `research-final`, `research-build` (`--dry-run` 제외), `record-live` (`--source fixture` 제외)
-- 파일 도구: `locked`, `env`, `frozen`, `raw-or-git`, `claude-settings` (deny), `protected-edit` (ask)
+- 파일 도구: `locked`, `env`, `frozen`, `raw-or-git`, `claude-settings` (deny), `protected-edit` (ask),
+  `task-contract`, `prereg-protected`, `worktree-detect` (deny 또는 ask)
 - 입력 오류: `malformed` (deny)
+
+계약·사전등록·다른 worktree (파일 도구):
+
+- `task-contract`: `docs/tasks/<id>/WORK_ORDER.md`, `docs/tasks/<id>/ERRATA-*.md`는 작업 트리에 있으면 deny, 없으면 ask다. 그 밖의
+  `docs/tasks/**`는 ask다. guard는 승인 여부를 판단하지 않고 파일 존재만 본다. 승인은 Gate Authorization과 승인 창이 맡는다.
+- `prereg-protected`: `docs/research_*_preregistration.md`, `configs/research_*.toml`, `configs/bt4_*.toml`은 있으면 deny, 없으면
+  ask다. `docs/research_*_preregistration_draft.md`는 ask다. `*`는 경로 구분자를 넘지 않는다. `frozen`과 `protected-edit`로 이미
+  판정되는 v04·v05 파일은 그 판정과 규칙명을 유지한다. `configs/backtest_costs.toml`은 대상이 아니다.
+- `protected-edit` 추가 대상: `tests/test_agent_guard.py`, `tests/test_skills.py`, `tests/test_repo_hygiene.py`,
+  `docs/agent_workflow.md`.
+- 다른 worktree: 세션 루트 밖 경로는 `git worktree list`와 실제 경로 해석으로 같은 저장소의 worktree인지 판별한다. worktree면 그
+  worktree 기준 상대 경로에 같은 경로 판정을 적용한다. 저장소 밖 경로와 다른 저장소 경로는 pass다.
+- `worktree-detect`: 판별 자체가 실패한 경우다. 경로 끝부분이 보호 대상 이름이면 deny, 그 외는 ask다.
+  `locked`, `env`, `claude-settings`가 먼저 적용된다.
+
+계약·사전등록·자기 보호 (명령):
+
+- `protected-path` 경로 텍스트에 계약 파일, 사전등록 패턴(v05 초안 포함), `tests/test_agent_guard.py`, `tests/test_skills.py`,
+  `tests/test_repo_hygiene.py`, `docs/agent_workflow.md`, `.claude/skills`를 포함한다. 변경 동사나 그 경로로의 redirect가 함께 있으면
+  deny다. `cat`, `grep`, `sha256sum`, `git show`, `git diff`, `git add -- <경로>`, pytest 실행은 pass다.
+- `git commit --amend`는 `git` deny다. `git checkout <ref> -- <경로>`, `git worktree remove|move|prune`, `git branch -f`,
+  `git update-ref`, `git symbolic-ref`는 `git-history` ask다. ask 승인은 Work Order의 금지를 해제하지 않는다.
 
 GitHub CLI:
 
@@ -76,6 +99,8 @@ GitHub CLI:
 
 - `git stash list` 같은 읽기 전용 stash 명령도 `git-history`로 ask된다. Skill에서는 stash를 쓰지 않는다.
 - 한 명령에 `sed` 등 변경 동사와 frozen 파일 경로가 함께 있으면 deny된다. 명령을 나눈다.
+  계약·사전등록·자기 보호 경로도 같다. `sed -n`처럼 읽기 목적이어도 deny되고, 그 경로를 인자로 준 pytest 명령에 `-k` 등으로
+  변경 동사 단어가 들어가도 deny된다. 커밋 메시지는 명령이 `git commit`으로 시작할 때만 검사에서 빠진다.
 - `.env` 문자열이 들어간 명령은 `ls`라도 deny된다.
 - `locked/` 경로는 단독 `sha256sum`·`ls`만 허용된다. `&&`로 다른 명령과 묶거나 `<run>` 같은 꺾쇠 자리표시자를 쓰면
   deny된다. Skill에서는 `data/processed/research/*/locked/test.jsonl.gz`처럼 glob을 쓴다.
@@ -88,6 +113,12 @@ GitHub CLI:
   전체 경로 표기는 guard의 `github` 규칙으로만 ask된다.
 - `git commit`의 비인용 heredoc 본문은 검사 전에 제거되어, 본문의 `$(…)`가 deny 대신 `git-commit` ask로 내려간다.
   후속 작업으로 미뤘다(`tests/test_agent_guard.py`의 strict xfail).
+- 다른 worktree를 대상으로 한 명령은 문자열 규칙으로만 판정하며, 파일 도구와 동등한 보호를 보장하지 않는다. 상대 경로, `cd` 이후
+  실행, 변수·문자열·스크립트 내부에서 조립한 경로는 보호 경로로 인식되지 않을 수 있다. 공백이 든 인용 경로로의 redirect도 경로
+  전체를 하나로 보지 못한다. 반대로 문자열 규칙은 저장소를 구분하지 않아서 다른 저장소의 같은 경로 문자열도 같은 판정을 받을 수 있다.
+- 명령 판정 함수는 PowerShell 명령도 같은 문자열 규칙으로 처리하지만, PowerShell 도구 호출에 hook이 실제로 적용되는지는 직접 관측하지
+  않았다.
+- `configs/backtest_costs.toml`은 guard가 보호하지 않는다. 변경 제한은 Work Order와 gate가 맡는다.
 
 ## 5. Skill 작성 규칙
 
@@ -119,6 +150,8 @@ GitHub CLI:
 |---|---|---|
 | guard deny | 멈추고 규칙 이름과 명령 보고 | 오탐이면 정책 변경 제안 (사용자 결정, `.claude/` 수정은 `[B]`) |
 | 모든 도구 호출이 막힘 (guard fail-closed) | 에이전트는 고칠 수 없음 | 사용자가 `!` 명령으로 venv, `CLAUDE_PROJECT_DIR`, `timeout` 확인 |
+| guard·settings 수정 중 모든 도구 호출이 막힘 | 에이전트는 멈추고 다른 경로를 시도하지 않음 | 사용자가 Claude Code 밖 터미널에서 해당 파일을 Work Order 커밋(C1) 상태로 복원하고 보고한다. `!` 명령의 hook 적용 여부는 미검증이라 여기에 의존하지 않는다 |
+| 커밋 전 잘못 쓴 Work Order·ERRATA 초안 (`task-contract` deny) | 에이전트는 고치지 않고 멈춤 | 사용자가 처리한다 |
 | 수집 중단 (`disk_low`, `connection_failure`, `clock_unstable`, 451/401/403) | raw 데이터 보존, 종료 사유·로그 수집 | 원인 해소 후 같은 `--out`으로 이어서 수집 (`[B]`), 품질 판정은 사용자 |
 | research-build 실패 | 실패한 run 디렉터리 보존 | 새 run 생성 (`[B]`). 삭제는 사용자 결정 |
 | research-final 실패 | 재시도하지 않음 | test가 열렸는지 manifest로 확인 후 보고. 열린 run은 재사용 불가 |
