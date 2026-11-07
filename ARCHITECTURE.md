@@ -32,7 +32,7 @@ Current scope:
   procedures;
 - evidence labels, integrity hashes and an offline test suite in CI.
 
-There is no live order path. `execution` defines an interface only.
+There is no live order path. The `execution` package defines the `ExecutionClient` interface. The only identified implementation is the simulated `PaperExecutionClient` in `paper/engine.py`. A live execution adapter exists only as a design in `docs/live_execution_design.md`; it is not implemented or validated.
 
 ## 2. Design Principles
 
@@ -73,6 +73,9 @@ Arrows point from importer to imported package. `backtest` imports only `analyti
 `knowledge` and `supervisor` are not shown in the diagram: `knowledge` imports no other MoneyLab package and calls
 `git` read-only (`rev-parse`, `cat-file`) for source checks; `supervisor` imports only `knowledge`.
 
+The diagram omits some dependencies: `paper` and `pnl` import `execution`, `research` imports `domain`, and `core`
+imports `storage`. Section 9 records the `risk`/`strategy` cycle and the `providers`/`paper` dependency.
+
 | Component | Package | Status | Notes |
 |---|---|---|---|
 | Core utilities | `core/` | `IMPLEMENTED` | HTTP client (timeout, retry, diagnostics), errors, secret redaction, logging. |
@@ -85,11 +88,12 @@ Arrows point from importer to imported package. `backtest` imports only `analyti
 | Offline order-book simulation | `paper/`, `strategy/`, `risk/`, `sizing/`, `pnl/` | `PARTIAL / SYNTHETIC-ONLY` | Offline simulation of quoting strategies on fixtures and recordings. Not paper trading against a live venue. |
 | Analytics | `analytics/` | `IMPLEMENTED` | Metrics, expected value, spot cost models. |
 | Backtest engine | `backtest/` | `PARTIAL / SYNTHETIC-ONLY` | BT-1 to BT-3e: bars, cost model, fills, ledger, metrics, reports, evaluation boundaries, input identity, holdout / forward vault, monthly forward risk check. Tested on synthetic data only. |
-| v0.4 research pipeline | `research/` | `IMPLEMENTED` | As-of features, labels, time-ordered splits with a test lock, statistics. Applied to one real Upbit session; decision REJECT. |
+| v0.4 research pipeline | `research/` | `IMPLEMENTED` | As-of features, labels, time-ordered splits with a test lock, statistics. Project documents report application to one real Upbit session and a REJECT decision; raw data and run outputs are not stored in Git for independent re-verification. |
 | MC-V06 Monte Carlo study | `research/v06/` | `IMPLEMENTED` | Synthetic data generating processes, v0.6 procedures, operating-characteristic study. Complete; result MIXED / DESIGN-INFORMATIVE. |
+| Research report conformance | `research/report_conformance.py`, `research/report_schema.py` | `IMPLEMENTED` | Deterministic structural checks of a research gate report against a preregistration profile. A pass means structural conformance only; it does not check that values or labels are right. |
 | Knowledge records and context | `knowledge/` | `IMPLEMENTED` | Git-tracked immutable JSON records in `knowledge/records/` (format: `knowledge/SCHEMA.md`): validation, deterministic queries and context packets marked `DATA_NOT_INSTRUCTIONS` (`knowledge/CONTEXT_CONTRACT.md`). Read-only; no write API. |
 | Supervisor proposals | `supervisor/` | `IMPLEMENTED` | Deterministic research task proposals built from a context packet, marked `NON_AUTHORITATIVE_PROPOSAL` (`docs/supervisor_proposal_contract.md`). A proposal is not a Work Order or an authorization; the package has no execution, dispatch, trading, file-write or network capability. |
-| Execution | `execution/` | `DESIGN_ONLY / INTERFACE_ONLY` | Abstract order / fill types (2 files, 77 lines). Design: `docs/live_execution_design.md`. |
+| Execution | `execution/` | `DESIGN_ONLY / INTERFACE_ONLY` | Abstract interface and order / fill types (2 files, 77 lines). Only identified implementation: simulated `PaperExecutionClient` in `paper/engine.py`. Live adapter: design only (`docs/live_execution_design.md`). |
 | Live trading | - | `NOT_IMPLEMENTED` | No order placement, wallet or key handling. |
 
 ## 4. Backtest Data Flow
@@ -153,7 +157,7 @@ Research status:
 | v0.4 real-data microstructure study (Upbit KRW-BTC, one 6-hour session) | **REJECT** after costs: predicted moves far smaller than round-trip costs. |
 | Backtest BT-1 to BT-3e | Implemented; results on synthetic data only, `SYNTHETIC / NOT_EVIDENCE`. |
 | MC-V06 | Complete. **MIXED / DESIGN-INFORMATIVE.** The futility procedure was anti-conservative at the boundary (rejected more often than nominal) in the synthetic settings; the cause is unresolved, so its validity remains open. |
-| BT4 | **Design only** (BT4-DESIGN-01). Its readiness label READY_WITH_CAUTION refers to proceeding with that design work, not to live-trading readiness. No BT4 freeze, validation or implementation has been performed. |
+| BT4 | **Design only** (BT4-DESIGN-01). Its readiness label READY_WITH_CAUTION refers to proceeding with that design work, not to live-trading readiness. No BT4 freeze or implementation has been performed. A post-hoc futility diagnostic record exists; it publishes no result values and is not a completed formal validation. |
 | v0.6 preregistration | Draft, not frozen. |
 | BT-5 (real-data backtest), BT-6 (forward evaluation) | Not started. |
 | Live trading | Not implemented. |
@@ -187,15 +191,17 @@ src/moneylab/
   storage/              atomic writes, raw / processed storage
   analytics/            metrics and cost models
   backtest/             backtest engine, reports, segments, vault, risk check
-  research/             v0.4 pipeline; v06/ Monte Carlo study
+  research/             v0.4 pipeline; v06/ Monte Carlo study; report conformance checks
   strategy/, risk/, sizing/, paper/, pnl/, scanner/, display/
   knowledge/            knowledge records: load, validate, query, context packets
   supervisor/           read-only, non-authoritative research task proposals
-  execution/            interface only
+  execution/            interface only; live adapter not implemented
 examples/               synthetic_backtest_demo.py (offline pipeline demonstration)
 tests/                  offline tests; synthetic fixtures (provenance in tests/fixtures/README.md)
 configs/                backtest cost settings, preregistered study configuration
 docs/                   design, preregistration, evidence review, Work Orders
+  history/              earlier README development notes (historical record)
+  research-intake/      non-authoritative research notes; not requirements or evidence
 knowledge/              Git-tracked knowledge records (records/), SCHEMA.md, CONTEXT_CONTRACT.md
 ```
 
@@ -221,11 +227,11 @@ Planned / future (`NOT_IMPLEMENTED`; nothing below exists in the repository):
 
 ## 9. Known Documentation Discrepancies
 
-Recorded here without changing the other documents:
+Recorded here; this section does not change the other documents. Item 1 is a resolved record; items 2 to 4 remain open:
 
-1. The README architecture diagram groups `backtest` with `strategy`, `risk`, `paper`, `research` and `analytics`
-   as `domain` consumers. It does not show the enforced backtest boundary: `backtest` may import only `analytics`,
-   `domain` and `storage`, and has its own strategy rules, cost model and metrics.
+1. (Resolved) DOCS-VISION-01 replaced the README diagram: it no longer groups `backtest` as a general `domain`
+   consumer and shows its synthetic-only path. The enforced boundary is unchanged: `backtest` may import only
+   `analytics`, `domain` and `storage`, and has its own strategy rules, cost model and metrics.
 2. `CLAUDE.md` states that profitability metrics are computed in `analytics/metrics.py` and shared by backtest,
    paper and live. In the code, `backtest/metrics.py` computes the backtest metrics and reuses only
    `analytics.metrics.max_drawdown`; there is no live path. The sharing is partial.
