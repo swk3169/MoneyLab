@@ -695,3 +695,408 @@ def test_wrapper_timing_for_normal_calls():
 def test_process_handles_non_ascii_utf8():
     payload = {"tool_name": "Bash", "tool_input": {"command": "echo 한글 && rm -rf data/raw"}}
     assert run_hook(json.dumps(payload, ensure_ascii=False).encode("utf-8")).returncode == 2
+
+
+# ----------------------------------------------------------- contract, prereg and worktree rules
+# Every row pins (action, rule). IDC-nn and KEEP-nn are the rows of INTENDED_DECISION_CHANGES in
+# docs/tasks/GUARD-PROTECT-01/WORK_ORDER.md. Nothing here runs a listed command or changes a real file.
+
+PASSED = ("pass", "")
+TC_DENY, TC_ASK = ("deny", "task-contract"), ("ask", "task-contract")
+PREREG_DENY, PREREG_ASK = ("deny", "prereg-protected"), ("ask", "prereg-protected")
+EDIT_ASK = ("ask", "protected-edit")
+FROZEN_DENY = ("deny", "frozen")
+RAW_DENY = ("deny", "raw-or-git")
+SETTINGS_DENY = ("deny", "claude-settings")
+LOCK_DENY, ENV_DENY = ("deny", "locked"), ("deny", "env")
+DETECT_DENY, DETECT_ASK = ("deny", "worktree-detect"), ("ask", "worktree-detect")
+PATH_DENY = ("deny", "protected-path")
+GIT_DENY = ("deny", "git")
+HISTORY_ASK, COMMIT_ASK = ("ask", "git-history"), ("ask", "git-commit")
+TREE_DELETE_ASK = ("ask", "recursive-delete")
+
+GP_FILES = (
+    "docs/tasks/T-1/WORK_ORDER.md", "docs/tasks/T-1/ERRATA-001.md", "docs/tasks/T-1/notes.md",
+    "docs/tasks/T-1/sub/WORK_ORDER.md", "docs/tasks/README.md", "docs/tasks/TEMPLATE.md",
+    "docs/research_bt4_futility_diag_preregistration.md", "configs/bt4_futility_diag.toml",
+    "configs/research_v04.toml", "docs/research_v04_preregistration.md", "docs/research_v05_preregistration.md",
+    "docs/research_v05_preregistration_draft.md", "docs/research_v06_preregistration_draft.md",
+    "configs/backtest_costs.toml", "docs/research_bt4_01_evidence_review.md", "docs/research-intake/x.md",
+    "docs/bt4_futility_diag_report.md", "docs/bt4_design_01.md", "tests/test_agent_guard.py", "tests/test_skills.py",
+    "tests/test_repo_hygiene.py", "docs/agent_workflow.md", "README.md", "CLAUDE.md", "src/moneylab/cli.py",
+    "data/raw/x.json", ".claude/settings.json",
+)
+
+
+def gp_params(rows, prefix=""):
+    """rows: (tag, *fields[, True for Windows-only spellings]). Node ids are numbers only: a pytest command
+    line is itself checked by the guard, so ids must not carry command words."""
+    params, counts = [], {}
+    for row in rows:
+        windows_only = row[-1] is True
+        tag, *fields = row[:-1] if windows_only else row
+        counts[tag] = counts.get(tag, 0) + 1
+        marks = [pytest.mark.skipif(not sys.platform.startswith("win"), reason="Windows path semantics")] if windows_only else []
+        params.append(pytest.param(*fields, id=f"{tag.lower().replace('-', '')}-{prefix}{counts[tag]:02d}", marks=marks))
+    return params
+
+
+def _gp_git(cwd, *args):
+    subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
+
+
+@pytest.fixture(scope="module")
+def gp(tmp_path_factory):
+    """s = session worktree, o and m = other worktrees of its repository, e = another repository,
+    p = no repository, l = a directory whose name only starts like o, b = a root whose git lookup fails,
+    u = a place outside everything. Guard copies under s and b are the wrapper test's hook scripts."""
+    base = tmp_path_factory.mktemp("gp")
+    trees = {key: base / name for key, name in (("m", "tree"), ("s", "tree-session"), ("o", "tree-other"),
+                                                ("e", "elsewhere"), ("p", "plain"), ("l", "tree-other-2"),
+                                                ("b", "unreadable"), ("u", "outside"))}
+    for key in ("m", "e", "p", "l", "b", "u"):
+        trees[key].mkdir()
+    for key in ("m", "e"):
+        _gp_git(trees[key], "init", "-q")
+        _gp_git(trees[key], "config", "user.email", "t@example.invalid")
+        _gp_git(trees[key], "config", "user.name", "t")
+    _gp_git(trees["m"], "commit", "-q", "--allow-empty", "-m", "x")
+    _gp_git(trees["m"], "worktree", "add", "-q", str(trees["s"]), "-b", "session")
+    _gp_git(trees["m"], "worktree", "add", "-q", str(trees["o"]), "-b", "other")
+    (trees["b"] / ".git").write_text("gitdir: ./absent\n", encoding="utf-8")
+    for key in ("m", "s", "o", "e", "p", "l"):
+        for rel in GP_FILES:
+            target = trees[key] / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("x", encoding="utf-8")
+    for key in ("s", "b"):
+        hooks = trees[key] / ".claude" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(GUARD_PATH, hooks / "guard.py")
+    return {key: str(path) for key, path in trees.items()}
+
+
+GP_FILE_ROWS = [
+    # D1 contract files in the session worktree
+    *[("IDC-01", tool, "{s}/docs/tasks/T-1/WORK_ORDER.md", PASSED, TC_DENY) for tool in ("Write", "Edit", "MultiEdit")],
+    ("IDC-01", "Write", "{s}\\docs\\tasks\\T-1\\WORK_ORDER.md", PASSED, TC_DENY, True),
+    ("IDC-01", "Write", "{s}/DOCS/Tasks/t-1/work_order.MD", PASSED, TC_DENY, True),
+    ("IDC-01", "Edit", "{s}/docs/x/../tasks/T-1/WORK_ORDER.md", PASSED, TC_DENY),
+    ("IDC-02", "Write", "{s}/docs/tasks/T-2/WORK_ORDER.md", PASSED, TC_ASK),
+    ("IDC-02", "Write", "{s}\\DOCS\\tasks\\T-2\\work_order.md", PASSED, TC_ASK, True),
+    *[("IDC-03", tool, "{s}/docs/tasks/T-1/ERRATA-001.md", PASSED, TC_DENY) for tool in ("Write", "Edit")],
+    ("IDC-03", "Edit", "{s}\\docs\\tasks\\T-1\\errata-001.MD", PASSED, TC_DENY, True),
+    ("IDC-04", "Write", "{s}/docs/tasks/T-1/ERRATA-002.md", PASSED, TC_ASK),
+    *[("IDC-05", tool, f"{{s}}/docs/tasks/{rel}", PASSED, TC_ASK)
+      for rel in ("README.md", "TEMPLATE.md", "T-1/notes.md", "T-1/sub/WORK_ORDER.md", "T-3/new.md")
+      for tool in ("Write", "Edit")],
+    # D3 preregistration
+    *[("IDC-07", tool, path, PASSED, PREREG_DENY)
+      for path in ("{s}/docs/research_bt4_futility_diag_preregistration.md", "{s}/configs/bt4_futility_diag.toml")
+      for tool in ("Write", "Edit")],
+    ("IDC-07", "Edit", "{s}/configs/x/../bt4_futility_diag.toml", PASSED, PREREG_DENY),
+    *[("IDC-08", "Write", path, PASSED, PREREG_ASK)
+      for path in ("{s}/docs/research_v07_preregistration.md", "{s}/configs/research_v07.toml", "{s}/configs/bt4_new.toml",
+                   "{s}/docs/research_v07_preregistration_draft.md")],
+    *[("IDC-09", tool, "{s}/docs/research_v06_preregistration_draft.md", PASSED, PREREG_ASK) for tool in ("Write", "Edit")],
+    # D6 self protection
+    *[("IDC-11", tool, f"{{s}}/tests/{name}.py", PASSED, EDIT_ASK)
+      for name in ("test_agent_guard", "test_skills", "test_repo_hygiene") for tool in ("Write", "Edit")],
+    *[("IDC-12", tool, "{s}/docs/agent_workflow.md", PASSED, EDIT_ASK) for tool in ("Write", "Edit")],
+    # D4 other worktrees
+    *[("IDC-20", tool, path, PASSED, FROZEN_DENY)
+      for path in ("{o}/configs/research_v04.toml", "{o}/docs/research_v04_preregistration.md",
+                   "{m}/configs/research_v04.toml") for tool in ("Write", "Edit")],
+    ("IDC-20", "Write", "{o}\\CONFIGS\\Research_V04.toml", PASSED, FROZEN_DENY, True),
+    *[("IDC-20", tool, "{o}/data/raw/x.json", PASSED, RAW_DENY) for tool in ("Write", "Edit")],
+    ("IDC-20", "Write", "{o}/data/raw/new/y.json", PASSED, RAW_DENY),
+    ("IDC-20", "Write", "{m}/.git/config", PASSED, RAW_DENY),
+    ("IDC-21", "Edit", "{o}/docs/tasks/T-1/WORK_ORDER.md", PASSED, TC_DENY),
+    ("IDC-21", "Edit", "{m}/docs/tasks/T-1/ERRATA-001.md", PASSED, TC_DENY),
+    ("IDC-21", "Write", "{o}/docs/tasks/T-2/WORK_ORDER.md", PASSED, TC_ASK),
+    ("IDC-21", "Write", "{o}/docs/tasks/T-1/ERRATA-002.md", PASSED, TC_ASK),
+    ("IDC-21", "Edit", "{o}/docs/tasks/README.md", PASSED, TC_ASK),
+    ("IDC-21", "Edit", "{o}/docs/research_bt4_futility_diag_preregistration.md", PASSED, PREREG_DENY),
+    ("IDC-21", "Edit", "{o}/configs/bt4_futility_diag.toml", PASSED, PREREG_DENY),
+    ("IDC-21", "Write", "{o}/configs/research_v07.toml", PASSED, PREREG_ASK),
+    ("IDC-21", "Edit", "{o}/docs/research_v06_preregistration_draft.md", PASSED, PREREG_ASK),
+    ("IDC-21", "Edit", "{o}/docs/research_v05_preregistration.md", PASSED, FROZEN_DENY),
+    *[("IDC-22", "Edit", f"{{o}}/{rel}", PASSED, EDIT_ASK)
+      for rel in (".claude/skills/x/SKILL.md", ".claude/commands/x.md", "CLAUDE.md", "tests/test_agent_guard.py",
+                  "tests/test_skills.py", "tests/test_repo_hygiene.py", "docs/agent_workflow.md", "pyproject.toml",
+                  ".github/workflows/x.yml", "data/processed/x.json", "docs/research_v05_preregistration_draft.md",
+                  "configs/research_v05.toml")],
+    # kept decisions
+    *[("KEEP-01", tool, path, FROZEN_DENY, FROZEN_DENY)
+      for path in ("{s}/configs/research_v04.toml", "{s}/docs/research_v04_preregistration.md")
+      for tool in ("Write", "Edit")],
+    ("KEEP-02", "Write", "{s}/configs/research_v05.toml", EDIT_ASK, EDIT_ASK),
+    ("KEEP-02", "Write", "{s}/docs/research_v05_preregistration.md", FROZEN_DENY, FROZEN_DENY),
+    ("KEEP-02", "Write", "{s}/docs/x/../research_v05_preregistration.md", FROZEN_DENY, FROZEN_DENY),
+    ("KEEP-03", "Edit", "{s}/docs/research_v05_preregistration_draft.md", EDIT_ASK, EDIT_ASK),
+    *[("KEEP-04", tool, f"{{s}}/.claude/{rel}", EDIT_ASK, EDIT_ASK)
+      for rel in ("hooks/guard.py", "settings.json") for tool in ("Write", "Edit")],
+    *[("KEEP-05", tool, f"{{{tree}}}/.claude/{rel}", SETTINGS_DENY, SETTINGS_DENY)
+      for tree in ("u", "o") for rel in ("hooks/guard.py", "settings.json") for tool in ("Write", "Edit")],
+    ("KEEP-08", "Read", "{s}/data/processed/r/locked/test.jsonl.gz", LOCK_DENY, LOCK_DENY),
+    ("KEEP-08", "Write", "{o}/data/processed/r/locked/test.jsonl.gz", LOCK_DENY, LOCK_DENY),
+    ("KEEP-08", "Read", "{s}/.env", ENV_DENY, ENV_DENY),
+    ("KEEP-08", "Write", "{o}/.env", ENV_DENY, ENV_DENY),
+    *[("KEEP-09", tool, f"{{{tree}}}/{rel}", PASSED, PASSED)
+      for tree in ("s", "o") for rel in ("README.md", "src/moneylab/cli.py") for tool in ("Write", "Edit")],
+    *[("KEEP-16", "Write", f"{{{tree}}}/{rel}", PASSED, PASSED)
+      for tree in ("u", "p", "e", "l")
+      for rel in ("notes.txt", "configs/research_v04.toml", "docs/tasks/T-1/WORK_ORDER.md", "data/raw/x.json",
+                  "tests/test_skills.py", "CLAUDE.md")],
+    ("KEEP-22", "Read", "{s}/data/processed/__activation_probe__/locked/none.txt", LOCK_DENY, LOCK_DENY),
+    *[("KEEP-23", tool, "{s}/configs/backtest_costs.toml", PASSED, PASSED) for tool in ("Write", "Edit")],
+    ("KEEP-23", "Edit", "{o}/configs/backtest_costs.toml", PASSED, PASSED),
+    # read tools are not file-write decisions
+    *[("T1", "Read", f"{{{tree}}}/docs/tasks/T-1/WORK_ORDER.md", PASSED, PASSED) for tree in ("s", "o")],
+    # D3 patterns do not reach these, and their * does not cross a path separator
+    *[("T3", "Write", f"{{s}}/{rel}", PASSED, PASSED)
+      for rel in ("docs/research_bt4_01_evidence_review.md", "docs/research-intake/x.md",
+                  "docs/bt4_futility_diag_report.md", "docs/bt4_design_01.md", "docs/research_a/b_preregistration.md",
+                  "docs/research_a/b_preregistration_draft.md", "configs/research_a/b.toml", "configs/bt4_a/b.toml")],
+]
+
+
+@pytest.mark.parametrize("tool, path, before, after", gp_params(GP_FILE_ROWS))
+def test_gp_file_tool(gp, tool, path, before, after):
+    d = guard.decide(file_call(tool, path.format(**gp)), Path(gp["s"]))
+    observed = (d.action, d.rule)
+    assert observed == after, f"observed={observed} before={before} after={after}"
+
+
+GP_UNREADABLE_ROWS = [
+    *[("IDC-23", "Write", f"{{u}}/{rel}", PASSED, DETECT_DENY)
+      for rel in ("docs/tasks/T-1/WORK_ORDER.md", "docs/tasks/T-1/ERRATA-001.md", "docs/tasks/README.md",
+                  "configs/research_v04.toml", "docs/research_v04_preregistration.md", "configs/research_v07.toml",
+                  "configs/bt4_futility_diag.toml", "docs/research_v06_preregistration_draft.md",
+                  "docs/research_v07_preregistration.md", "tests/test_skills.py", "docs/agent_workflow.md",
+                  "CLAUDE.md", "data/raw/x.json", ".claude/skills/x/SKILL.md")],
+    *[("IDC-24", tool, f"{{u}}/{rel}", PASSED, DETECT_ASK)
+      for rel in ("notes.txt", "README.md", "src/moneylab/cli.py", "configs/backtest_costs.toml")
+      for tool in ("Write", "Edit")],
+    ("KEEP-05", "Write", "{u}/.claude/settings.json", SETTINGS_DENY, SETTINGS_DENY),
+    ("KEEP-08", "Write", "{u}/x/locked/y.txt", LOCK_DENY, LOCK_DENY),
+    ("KEEP-08", "Write", "{u}/.env", ENV_DENY, ENV_DENY),
+    ("T4", "Read", "{u}/docs/tasks/T-1/WORK_ORDER.md", PASSED, PASSED),
+    ("T4", "Write", "{b}/README.md", PASSED, PASSED),
+]
+
+
+@pytest.mark.parametrize("tool, path, before, after", gp_params(GP_UNREADABLE_ROWS))
+def test_gp_lookup_failure(gp, tool, path, before, after):
+    d = guard.decide(file_call(tool, path.format(**gp)), Path(gp["b"]))
+    observed = (d.action, d.rule)
+    assert observed == after, f"observed={observed} before={before} after={after}"
+
+
+@pytest.fixture
+def gp_junction(gp):
+    link = Path(gp["u"]) / "junction-to-other"
+    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), gp["o"]], capture_output=True)
+    if r.returncode != 0:
+        pytest.skip("mklink /J not available")
+    yield str(link)
+    os.rmdir(link)  # removes the junction only, never the target
+
+
+@pytest.mark.skipif(not sys.platform.startswith("win"), reason="junctions are a Windows feature")
+@pytest.mark.parametrize("tool, rel, before, after", gp_params([
+    ("IDC-20", "Write", "configs/research_v04.toml", PASSED, FROZEN_DENY),
+    ("IDC-21", "Edit", "docs/tasks/T-1/WORK_ORDER.md", PASSED, TC_DENY),
+], prefix="j"))
+def test_gp_junction(gp, gp_junction, tool, rel, before, after):
+    d = guard.decide(file_call(tool, f"{gp_junction}/{rel}"), Path(gp["s"]))
+    observed = (d.action, d.rule)
+    assert observed == after, f"observed={observed} before={before} after={after}"
+
+
+GP_ABS = ("C:/Repo-x/{}", "C:\\Repo-x\\{}", "C:/REPO-X/{}", "\"C:/Repo-x/{}\"")
+WO_REL, ERRATA_REL = "docs/tasks/T-1/WORK_ORDER.md", "docs/tasks/T-1/ERRATA-001.md"
+
+GP_SHELL_ROWS = [
+    # D2 contract files: IDC-06, BEFORE depends on the kind of command
+    *[("IDC-06", "Bash", cmd.format(rel), PASSED, PATH_DENY)
+      for rel in (WO_REL, ERRATA_REL, "docs/tasks/*/WORK_ORDER.md")
+      for cmd in ("rm {}", "mv {} x.md", "cp x.md {}", "sed -i s/a/b/ {}", "sed -n 1,5p {}", "echo x > {}", "echo x >> {}",
+                  "tee {}")],
+    *[("IDC-06", "Bash", f"rm {spelling.format(WO_REL)}", PASSED, PATH_DENY) for spelling in GP_ABS],
+    *[("IDC-06", "Bash", f"echo x > {spelling.format(ERRATA_REL)}", PASSED, PATH_DENY) for spelling in GP_ABS],
+    ("IDC-06", "Bash", "rm C:\\Repo-x\\DOCS\\TASKS\\T-1\\WORK_ORDER.MD", PASSED, PATH_DENY),
+    ("IDC-06", "Bash", f"rm \"C:/Repo x/{WO_REL}\"", PASSED, PATH_DENY),
+    ("IDC-06", "Bash", f"rm -rf {WO_REL}", TREE_DELETE_ASK, PATH_DENY),
+    ("IDC-06", "Bash", f"rm -rf C:/Repo-x/{ERRATA_REL}", TREE_DELETE_ASK, PATH_DENY),
+    ("IDC-06", "Bash", f"git rm {WO_REL}", HISTORY_ASK, PATH_DENY),
+    ("IDC-06", "Bash", f"git rm C:/Repo-x/{ERRATA_REL}", HISTORY_ASK, PATH_DENY),
+    ("IDC-06", "PowerShell", "Remove-Item docs\\tasks\\T-1\\WORK_ORDER.md", PASSED, PATH_DENY),
+    ("T2", "PowerShell", "Get-Content docs\\tasks\\T-1\\WORK_ORDER.md", PASSED, PASSED),
+    # D2 reading stays as it is
+    *[("T2", "Bash", cmd.format(rel), PASSED, PASSED)
+      for rel in (WO_REL, ERRATA_REL, "docs/research_v06_preregistration_draft.md", "configs/bt4_futility_diag.toml",
+                  "tests/test_skills.py", "docs/agent_workflow.md", ".claude/skills/incident/SKILL.md")
+      for cmd in ("cat {}", "grep -n x {}", "sha256sum {}", "git diff -- {}", "git show HEAD:{}", "git add -- {}")],
+    *[("T2", "Bash", f"cat {spelling.format(WO_REL)}", PASSED, PASSED) for spelling in GP_ABS],
+    *[("T2", "Bash", f"grep -n x {spelling.format(ERRATA_REL)}", PASSED, PASSED) for spelling in GP_ABS],
+    # D3 in shell commands: IDC-10
+    *[("IDC-10", "Bash", cmd.format(rel), PASSED, PATH_DENY)
+      for rel in ("docs/research_v05_preregistration_draft.md", "docs/research_v06_preregistration_draft.md",
+                  "docs/research_bt4_futility_diag_preregistration.md", "configs/bt4_futility_diag.toml",
+                  "docs/research_v07_preregistration.md", "configs/research_v07.toml", "configs/bt4_new.toml")
+      for cmd in ("rm {}", "cp x {}", "echo x > {}")],
+    *[("IDC-10", "Bash", f"mv {spelling.format('configs/bt4_futility_diag.toml')} y", PASSED, PATH_DENY)
+      for spelling in GP_ABS],
+    ("IDC-10", "Bash", "rm -rf docs/research_v06_preregistration_draft.md", TREE_DELETE_ASK, PATH_DENY),
+    ("IDC-10", "Bash", "git rm configs/bt4_futility_diag.toml", HISTORY_ASK, PATH_DENY),
+    # D6 in shell commands: IDC-13
+    *[("IDC-13", "Bash", cmd.format(rel), PASSED, PATH_DENY)
+      for rel in ("tests/test_agent_guard.py", "tests/test_skills.py", "tests/test_repo_hygiene.py",
+                  "docs/agent_workflow.md", ".claude/skills/incident/SKILL.md")
+      for cmd in ("rm {}", "cp x {}", "echo x >> {}", "sed -n 1,5p {}")],
+    *[("IDC-13", "Bash", f"rm {spelling.format('tests/test_skills.py')}", PASSED, PATH_DENY) for spelling in GP_ABS],
+    ("IDC-13", "Bash", "rm -rf .claude/skills", TREE_DELETE_ASK, PATH_DENY),
+    ("IDC-13", "Bash", "git rm tests/test_agent_guard.py", HISTORY_ASK, PATH_DENY),
+    ("IDC-13", "Bash", "git rm -r .claude/skills/incident", HISTORY_ASK, PATH_DENY),
+    # D5
+    *[("IDC-14", "Bash", cmd, COMMIT_ASK, GIT_DENY)
+      for cmd in ("git commit --amend", "git commit --amend -m x", "git commit -m x --amend", "git commit --amend --no-edit")],
+    *[("IDC-15", "Bash", cmd, PASSED, HISTORY_ASK)
+      for cmd in ("git checkout main -- src/x.py", "git checkout HEAD~1 -- a.py b.py")],
+    *[("IDC-16", "Bash", f"git worktree {verb} ../y", PASSED, HISTORY_ASK) for verb in ("remove", "move")],
+    ("IDC-16", "Bash", "git worktree prune", PASSED, HISTORY_ASK),
+    *[("IDC-17", "Bash", cmd, PASSED, HISTORY_ASK) for cmd in ("git branch -f x y", "git branch x y -f", "git branch --force x y")],
+    ("IDC-18", "Bash", "git update-ref refs/heads/x abc", PASSED, HISTORY_ASK),
+    *[("IDC-19", "Bash", cmd, PASSED, HISTORY_ASK) for cmd in ("git symbolic-ref HEAD refs/heads/x", "git symbolic-ref HEAD")],
+    # D5: message text is not a command, kept decisions
+    ("T5", "Bash", "git commit -m 'see --amend and git worktree prune'", COMMIT_ASK, COMMIT_ASK),
+    ("T5", "Bash", "git commit -F - <<'EOF'\nwhy not --amend or git update-ref x\nEOF\n", COMMIT_ASK, COMMIT_ASK),
+    *[("T5", "Bash", cmd, PASSED, PASSED) for cmd in ("git checkout main", "git checkout -b x", "git branch x", "git worktree list")],
+    # kept decisions
+    *[("KEEP-06", "Bash", cmd, PATH_DENY, PATH_DENY)
+      for cmd in ("rm .claude/settings.json", "cp x .claude/hooks/guard.py", "sed -n 1,5p .claude/hooks/guard.py",
+                  "sed -i s/x/y/ .claude/settings.json", "rm configs/research_v04.toml", "rm docs/research_v04_preregistration.md",
+                  "rm configs/research_v05.toml", "rm docs/research_v05_preregistration.md")],
+    *[("KEEP-07", "Bash", cmd, PASSED, PASSED) for cmd in ("cat .claude/hooks/guard.py", "grep -n x .claude/settings.json")],
+    *[("KEEP-10", "Bash", cmd, PASSED, PASSED)
+      for cmd in ("git add docs/x.md", "git switch -c x", "git fetch origin", "git status", "git diff", "git log -1", "git show HEAD")],
+    ("KEEP-11", "Bash", "git add -- docs/agent_workflow.md", PASSED, PASSED),
+    *[("KEEP-12", "Bash", cmd, PASSED, PASSED)
+      for cmd in ("sha256sum configs/research_v04.toml", "cat data/raw/x.json", "python -m pytest -q",
+                  "python -m pytest -q tests/test_agent_guard.py tests/test_skills.py tests/test_repo_hygiene.py")],
+    *[("KEEP-13", "Bash", cmd, HISTORY_ASK, HISTORY_ASK)
+      for cmd in ("git checkout -- src/x.py", "git restore src/x.py", "git reset HEAD~1")],
+    ("KEEP-13", "Bash", "git commit -m x", COMMIT_ASK, COMMIT_ASK),
+    ("KEEP-14", "Bash", "git update-ref -d refs/heads/x", GIT_DENY, GIT_DENY),
+    ("KEEP-15", "Bash", "git worktree add ../y -b y", PASSED, PASSED),
+    *[("KEEP-19", "Bash", cmd, PASSED, PASSED)
+      for cmd in ("rm .claude/commands/x.md", "echo x > .claude/agents/x.md", "cp x CLAUDE.md", "rm docs/tasks/README.md",
+                  "echo x > docs/tasks/TEMPLATE.md", "cp x configs/backtest_costs.toml", "rm docs/research_bt4_01_evidence_review.md")],
+    ("KEEP-19", "Bash", "rm -rf .claude/commands", TREE_DELETE_ASK, TREE_DELETE_ASK),
+    ("KEEP-20", "Bash", "echo disableAllHooks", ("deny", "hooks"), ("deny", "hooks")),
+    ("KEEP-21", "Bash", "git stash list", HISTORY_ASK, HISTORY_ASK),
+]
+
+
+@pytest.mark.parametrize("tool, cmd, before, after", gp_params(GP_SHELL_ROWS))
+def test_gp_shell(gp, tool, cmd, before, after):
+    d = guard.decide({"tool_name": tool, "tool_input": {"command": cmd}}, Path(gp["s"]))
+    observed = (d.action, d.rule)
+    assert observed == after, f"observed={observed} before={before} after={after}"
+
+
+def gp_wrapped_decision(gp, tool, path, hook_root):
+    script = Path(gp[hook_root]) / ".claude" / "hooks" / "guard.py"
+    payload = {"tool_name": tool, "tool_input": {"file_path": path.format(**gp)}, "cwd": gp[hook_root]}
+    # The hook command names the Windows venv path. Where it does not exist (Linux CI), run the same wrapper
+    # with this interpreter so the guard's decision is observed instead of the missing-interpreter exit 2.
+    python = None if (REPO / ".venv" / "Scripts" / "python.exe").exists() else Path(sys.executable).as_posix()
+    r, _ = run_wrapped(json.dumps(payload).encode(), script=script, python=python)
+    if r.returncode == 0 and not r.stdout:
+        return ("pass", "")
+    found = re.search(rb"MoneyLab guard \[([\w-]+)\]", r.stderr + r.stdout)
+    return ({0: "ask", 2: "deny"}.get(r.returncode, str(r.returncode)), found.group(1).decode() if found else "")
+
+
+@needs_bash
+@pytest.mark.parametrize("tool, path, hook_root, before, after", gp_params([
+    ("IDC-01", "Edit", "{s}/docs/tasks/T-1/WORK_ORDER.md", "s", PASSED, TC_DENY),
+    ("IDC-02", "Write", "{s}/docs/tasks/T-2/WORK_ORDER.md", "s", PASSED, TC_ASK),
+    ("IDC-03", "Edit", "{s}/docs/tasks/T-1/ERRATA-001.md", "s", PASSED, TC_DENY),
+    ("IDC-04", "Write", "{s}/docs/tasks/T-1/ERRATA-002.md", "s", PASSED, TC_ASK),
+    ("IDC-05", "Edit", "{s}/docs/tasks/README.md", "s", PASSED, TC_ASK),
+    ("IDC-07", "Edit", "{s}/configs/bt4_futility_diag.toml", "s", PASSED, PREREG_DENY),
+    ("IDC-08", "Write", "{s}/configs/research_v07.toml", "s", PASSED, PREREG_ASK),
+    ("IDC-09", "Edit", "{s}/docs/research_v06_preregistration_draft.md", "s", PASSED, PREREG_ASK),
+    ("IDC-11", "Edit", "{s}/tests/test_skills.py", "s", PASSED, EDIT_ASK),
+    ("IDC-12", "Edit", "{s}/docs/agent_workflow.md", "s", PASSED, EDIT_ASK),
+    ("IDC-20", "Edit", "{o}/configs/research_v04.toml", "s", PASSED, FROZEN_DENY),
+    ("IDC-21", "Edit", "{o}/docs/tasks/T-1/WORK_ORDER.md", "s", PASSED, TC_DENY),
+    ("IDC-22", "Edit", "{o}/CLAUDE.md", "s", PASSED, EDIT_ASK),
+    ("IDC-23", "Write", "{u}/docs/tasks/T-1/WORK_ORDER.md", "b", PASSED, DETECT_DENY),
+    ("IDC-24", "Write", "{u}/notes.txt", "b", PASSED, DETECT_ASK),
+    ("KEEP-16", "Write", "{e}/configs/research_v04.toml", "s", PASSED, PASSED),
+], prefix="w"))
+def test_gp_wrapper(gp, tool, path, hook_root, before, after):
+    observed = gp_wrapped_decision(gp, tool, path, hook_root)
+    assert observed == after, f"observed={observed} before={before} after={after}"
+
+
+@needs_bash
+def test_gp_worktree_lookup_stays_inside_the_hook_limit(gp):
+    payload = {"tool_name": "Write", "tool_input": {"file_path": f"{gp['o']}/README.md"}, "cwd": gp["s"]}
+    _, elapsed = run_wrapped(json.dumps(payload).encode(), script=Path(gp["s"]) / ".claude" / "hooks" / "guard.py")
+    assert elapsed < 5, f"took {elapsed:.1f}s against the 8 s OS timeout"
+
+
+# T7: an unexpected error in a new branch ends in a blocked call, never in a pass.
+
+
+def _gp_boom(*_args, **_kwargs):
+    raise RuntimeError("bug")
+
+
+def _gp_main_exit(path):
+    payload = {"tool_name": "Write", "tool_input": {"file_path": str(path)}}
+    return guard.main(io.StringIO(json.dumps(payload)), io.StringIO(), io.StringIO())
+
+
+@pytest.mark.parametrize("name, rel", [
+    ("TASK_CONTRACT", "docs/tasks/T-1/WORK_ORDER.md"),
+    ("PREREG_ONCE_EXISTS", "configs/bt4_futility_diag.toml"),
+    ("PREREG_DRAFT", "docs/research_v06_preregistration_draft.md"),
+])
+def test_gp_error_in_a_pattern_branch_blocks(monkeypatch, name, rel):
+    monkeypatch.setattr(guard, name, None)
+    assert _gp_main_exit(REPO / rel) == 2
+
+
+def test_gp_unexpected_error_in_the_worktree_lookup_blocks(monkeypatch, tmp_path):
+    monkeypatch.setattr(guard, "_worktree_roots", _gp_boom)
+    assert _gp_main_exit(tmp_path / "notes.txt") == 2
+
+
+def test_gp_unexpected_error_after_the_worktree_lookup_blocks(monkeypatch, tmp_path):
+    monkeypatch.setattr(guard, "_worktree_roots", lambda _root: [str(tmp_path)])
+    monkeypatch.setattr(guard, "_check_relative", _gp_boom)
+    assert _gp_main_exit(tmp_path / "notes.txt") == 2
+
+
+@pytest.mark.parametrize("failure", [
+    subprocess.TimeoutExpired("git", 5), FileNotFoundError("git"), subprocess.SubprocessError("x"),
+])
+@pytest.mark.parametrize("rel, expected", [("notes.txt", DETECT_ASK), ("docs/tasks/T-1/WORK_ORDER.md", DETECT_DENY)])
+def test_gp_git_failure_is_a_lookup_failure(monkeypatch, tmp_path, failure, rel, expected):
+    def fail(*_args, **_kwargs):
+        raise failure
+    monkeypatch.setattr(guard.subprocess, "run", fail)
+    d = guard.decide(file_call("Write", tmp_path / rel), REPO)
+    assert (d.action, d.rule) == expected
+
+
+def test_gp_empty_worktree_list_is_a_lookup_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(guard.subprocess, "run",
+                        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout=b"", stderr=b""))
+    d = guard.decide(file_call("Write", tmp_path / "notes.txt"), REPO)
+    assert (d.action, d.rule) == DETECT_ASK

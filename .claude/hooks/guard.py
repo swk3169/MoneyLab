@@ -37,9 +37,14 @@ DENY, ASK, PASS = "deny", "ask", "pass"
 FROZEN = ("configs/research_v04.toml", "docs/research_v04_preregistration.md")
 FROZEN_IF_EXISTS = ("configs/research_v05.toml", "docs/research_v05_preregistration.md")
 ASK_EDIT_FILES = ("docs/research_v05_preregistration_draft.md", "claude.md", "pyproject.toml",
-                  "requirements.txt", "requirements-dev.txt", ".gitignore", ".gitattributes")
+                  "requirements.txt", "requirements-dev.txt", ".gitignore", ".gitattributes",
+                  "tests/test_agent_guard.py", "tests/test_skills.py", "tests/test_repo_hygiene.py",
+                  "docs/agent_workflow.md")
 ASK_EDIT_PREFIXES = (".claude/", ".github/", "data/processed/")
 DENY_WRITE_PREFIXES = ("data/raw/", ".git/")
+TASK_CONTRACT = re.compile(r"docs/tasks/[^/]+/(work_order\.md|errata-[^/]*\.md)")
+PREREG_ONCE_EXISTS = re.compile(r"docs/research_[^/]*_preregistration\.md|configs/(research|bt4)_[^/]*\.toml")
+PREREG_DRAFT = re.compile(r"docs/research_[^/]*_preregistration_draft\.md")
 
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 READ_TOOLS = {"Read", "Grep"}
@@ -56,9 +61,19 @@ class Decision:
 # ----------------------------------------------------------------------------------------- paths
 
 
+def _resolved(path: str) -> str:
+    return os.path.realpath(os.path.abspath(path))
+
+
 def _real(path: str) -> str:
     """Absolute, symlink/junction-resolved, lower-case path with forward slashes."""
-    return os.path.realpath(os.path.abspath(path)).replace("\\", "/").lower()
+    return _resolved(path).replace("\\", "/").lower()
+
+
+def _exists(path: str) -> bool:
+    """True if the path exists as written or as _real() names it. POSIX fails a/missing/../b as written, and
+    a/<symlink>/../b can name another file either way, so either existing keeps the stricter decision."""
+    return os.path.exists(path) or os.path.exists(_resolved(path))
 
 
 def _relative(path: str, root: Path) -> str | None:
@@ -87,15 +102,58 @@ def check_path(tool: str, path: str, root: Path) -> Decision:
         # hooks off; the agent never changes them.
         if re.search(r"/\.claude/(settings[^/]*\.json$|hooks/)|/\.claude\.json$", full):
             return Decision(DENY, "claude-settings", "Claude Code settings outside this project are not changed")
+        return _check_other_tree(path, full, root)
+    return _check_relative(rel, path)
+
+
+def _worktree_roots(root: Path) -> list[str]:
+    """Every worktree of root's repository, as git lists them. Raises when git cannot tell."""
+    r = subprocess.run(["git", "-C", str(root), "worktree", "list", "--porcelain", "-z"],
+                       capture_output=True, timeout=5)
+    if r.returncode != 0:
+        raise OSError(f"git worktree list exited with {r.returncode}")
+    records = r.stdout.decode("utf-8", errors="replace").split("\0")
+    roots = [rec[len("worktree "):] for rec in records if rec.startswith("worktree ")]
+    if not roots:
+        raise OSError("git worktree list returned no worktree")
+    return roots
+
+
+def _check_other_tree(path: str, full: str, root: Path) -> Decision:
+    """File tools only: a path outside root gets the same decision inside a sibling worktree. Both sides
+    go through _real(), so junctions and symlinks cannot hide which worktree a path belongs to."""
+    try:
+        roots = _worktree_roots(root)
+    except (OSError, subprocess.SubprocessError):
+        parts = full.split("/")
+        if any(_check_relative("/".join(parts[i:]), path).action != PASS for i in range(len(parts))):
+            return Decision(DENY, "worktree-detect", "worktree lookup failed and the path has a protected name")
+        return Decision(ASK, "worktree-detect", "worktree lookup failed; approve this write outside the session root")
+    inside = [(rel, r) for r in roots if (rel := _relative(path, Path(r))) is not None]
+    if not inside:
         return Decision(PASS)
+    rel, _ = max(inside, key=lambda item: len(_real(item[1])))
+    return _check_relative(rel, path)
+
+
+def _check_relative(rel: str, path: str) -> Decision:
+    """Write decision for path, whose location inside its worktree is rel."""
     if rel in FROZEN:
         return Decision(DENY, "frozen", f"{rel} is a frozen preregistration file (a change is a new study)")
-    if rel in FROZEN_IF_EXISTS and os.path.exists(path):
+    if rel in FROZEN_IF_EXISTS and _exists(path):
         return Decision(DENY, "frozen", f"{rel} is frozen once it exists")
     if rel.startswith(DENY_WRITE_PREFIXES):
         return Decision(DENY, "raw-or-git", f"{rel} is immutable raw data or git internals")
     if rel in FROZEN_IF_EXISTS or rel in ASK_EDIT_FILES or rel.startswith(ASK_EDIT_PREFIXES):
         return Decision(ASK, "protected-edit", f"{rel} needs user approval to change")
+    if TASK_CONTRACT.fullmatch(rel) and _exists(path):
+        return Decision(DENY, "task-contract", f"{rel} is an immutable contract file once it exists")
+    if rel.startswith("docs/tasks/"):
+        return Decision(ASK, "task-contract", f"{rel} is a task contract path and needs user approval")
+    if PREREG_ONCE_EXISTS.fullmatch(rel) and _exists(path):
+        return Decision(DENY, "prereg-protected", f"{rel} is a preregistration file and is fixed once it exists")
+    if PREREG_ONCE_EXISTS.fullmatch(rel) or PREREG_DRAFT.fullmatch(rel):
+        return Decision(ASK, "prereg-protected", f"{rel} is a preregistration path and needs user approval")
     return Decision(PASS)
 
 
@@ -233,7 +291,10 @@ def gh_published_body(cmd: str) -> tuple[str, str] | None:
 
 
 PROTECTED = (r"(data/raw\b|/locked\b|locked/|research_v04\.toml|research_v04_preregistration"
-             r"|research_v05\.toml|research_v05_preregistration\.md|\.claude/settings|\.claude/hooks)")
+             r"|research_v05\.toml|research_v05_preregistration\.md|\.claude/settings|\.claude/hooks"
+             r"|docs/tasks/[^/\s]+/(work_order\.md|errata-[^/\s]*\.md)"
+             r"|docs/research_[^/\s]*_preregistration(_draft)?\.md|configs/(research|bt4)_[^/\s]*\.toml"
+             r"|tests/test_(agent_guard|skills|repo_hygiene)\.py|docs/agent_workflow\.md|\.claude/skills)")
 MUTATE = (r"(\b(rm|rmdir|rd|del|erase|mv|move|ren|rename|cp|copy|xcopy|robocopy|tee|touch|truncate|shred"
           r"|attrib|icacls|takeown|chmod|chown|ln|mklink|sed|perl|dd|unlink|rmtree|gunzip)\b"
           r"|\b(remove|move|rename|copy|set|clear|new)-item\b|\b(set|add|clear)-content\b|\bout-file\b"
@@ -262,6 +323,7 @@ DENY_RULES: list[tuple[str, str]] = [
     ("git", r"\bgit\s+(clean|filter-branch|filter-repo)\b|\bgit\s+reset\s+.*--hard\b|\bgit\s+reset\s+--hard\b"),
     ("git", r"\bgit\s+stash\s+(drop|clear)\b|\bgit\s+branch\s+.*--delete\s+--force\b|\bgit\s+update-ref\s+-d\b"),
     ("git", r"\bgit\s+commit\b.*(--no-verify|\s-n\b|--no-gpg-sign)"),
+    ("git", r"\bgit\s+commit\b.*\s--amend\b"),
     # trading, keys, secrets (the project is read-only; see CLAUDE.md absolute rules)
     ("trading", r"/v1/orders?\b|\b(place|create|submit|cancel)_order\b|\bupbit_(access|secret)_key\b"
                 r"|\bprivate_key\b|\bseed[_ ]?phrase\b|\bmnemonic\b"),
@@ -291,7 +353,9 @@ ASK_RULES: list[tuple[str, str]] = [
     ("git-commit", r"\bgit\s+commit\b"),
     ("git-push", r"\bgit\s+push\b"),
     ("git-history", r"\bgit\s+(merge|rebase|cherry-pick|revert|tag|am|apply|reset|restore|rm|stash)\b"
-                    r"|\bgit\s+checkout\s+(--|\.)|\bgit\s+branch\s+(-d|-m|--delete|--move)\b"),
+                    r"|\bgit\s+checkout\s+(--|\.)|\bgit\s+branch\s+(-d|-m|--delete|--move)\b"
+                    r"|\bgit\s+checkout\s+[^;&|]*\s--(\s|$)|\bgit\s+worktree\s+(remove|move|prune)\b"
+                    r"|\bgit\s+branch\s+([^;&|]*\s)?(-f|--force)\b|\bgit\s+(update-ref|symbolic-ref)\b"),
     ("git-config", r"\bgit\s+(config|remote\s+(add|set-url|remove|rm))\b"),
     ("github", r"\bgh\s+(?!(--version|auth\s+status|pr\s+(view|list|status|diff|checks)|run\s+(view|list))\b)"),
     ("deps", r"\b(pip|pip3|uv)\s+(install|uninstall)\b|-m\s+pip\s+(install|uninstall)\b"),
