@@ -61,9 +61,19 @@ class Decision:
 # ----------------------------------------------------------------------------------------- paths
 
 
+def _resolved(path: str) -> str:
+    return os.path.realpath(os.path.abspath(path))
+
+
 def _real(path: str) -> str:
     """Absolute, symlink/junction-resolved, lower-case path with forward slashes."""
-    return os.path.realpath(os.path.abspath(path)).replace("\\", "/").lower()
+    return _resolved(path).replace("\\", "/").lower()
+
+
+def _exists(path: str) -> bool:
+    """True if the path exists as written or as _real() names it. POSIX fails a/missing/../b as written, and
+    a/<symlink>/../b can name another file either way, so either existing keeps the stricter decision."""
+    return os.path.exists(path) or os.path.exists(_resolved(path))
 
 
 def _relative(path: str, root: Path) -> str | None:
@@ -130,17 +140,17 @@ def _check_relative(rel: str, path: str) -> Decision:
     """Write decision for path, whose location inside its worktree is rel."""
     if rel in FROZEN:
         return Decision(DENY, "frozen", f"{rel} is a frozen preregistration file (a change is a new study)")
-    if rel in FROZEN_IF_EXISTS and os.path.exists(path):
+    if rel in FROZEN_IF_EXISTS and _exists(path):
         return Decision(DENY, "frozen", f"{rel} is frozen once it exists")
     if rel.startswith(DENY_WRITE_PREFIXES):
         return Decision(DENY, "raw-or-git", f"{rel} is immutable raw data or git internals")
     if rel in FROZEN_IF_EXISTS or rel in ASK_EDIT_FILES or rel.startswith(ASK_EDIT_PREFIXES):
         return Decision(ASK, "protected-edit", f"{rel} needs user approval to change")
-    if TASK_CONTRACT.fullmatch(rel) and os.path.exists(path):
+    if TASK_CONTRACT.fullmatch(rel) and _exists(path):
         return Decision(DENY, "task-contract", f"{rel} is an immutable contract file once it exists")
     if rel.startswith("docs/tasks/"):
         return Decision(ASK, "task-contract", f"{rel} is a task contract path and needs user approval")
-    if PREREG_ONCE_EXISTS.fullmatch(rel) and os.path.exists(path):
+    if PREREG_ONCE_EXISTS.fullmatch(rel) and _exists(path):
         return Decision(DENY, "prereg-protected", f"{rel} is a preregistration file and is fixed once it exists")
     if PREREG_ONCE_EXISTS.fullmatch(rel) or PREREG_DRAFT.fullmatch(rel):
         return Decision(ASK, "prereg-protected", f"{rel} is a preregistration path and needs user approval")

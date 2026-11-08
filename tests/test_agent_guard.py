@@ -794,6 +794,7 @@ GP_FILE_ROWS = [
     *[("IDC-07", tool, path, PASSED, PREREG_DENY)
       for path in ("{s}/docs/research_bt4_futility_diag_preregistration.md", "{s}/configs/bt4_futility_diag.toml")
       for tool in ("Write", "Edit")],
+    ("IDC-07", "Edit", "{s}/configs/x/../bt4_futility_diag.toml", PASSED, PREREG_DENY),
     *[("IDC-08", "Write", path, PASSED, PREREG_ASK)
       for path in ("{s}/docs/research_v07_preregistration.md", "{s}/configs/research_v07.toml", "{s}/configs/bt4_new.toml",
                    "{s}/docs/research_v07_preregistration_draft.md")],
@@ -831,6 +832,7 @@ GP_FILE_ROWS = [
       for tool in ("Write", "Edit")],
     ("KEEP-02", "Write", "{s}/configs/research_v05.toml", EDIT_ASK, EDIT_ASK),
     ("KEEP-02", "Write", "{s}/docs/research_v05_preregistration.md", FROZEN_DENY, FROZEN_DENY),
+    ("KEEP-02", "Write", "{s}/docs/x/../research_v05_preregistration.md", FROZEN_DENY, FROZEN_DENY),
     ("KEEP-03", "Edit", "{s}/docs/research_v05_preregistration_draft.md", EDIT_ASK, EDIT_ASK),
     *[("KEEP-04", tool, f"{{s}}/.claude/{rel}", EDIT_ASK, EDIT_ASK)
       for rel in ("hooks/guard.py", "settings.json") for tool in ("Write", "Edit")],
@@ -1007,7 +1009,10 @@ def test_gp_shell(gp, tool, cmd, before, after):
 def gp_wrapped_decision(gp, tool, path, hook_root):
     script = Path(gp[hook_root]) / ".claude" / "hooks" / "guard.py"
     payload = {"tool_name": tool, "tool_input": {"file_path": path.format(**gp)}, "cwd": gp[hook_root]}
-    r, _ = run_wrapped(json.dumps(payload).encode(), script=script)
+    # The hook command names the Windows venv path. Where it does not exist (Linux CI), run the same wrapper
+    # with this interpreter so the guard's decision is observed instead of the missing-interpreter exit 2.
+    python = None if (REPO / ".venv" / "Scripts" / "python.exe").exists() else Path(sys.executable).as_posix()
+    r, _ = run_wrapped(json.dumps(payload).encode(), script=script, python=python)
     if r.returncode == 0 and not r.stdout:
         return ("pass", "")
     found = re.search(rb"MoneyLab guard \[([\w-]+)\]", r.stderr + r.stdout)
