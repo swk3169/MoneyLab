@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import io
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -364,10 +365,46 @@ def test_real_output_under_the_limit_is_hashed_exactly(monkeypatch):
     assert result.stdout == b"o" * 400_000 and result.stderr == b"e" * 400_000
 
 
+# On POSIX a child interpreter started without LC_ALL/LANG/LC_CTYPE coerces the C locale (PEP 538) and sets
+# LC_CTYPE in its own environment, to one of these values. That variable is added by the child at start-up,
+# not passed by the executor; nothing else may appear.
+POSIX_RUNTIME_ADDED = {"LC_CTYPE": {"C.UTF-8", "C.utf8", "UTF-8"}}
+
+
 def test_real_child_sees_only_the_allowlisted_environment(monkeypatch):
     monkeypatch.setenv("MONEYLAB_AUTO01_CANARY", "secret-looking-value")
-    code = "import os, sys, json; sys.stdout.write(json.dumps(sorted(os.environ)))"
-    result, _, _ = _run_real(code, monkeypatch)
-    names = {n.upper() for n in json.loads(result.stdout)}
-    assert "MONEYLAB_AUTO01_CANARY" not in names
-    assert names <= {n.upper() for n in policy.build_env()}
+    passed: list[dict[str, str]] = []
+    real = subprocess.Popen
+
+    def record(*args, **kwargs):  # what the executor hands to Popen, before the child can change anything
+        passed.append(dict(kwargs["env"]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(executor.subprocess, "Popen", record)
+    code = "import os, sys, json; sys.stdout.write(json.dumps(dict(os.environ)))"
+    result, _, _ = _run_real(code, monkeypatch)  # _run_real's spy wraps record
+    assert result.status == "SUCCEEDED"
+    # 1. passed by the executor: exactly the allowlist, no canary
+    (env,) = passed
+    assert env == policy.build_env()
+    assert "MONEYLAB_AUTO01_CANARY" not in {k.upper() for k in env}
+    # 2. seen by the child: the passed variables, plus on POSIX only the interpreter's own locale coercion
+    seen = json.loads(result.stdout)
+    assert "MONEYLAB_AUTO01_CANARY" not in {k.upper() for k in seen}
+    assert "secret-looking-value" not in seen.values()
+    passed_upper = {k.upper() for k in env}
+    extra = {k: v for k, v in seen.items() if k.upper() not in passed_upper}
+    if os.name == "nt":
+        assert extra == {}
+    else:
+        assert set(extra) <= set(POSIX_RUNTIME_ADDED), extra
+        for name, value in extra.items():
+            assert value in POSIX_RUNTIME_ADDED[name], (name, value)
+    for name, value in env.items():
+        assert seen.get(name) == value  # passed values arrive unchanged
+
+
+def test_posix_runtime_allowance_is_narrow():
+    """The POSIX allowance is one locale variable with fixed values: it cannot admit a leaked variable."""
+    assert POSIX_RUNTIME_ADDED == {"LC_CTYPE": {"C.UTF-8", "C.utf8", "UTF-8"}}
+    assert not set(POSIX_RUNTIME_ADDED) & {k.upper() for k in policy.build_env()}
