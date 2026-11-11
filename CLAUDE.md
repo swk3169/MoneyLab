@@ -24,6 +24,7 @@ AI 코딩 에이전트를 위한 MoneyLab 작업 지침.
 5. API 응답 구조를 추측하지 않는다. 실제 응답(`data/raw/`)을 확인한 뒤 파서를 바꾼다. 확인하지 못한 필드는 주석에 미검증이라고 표시한다.
 6. 모든 네트워크 호출은 `core/http.HttpClient`를 통해 한다 (timeout, 재시도, 진단 포함).
 7. 사용자가 요청하기 전에는 git commit이나 push를 하지 않는다.
+   - v1.3 Work Order에서 사용자가 COMMIT을 범위에 명시한 `BUNDLE_AUTHORIZATION`(docs/tasks/README.md §14)은 그 묶음 안의 git commit 1회에 대한 "사용자 요청"이다. push는 포함하지 않는다. BGA는 settings·guard 승인 창을 대신하지 않는다.
 
 ## 아키텍처 규칙
 
@@ -58,6 +59,7 @@ task별 계약은 이 파일에 넣지 않는다. 운영 방법과 템플릿은 
 - 찾는 법: task 계약은 `docs/tasks/<TASK_ID>/WORK_ORDER.md` 하나와 `docs/tasks/<TASK_ID>/ERRATA-<NNN>.md` 중 `STATUS: ACCEPTED`인 것이다. ACCEPTED ERRATA는 번호 순으로 적용하고 뒤 번호가 앞선다.
 - 우선순위: (1) 안전·시스템·도구 제약 (2) 저장소 절대 규칙(이 파일, `.claude/` guard·hook·settings, `docs/agent_workflow.md`) (3) 고정·사전등록 계약 (4) Work Order + ACCEPTED ERRATA (5) 구현 판단. 충돌하면 상위 규칙을 따르고 멈춰서 보고한다. Work Order는 (1)–(3)을 바꾸지 못한다.
 - Gate Authorization: 사용자가 대화에서 명시적으로 승인한 gate(`GATE_AUTHORIZATION: <TASK_ID> <GATE> WO@<commit>`) 하나만 수행하고, 그 gate의 보고 후 멈춘다. 이전 gate의 승인이나 Work Order 자체는 다음 gate의 승인이 아니다.
+- 예외: v1.3 Work Order에서는 `BUNDLE_AUTHORIZATION` 하나로 docs/tasks/README.md §14가 정한 연속 gate 구간을 진행할 수 있다. PUSH·PR_CI·MERGE·후퇴는 개별 승인이다. BGA는 settings·guard 승인 창을 대신하지 않는다.
 - 불변: Work Order와 ERRATA는 수정하지 않는다. 최초 생성은 WORKSPACE_SETUP의 C1 커밋(Work Order)과 ACCEPTED ERRATA 커밋에서만, 승인된 문구 그대로 하고 sha256을 보고한다. 계약 문제는 파일을 고치지 않고 `PROPOSED_ERRATA`로 채팅에 보고한다.
 - 파일 범위: `ALLOWED_FILES`는 allowlist다. `ALLOWED_FILES ∩ PROTECTED_FILES = ∅`이 아니면 Work Order는 INVALID다. `docs/tasks/<TASK_ID>/**`는 항상 PROTECTED다. 목록 밖 tracked 변경이나 PROTECTED 변경이 생기면 멈춘다. 보호 해제는 새 Work Order나 ACCEPTED ERRATA로만 한다.
 - 변경 승인 세 겹: Work Order가 정한 gate의 최대 범위, 사용자의 Gate Authorization, 도구 권한·guard 승인이 모두 있어야 변경한다. 셋 중 어느 것도 다른 것을 대신하지 않는다.

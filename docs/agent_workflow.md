@@ -45,6 +45,7 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
    `PR_CREATE: YES` 또는 `MERGE_EXECUTE: YES`를 명시한 경우에만 실행하고, 승인 창에서 다시 승인받는다. merge는
    `--merge --match-head-commit <SHA>`로만 하며 `--admin`·`--auto`·`--squash`·`--rebase`·`--delete-branch`·`--force`를 쓰지
    않는다. 조건과 사전 검증은 `docs/tasks/README.md` §13을 따른다.
+9. v1.3 `BUNDLE_AUTHORIZATION`(docs/tasks/README.md §14) 안에서도 `[B]` 명령은 gate당 1회이고 승인 창에서 다시 승인받는다. BGA는 settings·guard 승인 창을 대신하지 않는다. 묶음 안에서 재실행할 수 있는 것은 `[A]` 명령뿐이다.
 
 ## 4. Guard 규칙 목록
 

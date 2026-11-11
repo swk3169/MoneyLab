@@ -31,6 +31,8 @@ INITIAL_GATE: <보통 WORKSPACE_SETUP>
 ACCEPTED_ERRATA: NONE
 MERGE_METHOD: Create a merge commit
 REQUIRED_CI_CHECKS: <예: ci-tests / pytest (Windows)>
+BUNDLE_ELIGIBLE: <NO | YES (v1.3만, docs/tasks/README.md §14)>
+BUNDLE_MAX_RANGE: <NONE | IMPLEMENTATION..CLEAN_COMMIT_E2E의 연속 부분 구간 | POST_MERGE_AUDIT..COMPLETE>
 
 ## GATE_SEQUENCE
 
@@ -43,6 +45,7 @@ GATE_TRANSITION_RULES:
 - rollback only to IMPLEMENTATION with explicit authorization
 - after COMMIT, fixes use a new commit; never amend
 - no skipping except WORKSPACE_SETUP: NOT_REQUIRED tasks
+- v1.3이고 BUNDLE_ELIGIBLE: YES이면 docs/tasks/README.md §14의 BUNDLE_AUTHORIZATION으로 BUNDLE_MAX_RANGE 안의 연속 구간을 진행할 수 있다. PUSH·PR_CI·MERGE·후퇴는 개별 승인이다.
 
 ## ABSOLUTE_RULES
 
