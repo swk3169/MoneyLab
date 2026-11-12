@@ -368,21 +368,22 @@ def _create(root: Path, record: dict[str, Any], data: bytes, path: Path) -> dict
 
 
 def save_record(root: Path, record: dict[str, Any]) -> dict[str, Any]:
-    """D10: check ignore and the path, create the missing directories top-down, then create the record
-    without ever replacing a file. Directories this call created stay on error and are reported."""
+    """D10: check the path (boundary, then the existing store directories) before any git call, then that git
+    ignores it, create the missing directories top-down, then create the record without ever replacing a
+    file. Directories this call created stay on error and are reported."""
     data = record_bytes(record)
     if len(data) > FILE_LIMIT:
         raise WorkstateError(LIMIT_EXCEEDED, "the record is larger than the limit")
     task_id = record["task_id"]
     rel = record_rel(task_id, record["snapshot_id"])
-    code, _out = collect.run_git(root, "check-ignore", ["-q", "--no-index", "--", rel], ok_codes=(0, 1))
-    if code != 0:
-        raise WorkstateError(STORE_PATH_INVALID, "the store path is not ignored by git")
     path = Path(root) / rel
     if not _lexically_inside(root, path):
         raise WorkstateError(STORE_PATH_INVALID, "the store path is outside the root")
     parts = (*STORE_PARTS, task_id)
     first_missing = _inspect_dirs(root, task_id)
+    code, _out = collect.run_git(root, "check-ignore", ["-q", "--no-index", "--", rel], ok_codes=(0, 1))
+    if code != 0:
+        raise WorkstateError(STORE_PATH_INVALID, "the store path is not ignored by git")
     created: list[str] = []
     try:
         current = Path(root).joinpath(*parts[:first_missing])

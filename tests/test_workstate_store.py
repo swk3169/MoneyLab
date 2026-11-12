@@ -626,3 +626,66 @@ def test_collected_state_round_trips_to_a_match(repo, capsys, name):
     assert result["differences"] == []
     assert result["file_sha256"] == stored["file_sha256"] == sha(raw)
     assert result["state_sha256_stored"] == result["state_sha256_current"] == stored["state_sha256_current"]
+
+
+# ------------------------------------ ERRATA-003 D10: existing store directories are checked before git
+
+
+def _spy_store_calls(monkeypatch, repo: Path) -> list[tuple[str, str]]:
+    """Record git subcommands, lstat and mkdir calls in order. Every call goes to the real function and its
+    result (or error) is returned unchanged; nothing is replaced."""
+    events: list[tuple[str, str]] = []
+    real_run_git, real_lstat, real_mkdir = collect.run_git, collect._lstat, store._mkdir
+
+    def shown(path) -> str:
+        return Path(path).relative_to(repo).as_posix()
+
+    def run_git(root, sub, args, **kwargs):
+        events.append(("git", sub))
+        return real_run_git(root, sub, args, **kwargs)
+
+    def lstat(path):
+        events.append(("lstat", shown(path)))
+        return real_lstat(path)
+
+    def mkdir(path, *args, **kwargs):
+        events.append(("mkdir", shown(path)))
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(collect, "run_git", run_git)
+    monkeypatch.setattr(collect, "_lstat", lstat)
+    monkeypatch.setattr(store, "_mkdir", mkdir)
+    return events
+
+
+def test_existing_link_component_is_refused_before_any_git_call(repo, monkeypatch):
+    """The store path is not ignored and a store directory is link-like: the link decides, git is not run.
+    In the old order the not-ignored check would have answered first."""
+    (repo / ".gitignore").write_bytes(b"")
+    (repo / "data" / "processed" / "workstate").mkdir(parents=True)
+    record = store.build_record(TASK, collect.collect_state(repo, TASK), None)
+    real = os.path.islink
+    monkeypatch.setattr(os.path, "islink", lambda p: Path(p).name == "workstate" or real(p))
+    events = _spy_store_calls(monkeypatch, repo)
+    with pytest.raises(collect.WorkstateError) as caught:
+        store.save_record(repo, record)
+    assert caught.value.code == "STORE_PATH_INVALID"
+    assert caught.value.detail == "link or reparse point: data/processed/workstate"
+    assert [event for event in events if event[0] == "git"] == []
+    assert events == [("lstat", "data"), ("lstat", "data/processed"), ("lstat", "data/processed/workstate")]
+    assert list((repo / "data" / "processed" / "workstate").iterdir()) == []
+
+
+def test_check_ignore_runs_after_the_existing_directories_and_before_any_mkdir(repo, monkeypatch):
+    (repo / "data" / "processed").mkdir(parents=True)
+    record = store.build_record(TASK, collect.collect_state(repo, TASK), None)
+    events = _spy_store_calls(monkeypatch, repo)
+    outcome = store.save_record(repo, record)
+    assert outcome["status"] == "STORED" and outcome["warnings"] == []
+    assert events == [
+        ("lstat", "data"), ("lstat", "data/processed"), ("lstat", "data/processed/workstate"),
+        ("git", "check-ignore"),
+        ("mkdir", "data/processed/workstate"), ("lstat", "data/processed/workstate"),
+        ("mkdir", f"data/processed/workstate/{TASK}"), ("lstat", f"data/processed/workstate/{TASK}"),
+    ]
+    assert record_file(repo, record["snapshot_id"]).is_file()
