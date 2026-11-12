@@ -95,7 +95,7 @@ def atomic_write_json(path: Path, payload: Any, indent: int | None = 1) -> Path:
 
 def cleanup_tmp(directory: Path) -> list[Path]:
     """Delete leftover temp files (from an interrupted write) below `directory`."""
-    removed = []
+    removed: list[Path] = []
     directory = Path(directory)
     if not directory.exists():
         return removed
@@ -106,3 +106,47 @@ def cleanup_tmp(directory: Path) -> list[Path]:
         except OSError as exc:
             log.warning("Could not remove leftover temp file %s: %s", p, exc)
     return removed
+
+
+class CreateNewError(Exception):
+    """`atomic_create_new_bytes` failed. `cause` is the original error, `final_created` tells whether the
+    complete target file exists, and `tmp_leftover` is this call's temp file if it could not be removed."""
+
+    def __init__(self, cause: BaseException, final_created: bool, tmp_leftover: Path | None) -> None:
+        super().__init__(f"create-new failed: {type(cause).__name__}: {cause}")
+        self.cause = cause
+        self.final_created = final_created
+        self.tmp_leftover = tmp_leftover
+
+
+def atomic_create_new_bytes(path: Path, data: bytes) -> Path:
+    """Create `path` with exactly `data`, never replacing an existing file (AUTO-02 D14).
+
+    A temp file in the same directory is written and fsync'ed, then hard-linked to `path`; the link fails
+    with FileExistsError when `path` exists, so no reader sees a partial file and nothing is overwritten.
+    The parent directory is not created. Only this call's own temp file is ever removed."""
+    path = Path(path)
+    try:
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=TMP_SUFFIX)
+    except OSError as exc:
+        raise CreateNewError(exc, False, None) from exc
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.link(tmp, path)
+    except BaseException as exc:
+        leftover: Path | None = None
+        try:
+            os.unlink(tmp)
+        except OSError:
+            leftover = Path(tmp)
+        if not isinstance(exc, Exception):
+            raise
+        raise CreateNewError(exc, False, leftover) from exc
+    try:
+        os.unlink(tmp)
+    except OSError as exc:
+        raise CreateNewError(exc, True, Path(tmp)) from exc
+    return path

@@ -140,6 +140,8 @@ Claude가 실행한 테스트·E2E는 `CLAUDE_REPORTED`다. gate 보고는 채�
 요약은 기본적으로 채팅과 PR 본문에만 둔다. 파일로 남기려면 해당 task의 ACCEPTED ERRATA가 그 경로와 최초 생성을 명시해야 한다. 보고는 Work Order의 `REQUIRED_REPORT`와 승인 메시지가
 정한 key로 끝내고, `<GATE>_PASS = YES / NO`, `READY_FOR_<NEXT_GATE> = YES / NO`를 포함한다.
 
+작업 상태 스냅샷(`python -m moneylab.workstate`, AUTO-02)은 gate 보고가 아니다. ignored 경로 `data/processed/workstate/`에만 쓰는 비권위 로컬 기록이며 Git에 넣지 않는다. 승인·권한·gate PASS를 만들지 않고 종료된 BUNDLE_AUTHORIZATION을 되살리지 않는다. 일치 판정은 새 승인의 ENTRY 값을 대조하는 데에만 쓴다. 이 기록에는 위의 파일 보관 제한이 적용되지 않는다.
+
 ## 12. 사용 흐름 (예: BT-3d)
 
 1. ChatGPT와 DESIGN_INVESTIGATION, CONTRACT_REVIEW를 진행한다(Claude는 읽기만, 보고는 채팅).
