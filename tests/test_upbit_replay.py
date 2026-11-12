@@ -188,7 +188,7 @@ def test_cli_rejects_bad_upbit_options(data_dir, tmp_path, capsys):
     data["meta"]["synthetic"] = False
     not_synthetic.write_text(json.dumps(data), encoding="utf-8")
     assert main(["record", "--provider", "upbit", "--source", "fixture", "--fixture", str(not_synthetic)]) == 1
-    assert "never pose as real" in capsys.readouterr().out
+    assert "never pose as real" in " ".join(capsys.readouterr().out.split())
     assert main(["replay-check", str(tmp_path)]) == 1
 
 
