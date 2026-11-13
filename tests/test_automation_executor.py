@@ -116,7 +116,7 @@ def test_fixed_popen_call(fake):
     doc = json.loads(executor.run_action("knowledge_validate"))
     (argv, kwargs), = fake.calls
     root = policy.repo_root()
-    assert argv == [sys.executable, "-m", "moneylab.knowledge", "--root", str(root), "validate"]
+    assert argv == [sys.executable, "-B", "-m", "moneylab.knowledge", "--root", str(root), "validate"]
     assert kwargs["shell"] is False
     assert kwargs["cwd"] == str(root)
     assert kwargs["env"] == policy.build_env()
@@ -408,3 +408,90 @@ def test_posix_runtime_allowance_is_narrow():
     """The POSIX allowance is one locale variable with fixed values: it cannot admit a leaked variable."""
     assert POSIX_RUNTIME_ADDED == {"LC_CTYPE": {"C.UTF-8", "C.utf8", "UTF-8"}}
     assert not set(POSIX_RUNTIME_ADDED) & {k.upper() for k in policy.build_env()}
+
+
+# AUTO-05 D5: a real child started with the operational "-B" writes no bytecode cache, while the same child without
+# "-B" does. The probe reuses only the first two elements of the operational argv (interpreter, "-B") and runs a tiny
+# package in its own tmp directory instead of moneylab.knowledge: this is not an end-to-end check of
+# knowledge_validate, and it never reads or removes the repository's own caches.
+
+PROBE_FILES = {
+    "__init__.py": "",
+    "mod.py": "VALUE = 1\n",
+    "__main__.py": ('import sys\n'
+                    'import probe_pkg.mod\n'
+                    'sys.stdout.buffer.write(("dont_write_bytecode=" + str(bool(sys.flags.dont_write_bytecode)) + "\\n")'
+                    '.encode("ascii"))\n'),
+}
+
+
+def _write_probe(base):
+    pkg = base / "probe_pkg"
+    pkg.mkdir(parents=True)
+    for name, text in PROBE_FILES.items():
+        (pkg / name).write_bytes(text.encode("ascii"))
+    return base
+
+
+def _bytecode(base):
+    """Relative paths of every cache directory and .pyc file under base."""
+    return sorted(p.relative_to(base).as_posix() for p in base.rglob("*")
+                  if p.name == "__pycache__" or p.suffix == ".pyc")
+
+
+def _run_probes(runs, monkeypatch):
+    """Run each (argv, cwd) through the real executor._execute and the real Popen. The spies only observe: the
+    Popen spy keeps the process objects, the reader spy keeps the thread that runs each stdout/stderr reader."""
+    procs, readers = [], []
+    real_popen, real_read = subprocess.Popen, executor._read
+
+    def popen_spy(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        procs.append(proc)
+        return proc
+
+    def read_spy(stream, name, capture):
+        readers.append(threading.current_thread())
+        return real_read(stream, name, capture)
+
+    monkeypatch.setattr(executor.subprocess, "Popen", popen_spy)
+    monkeypatch.setattr(executor, "_read", read_spy)
+    out = []
+    for argv, cwd in runs:
+        first_proc, first_reader = len(procs), len(readers)
+        result = executor._execute(argv, cwd, policy.build_env(), timeout=30.0)
+        out.append((result, procs[first_proc:], readers[first_reader:]))
+    return out
+
+
+def _assert_reaped(procs, readers):
+    assert len(procs) == 1 and procs[0].poll() is not None
+    assert sorted(t.name for t in readers) == ["stderr", "stdout"]
+    assert not any(t.is_alive() for t in readers)
+
+
+def test_dash_b_child_writes_no_bytecode_while_control_does(tmp_path, monkeypatch):
+    operational = policy.build_argv(policy.repo_root())
+    assert operational[1] == "-B"
+    experiment = _write_probe(tmp_path / "experiment")
+    control = _write_probe(tmp_path / "control")
+    assert _bytecode(experiment) == [] and _bytecode(control) == []
+
+    (exp, exp_procs, exp_readers), (ctl, ctl_procs, ctl_readers) = _run_probes(
+        [(operational[:2] + ["-m", "probe_pkg"], experiment),
+         ([operational[0], "-m", "probe_pkg"], control)], monkeypatch)
+
+    _assert_reaped(exp_procs, exp_readers)
+    _assert_reaped(ctl_procs, ctl_readers)
+    assert exp_procs[0].args[:2] == operational[:2] and ctl_procs[0].args[1] == "-m"
+
+    assert (exp.status, exp.exit_code) == ("SUCCEEDED", 0)
+    assert exp.stdout == b"dont_write_bytecode=True\n"
+    assert exp.stderr == b""
+    assert _bytecode(experiment) == []
+
+    assert (ctl.status, ctl.exit_code) == ("SUCCEEDED", 0)
+    assert ctl.stdout == b"dont_write_bytecode=False\n"
+    assert ctl.stderr == b""
+    if not [p for p in _bytecode(control) if p.endswith(".pyc")]:
+        pytest.fail("control produced no bytecode: precondition not met")

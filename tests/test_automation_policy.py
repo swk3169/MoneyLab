@@ -74,9 +74,11 @@ def test_repo_root_is_this_checkout():
 def test_argv_is_fixed():
     root = policy.repo_root()
     argv = policy.build_argv(root)
-    assert argv == [sys.executable, "-m", "moneylab.knowledge", "--root", str(root), "validate"]
+    assert argv == [sys.executable, "-B", "-m", "moneylab.knowledge", "--root", str(root), "validate"]
+    assert argv[1] == "-B" and argv.index("-B") < argv.index("-m")  # AUTO-05 D1: right after the interpreter
+    assert argv.count("-B") == 1
     assert "--full-history" not in argv
-    assert os.path.isabs(argv[0]) and os.path.isabs(argv[4])
+    assert os.path.isabs(argv[0]) and os.path.isabs(argv[5])
     assert all(type(a) is str for a in argv)
 
 
