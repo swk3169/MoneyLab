@@ -142,6 +142,8 @@ Claude가 실행한 테스트·E2E는 `CLAUDE_REPORTED`다. gate 보고는 채�
 
 작업 상태 스냅샷(`python -m moneylab.workstate`, AUTO-02)은 gate 보고가 아니다. ignored 경로 `data/processed/workstate/`에만 쓰는 비권위 로컬 기록이며 Git에 넣지 않는다. 승인·권한·gate PASS를 만들지 않고 종료된 BUNDLE_AUTHORIZATION을 되살리지 않는다. 일치 판정은 새 승인의 ENTRY 값을 대조하는 데에만 쓴다. 이 기록에는 위의 파일 보관 제한이 적용되지 않는다.
 
+실행 증거 기록(python -m moneylab.runlog, AUTO-03)은 gate 보고가 아니다. ignored 경로 data/processed/runlog/에 보관하는 외부 제공 evidence의 비권위 로컬 기록이다. 형식·내부 일관성·파일 해시 검사는 실제 실행, 작성자 진위, 승인, gate PASS, 자동 재개 권한을 증명하지 않는다. NOT_FOUND는 기록 부재이며 미실행을 뜻하지 않는다. 이 기록에는 위의 gate 보고 파일 보관 제한이 적용되지 않는다.
+
 ## 12. 사용 흐름 (예: BT-3d)
 
 1. ChatGPT와 DESIGN_INVESTIGATION, CONTRACT_REVIEW를 진행한다(Claude는 읽기만, 보고는 채팅).
