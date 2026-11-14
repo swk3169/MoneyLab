@@ -69,8 +69,13 @@ def interpreter() -> str:
 
 
 def build_argv(root: Path) -> list[str]:
-    """D2: the one fixed command. No --full-history."""
-    return [interpreter(), "-m", "moneylab.knowledge", "--root", str(root), "validate"]
+    """D2: the one fixed command. No --full-history.
+
+    AUTO-05 D1 replaces the AUTO-01 D2 argv only by inserting "-B" right after the interpreter (accepted by the user
+    in the AUTO-05 contract review; nothing else in AUTO-01 changes). "-B" stops this child interpreter from writing
+    bytecode caches automatically. It does not stop it from reading existing caches, it is not passed on to
+    grandchild interpreters, and it is not a file-write sandbox."""
+    return [interpreter(), "-B", "-m", "moneylab.knowledge", "--root", str(root), "validate"]
 
 
 def git_directory() -> str:
