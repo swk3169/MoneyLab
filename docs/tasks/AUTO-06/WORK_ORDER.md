@@ -1,0 +1,999 @@
+# Work Order: AUTO-06 — AUTO-05 이후 오프라인 통합 사례와 실행 전후 파일 목록 비교
+
+이 파일은 불변이다. 발행(C1) 후 수정하지 않는다. 계약 변경은 docs/tasks/AUTO-06/ERRATA-<NNN>.md(ACCEPTED)로만 한다.
+
+## Metadata
+
+WORK_ORDER_SCHEMA: moneylab.work_order/1
+WORK_ORDER_CONTRACT_VERSION: v1.3
+WORK_ORDER_ID: AUTO-06
+TASK_ID: AUTO-06
+TITLE: AUTO-05 이후 코드의 사람 승인 오프라인 통합 사례 1건과 실행 전후 파일 목록 비교
+VERSION: 1.0
+STATUS: ISSUED
+CANONICAL_BASE_SHA: 591689ac845a98aad788923c6c87c7df7f74bb6c
+CANONICAL_BASE_TREE: a5984d1e6e18f476e89d513638b9c2be931aa874
+SOURCE_WORKTREE: <SOURCE_WORKTREE> (fetch와 worktree 생성 명령의 실행 위치. 기존 파일·브랜치 내용·index·환경은 변경하지 않는다)
+TARGET_BRANCH: codex/auto-06-offline-integration
+TARGET_WORKTREE: <TARGET_WORKTREE> (생성 전 부재해야 하는 새 worktree 경로)
+BASE_PYTHON: <BASE_PYTHON> (Python 3.14.8 실행 파일)
+VENV_PYTHON: TARGET_WORKTREE 기준 ./.venv/Scripts/python.exe
+WORKSPACE_SETUP: REQUIRED (SUBPHASE: MAIN_REF_FETCH_ONLY -> WORKTREE_CREATION_ONLY -> C1_CREATION_ONLY -> ERRATA_CREATION_ONLY -> ENVIRONMENT_PREPARATION_ONLY)
+INITIAL_GATE: WORKSPACE_SETUP / MAIN_REF_FETCH_ONLY
+ACCEPTED_ERRATA: NONE
+MERGE_METHOD: Create a merge commit
+REQUIRED_CI_CHECKS: ci-tests job pytest, Windows runner, exact PR head SUCCESS
+BUNDLE_ELIGIBLE: NO
+BUNDLE_MAX_RANGE: NONE
+FILE_FORMAT: UTF-8, BOM 없음, LF, 끝 LF 1개, 일반 공백만 사용(U+00A0·탭·줄 끝 공백 금지)
+
+## PATH_VARIABLES
+
+- SOURCE_WORKTREE, TARGET_WORKTREE, BASE_PYTHON은 이 계약의 식별 변수다. 실제 절대 경로와 그 값을 끼운 명령 원문은 각 변수를 처음 쓰는 단계의 승인문에서 고정한다. SOURCE_WORKTREE는 MAIN_REF_FETCH_ONLY, TARGET_WORKTREE는 WORKTREE_CREATION_ONLY, BASE_PYTHON은 ENVIRONMENT_PREPARATION_ONLY에서 고정하고 이후 단계는 같은 값을 쓴다.
+- 승인문에 값이 없거나 값이 기대 상태(HEAD, tree, 부재, 버전)와 다르면 중단한다. 다른 실행 파일이나 작업공간으로 대체하지 않는다.
+- 로컬 도구 입력과 채팅 보고에는 실행에 필요한 절대 경로를 쓸 수 있다. 공개 기록(Work Order, ERRATA, 사례 기록, 커밋 메시지, PR 본문)과 P 출력에는 절대 경로, 사용자 이름, 세션 식별값을 넣지 않는다.
+
+## GATE_SEQUENCE
+
+DESIGN_INVESTIGATION -> CONTRACT_REVIEW -> WORKSPACE_SETUP -> IMPLEMENTATION -> PRECOMMIT_AUDIT -> COMMIT -> CLEAN_COMMIT_E2E -> PUSH -> PR_CI -> MERGE -> POST_MERGE_AUDIT -> COMPLETE
+
+## GATE_TRANSITION_RULES
+
+- C1 이전의 CONTRACT_REVIEW PASS는 후보 문안에 대한 검토 판정이며 계약 발행이 아니다. 이 Work Order는 C1 커밋에 포함된 바이트로만 발행된다.
+- 각 gate와 하위 단계는 사용자의 명시적 승인 범위에서만 수행한다. 하나의 승인으로 둘 이상의 하위 단계를 진행하지 않는다.
+- C1 이전 승인은 TASK_ID, SUBPHASE, EXPECTED_HEAD, EXPECTED_TREE, 후보 해시로 식별한다. C1 이후에는 GATE_AUTHORIZATION: AUTO-06 <GATE> WO@<C1 SHA>를 쓰고, Ce 이후에는 ERRATA: ERRATA-001@<Ce SHA>를 함께 적는다.
+- WORKSPACE_SETUP 하위 단계는 MAIN_REF_FETCH_ONLY, WORKTREE_CREATION_ONLY, C1_CREATION_ONLY, ERRATA_CREATION_ONLY, ENVIRONMENT_PREPARATION_ONLY 순서다.
+- IMPLEMENTATION 하위 단계는 PROGRAM_REVIEW, EXECUTION_ONLY, EXECUTION_CLOSEOUT(D11의 경우에만), CASE_RECORD_DRAFT, CASE_RECORD_WRITE 순서다.
+- EXECUTION_CLOSEOUT과 중단 후 문서화 전이는 별도 승인으로만 한다. 전이 승인문에는 EXECUTION_OUTCOME: <P 종료 코드, 출력 수락 여부, 첫 실패 단계>를 적는다.
+- BUNDLE_ELIGIBLE: NO. PUSH, PR_CI, MERGE, POST_MERGE_AUDIT, COMPLETE, 후퇴는 각각 개별 승인이다.
+- 종료된 승인은 자동으로 복원하지 않는다. COMMIT 후 수정은 새 커밋으로 한다. amend는 금지한다.
+
+## ABSOLUTE_RULES
+
+CLAUDE.md, .claude의 guard·hook·settings, docs/agent_workflow.md, docs/tasks/README.md, 고정·사전등록 계약을 따른다. 이 Work Order는 이들을 변경하거나 덮어쓰지 않는다.
+
+## GOAL
+
+사람의 단계별 승인 아래, CANONICAL_BASE_SHA의 코드에서 등록된 오프라인 action knowledge_validate를 1회 실행한다. 반환 evidence는 변경 없이 runlog 공개 API로 저장하고 조회한다. 실행 전후 workstate 대조와 파일 목록 비교로 연결과 산출물 범위를 확인하고, 그 과정을 사례 1건으로 남긴다. 결과는 비권위 기록이며 실행 사실, 출처, 승인, gate PASS, 무인 운영 준비, 중복 실행 방지, 수익성, 비용 절감을 증명하지 않는다. 문서화 task의 완료와 통합 사례의 성공은 별개로 판정한다.
+
+## BACKGROUND
+
+- AUTO-04 오프라인 통합 사례는 계약 산출물 범위 밖의 ignored 바이트코드 캐시가 관측되어 통합 시험 FAIL로 확정되었다. 근거는 AUTO-04 ERRATA-002다. 이 판정은 바뀌지 않는다.
+- 이 task는 AUTO-04의 기록과 산출물을 조회하거나 변경하지 않는다.
+- AUTO-05는 PR #51로 병합되었고 merge commit은 591689ac845a98aad788923c6c87c7df7f74bb6c다. AUTO-05는 executor 자식 Python argv에 -B를 추가했다.
+- 이 task는 새 작업공간과 새 task ID로 AUTO-04와 분리된 새 사례를 만든다.
+
+## NON_GOALS
+
+- 코드·테스트·README·Guard·settings·CI·.gitignore 변경, 새 명령·실행기
+- executor의 build_env를 포함한 기존 실행 설정의 변경
+- 시도 기록과 중복 실행 통제 기능, 자동 재실행·재저장·재개, scheduler, queue, 무인 실행
+- 네트워크 action, 실거래, 주문, 지갑, 자금
+- runlog CLI store·show와 그 D18 경로의 검증
+- AUTO-04 판정 변경, AUTO-04 산출물과 다른 worktree의 조회
+- OpenClaw 호출
+
+## ALLOWED_ACTIONS
+
+- MAIN_REF_FETCH_ONLY: git -C <SOURCE_WORKTREE> fetch origin refs/heads/main:refs/remotes/origin/main을 1회 실행한다. 이어서 읽기로 다음을 확인한다.
+  - refs/remotes/origin/main이 CANONICAL_BASE_SHA다.
+  - 그 tree가 CANONICAL_BASE_TREE다.
+  - SOURCE_WORKTREE의 HEAD tree가 CANONICAL_BASE_TREE와 같다.
+  - 하나라도 다르면 중단한다.
+- WORKTREE_CREATION_ONLY: TARGET_BRANCH와 TARGET_WORKTREE가 없는지 확인한 뒤 git -C <SOURCE_WORKTREE> worktree add -b codex/auto-06-offline-integration <TARGET_WORKTREE> 591689ac845a98aad788923c6c87c7df7f74bb6c를 1회 실행한다. 생성에 필요한 Git 관리정보 변경만 허용한다.
+- C1_CREATION_ONLY:
+  - 작성 전에 승인 바이트의 sha256을 메모리에서 승인값과 대조한다.
+  - docs/tasks/AUTO-06/WORK_ORDER.md를 TARGET_WORKTREE에서 Write 도구로 최초 1회 생성하고, 그 경로만 stage해 C1 커밋 1개를 만든다. 메시지는 docs(task): add AUTO-06 work order다.
+  - 작성 후, staged, commit blob의 내용 해시를 승인값과 대조한다.
+- ERRATA_CREATION_ONLY: C1_CREATION_ONLY와 같은 절차로 수락된 승인 바이트의 docs/tasks/AUTO-06/ERRATA-001.md를 최초 1회 생성하고 Ce 커밋 1개를 만든다. 메시지는 docs(task): add AUTO-06 ERRATA-001이다. Ce의 parent는 C1이다.
+- ENVIRONMENT_PREPARATION_ONLY: TARGET_WORKTREE에서 다음을 각각 1회 실행한다.
+  - <BASE_PYTHON> -B -m venv .venv
+  - ./.venv/Scripts/python.exe -B -m pip install -r requirements.txt
+  - ./.venv/Scripts/python.exe -B -m pip install -e . --no-deps
+  - ./.venv/Scripts/python.exe -B -m pip check
+  - 기존 패키지 출처에서 고정 의존성과 선언된 빌드 의존성을 내려받는 것만 허용한다. pip 업그레이드, 별도 출처, requirements-dev.txt 설치는 허용하지 않는다.
+  - D3의 확인 항목을 확인한다. 생성된 ignored 산출물은 디렉터리 단위로 보고하며 정리하지 않는다.
+- IMPLEMENTATION / PROGRAM_REVIEW:
+  - D4–D11을 따르는 P 후보 전문과 그 sha256을 채팅으로 제시하고 검토한다.
+  - D3이 허용한 사전 검토(원문 바이트·구문 검사, 읽기 전용 자료 검토)만 할 수 있다.
+  - P 실행과 파일 작성은 하지 않는다.
+- IMPLEMENTATION / EXECUTION_ONLY:
+  - PROGRAM_REVIEW에서 수락된 P 원문을 승인문에 전문으로 포함한다.
+  - 실행 직전에 D3의 사전 검토 방식으로, 실행할 원문의 sha256을 수락된 값과 대조한다.
+  - 일치하면 D4에 따라 P를 1회 실행한다.
+- IMPLEMENTATION / EXECUTION_CLOSEOUT: D11의 경우에만, D11이 허용한 읽기 전용 확인을 명령 원문별로 승인받아 수행한다.
+- IMPLEMENTATION / CASE_RECORD_DRAFT: 사례 기록 후보를 채팅으로만 작성한다.
+- IMPLEMENTATION / CASE_RECORD_WRITE: ACCEPTED ERRATA가 허용한 파일만 작성한다. ACCEPTED ERRATA가 없으면 할 수 없다.
+- PRECOMMIT_AUDIT: 읽기 전용 감사와 W·S 확정만 한다.
+- COMMIT: ALLOWED_FILES만 경로를 지정해 stage하고 구현 커밋 I 1개를 만든다. I의 parent는 Ce다.
+- CLEAN_COMMIT_E2E: D15의 문서 검사만 한다. 파일을 쓰지 않는다.
+- PUSH: git push -u origin codex/auto-06-offline-integration 1회.
+- PR_CI:
+  - README §13의 PR_CREATE: YES와 필수 값이 있을 때 PR을 1회 생성한다.
+  - 이후 자동 실행된 CI를 관측하고 D16을 기록한다.
+  - 수동 실행과 재실행은 하지 않는다.
+- MERGE: README §13의 사전 조건과 MERGE_EXECUTE: YES 승인 뒤, 정확한 head로 merge commit 방식 1회.
+- POST_MERGE_AUDIT: 읽기 전용 감사다. 그 gate 승인문이 정한 GitHub API 조회와 git ls-remote 같은 원격 읽기 조회를 허용한다. fetch는 별도 승인이 있을 때만 한다.
+- COMPLETE: 채팅 최종 보고만 한다.
+- 승인문에 없는 trailer는 넣지 않는다.
+
+## ALLOWED_FILES
+
+ALLOWED_FILES: NONE. 사례 기록 파일은 ACCEPTED ERRATA가 경로와 최초 생성을 명시한 경우에만 추가된다(README §11).
+
+## PROTECTED_FILES
+
+- ALLOWED_FILES 밖의 모든 저장소 파일은 보호 대상이다. docs/tasks/AUTO-06/**와 .claude/**를 포함한다.
+- 보호 대상의 예외는 계약 파일 두 개의 최초 생성뿐이다.
+  - docs/tasks/AUTO-06/WORK_ORDER.md는 C1_CREATION_ONLY에서 1회 생성한다.
+  - docs/tasks/AUTO-06/ERRATA-001.md는 ERRATA_CREATION_ONLY에서 1회 생성한다.
+  - 두 파일은 생성 후 변경하지 않는다. 이 예외는 ALLOWED_FILES에 속하지 않는다.
+- INVARIANT: ALLOWED_FILES ∩ PROTECTED_FILES = ∅
+
+## COMMIT_PLAN
+
+- C1: parent = CANONICAL_BASE_SHA, 변경 = A docs/tasks/AUTO-06/WORK_ORDER.md 하나
+- Ce: parent = C1, 변경 = A docs/tasks/AUTO-06/ERRATA-001.md 하나
+- I: parent = Ce, 변경 = ACCEPTED ERRATA가 허용한 사례 기록 파일 1개
+- base..I: 위 3개 파일뿐
+
+## FORBIDDEN_ACTIONS
+
+- 승인 범위 밖 작업, 보호 파일 변경, 기존 코드·테스트·README·Guard·settings·CI 변경
+- git add . 또는 git add -A, amend, --no-verify, force push, reset, restore, stash, clean, rebase, cherry-pick, fetch --all, fetch --prune
+- 다른 branch·worktree, 기존 untracked·ignored·reference 파일의 변경이나 정리
+- SOURCE_WORKTREE의 파일·브랜치·index·환경 변경
+- AUTO-04 산출물과 다른 worktree의 조회
+- P를 1회 넘어 실행하는 것, run_action·store_evidence·load_evidence를 D5가 정한 횟수를 넘어 호출하는 것, 자동 재실행·재저장·재조회
+- P 안에서 executor·workstate·runlog의 비공개 함수를 호출하는 것
+- evidence·snapshot·runlog 원문, warnings 원문, error.detail, 예외 원문, traceback을 P 출력·채팅 보고·공개 기록에 포함하는 것
+- 공개 기록과 P 출력에 절대 경로, 사용자 이름, 세션 식별값, 인증정보를 넣는 것
+- 모델이 다시 작성하거나 복원한 evidence를 원본으로 쓰는 것
+- 파일로 된 임시 스크립트, scratchpad 파일, 출력 리디렉션으로 파일 생성
+- 보호 경로 이름과 수정 명령 단어를 한 셸 명령에 결합하는 것
+- 보호 경로를 숨기거나 조각내거나 인코딩해 Guard 판정을 피하는 것
+- Guard DENY나 권한 거절 뒤 재시도, 변형, 우회
+- 네트워크 사용. 다음 다섯 가지만 예외이며, 각 예외는 해당 단계의 승인 범위 안에서만 허용한다.
+  - MAIN_REF_FETCH_ONLY에서 ALLOWED_ACTIONS가 정한 fetch 1회와 그 결과의 읽기 확인
+  - ENVIRONMENT_PREPARATION_ONLY에서 기존 패키지 출처로부터 고정 의존성과 선언된 빌드 의존성을 내려받는 승인된 설치
+  - PUSH, PR_CI, MERGE에서 ALLOWED_ACTIONS가 정한 명령, 그리고 그 gate 승인문이 정한 읽기 전용 원격 조회(git ls-remote, GitHub API 조회, PR·CI 상태 조회)
+  - POST_MERGE_AUDIT에서 그 gate 승인문이 정한 읽기 전용 원격 조회(git ls-remote, GitHub API 조회)
+  - 사용자가 별도로 승인한 fetch
+- OpenClaw 호출
+- 한국어와 필요한 영어 외 언어 사용
+
+## DESIGN_CONTRACT
+
+- D1 지위:
+  - workstate·runlog 기록, P 출력, 사례 기록은 비권위 데이터다.
+  - MATCH는 현재 상태의 일치만 뜻한다.
+  - 기록이 없다는 이유로 미실행이라고 판단하지 않는다.
+- D2 작업공간:
+  - 실행과 문서 작성은 TARGET_WORKTREE에서만 한다.
+  - 실행 진입 HEAD는 Ce다.
+  - 저장에 쓰는 task ID는 AUTO-06이다.
+- D3 환경과 사전 검토:
+  - 환경 확인 항목은 다음과 같다.
+    - Python 3.14.8
+    - sys.prefix가 TARGET_WORKTREE의 .venv
+    - moneylab.__file__이 TARGET_WORKTREE의 src 아래
+    - requirements.txt의 고정 버전 12개 일치
+    - pip check 통과
+  - 확인용 Python 실행은 -B로 한다.
+  - ENVIRONMENT_PREPARATION_ONLY 직후 TARGET_WORKTREE의 ignored 항목은 .venv/와 src/moneylab.egg-info/뿐이어야 한다. .venv 밖에 __pycache__가 있으면 중단한다.
+  - 환경 준비 뒤 P 실행 전까지 TARGET_WORKTREE에 대해 허용되는 것은 다음 사전 검토뿐이다.
+    - 읽기 전용 Git 조회
+    - BASE_PYTHON을 -I -B로 실행하는 원문 검사. 대상은 채팅으로 받은 P 후보 또는 실행할 원문의 바이트다. sha256, 바이트 수, 줄 수, 문자 형식, 구문 해석을 메모리에서만 계산한다. 파일을 쓰지 않고, moneylab을 import하지 않으며, 원문을 실행하지 않는다.
+    - 저장소 파일과 Git 객체의 읽기 전용 검토
+  - 사전 검토는 P 실행이 아니다. P가 실행하는 단계는 D5의 단계뿐이다.
+- D4 P 실행 방식:
+  - 실행 명령: TARGET_WORKTREE에서 ./.venv/Scripts/python.exe -B - 에 P 원문을 stdin heredoc으로 전달한다. 셸 명령은 이것 하나이며, 뒤에 echo 등 다른 명령을 붙이지 않는다.
+  - 관측:
+    - Bash 도구의 백그라운드 실행을 쓰고, 완료 알림까지 같은 프로세스를 관측한다.
+    - 도구의 대기 반환은 프로세스 종료가 아니다. 같은 프로세스를 계속 관측하는 것은 재실행이 아니다.
+    - P 전체에 대한 외부 강제 종료 타이머는 두지 않는다.
+  - 공개 API 범위:
+    - P는 표준 라이브러리와 moneylab 공개 API만 import해 호출한다. 공개 API는 moneylab.automation.run_action, moneylab.runlog.store_evidence, moneylab.runlog.load_evidence다.
+    - workstate는 D6의 공개 CLI로만 호출한다.
+    - executor·workstate·runlog의 비공개 함수와 모듈 내부 함수는 호출하지 않는다.
+  - 상수:
+    - P의 상수는 다음과 같다.
+      - CANONICAL_BASE_SHA, C1 SHA, Ce SHA와 tree, TARGET_BRANCH
+      - 계약 두 파일의 상대 경로: docs/tasks/AUTO-06/WORK_ORDER.md, docs/tasks/AUTO-06/ERRATA-001.md
+      - 각 계약 파일의 W·S 내용 sha256
+      - D6·D8의 상한
+    - 상수는 PROGRAM_REVIEW에서 수락된 원문에 있는 값이다. 실행 중 외부 입력을 받지 않는다.
+    - 비교에 쓰는 경로는 승인된 명시적 입력값으로 취급한다. 보호 경로를 숨기거나 조각내거나 인코딩하지 않는다. 허용된 전달 방식이 Guard나 권한 창에서 차단되면 중단한다.
+    - 절대 경로는 P가 실행 시점의 cwd와 sys.prefix에서 얻으며, 출력하지 않는다.
+  - 출력과 출력 실패:
+    - P는 보고를 메모리에 모았다가 끝에서 한 번만 표준 출력에 쓴다.
+    - 쓰기 반환값이 요청 길이와 다르거나, 쓰기 또는 flush가 실패하면 출력 실패다. 다시 쓰지 않는다.
+    - 출력 실패 뒤에는 자동 진단이나 재실행을 하지 않는다. 그 실행의 결과는 D10에 따라 출력 미수락이다.
+    - KeyboardInterrupt와 프로세스 소실도 같은 방식으로 처리한다.
+- D5 P 단계:
+  - 공통 진행 원칙:
+    - 단계 순서는 S0, B0, E1, E1C, E2, E3R, E3S, E4, E5, E6, B1, CMP, REPORT다.
+    - 각 기능 단계(E1, E1C, E2, E3R, E3S, E4, E5)는 앞 단계가 PASS일 때만 실행한다.
+    - 어느 단계가 FAIL 또는 UNKNOWN이 되면 이후 기능 단계는 실행하지 않고 NOT_RUN으로 둔다. E6, B1, CMP의 수행과 최초 실패값은 D11을 따른다.
+    - 어떤 단계도 재시도하지 않는다.
+  - 호출 제한:
+    - run_action, store_evidence, load_evidence는 각각 최대 1회 호출한다.
+    - workstate CLI는 E1, E2, E4에서 각 1회 실행한다.
+    - 직접 Git은 S0과 E6에서 정한 명령만 각 1회 실행한다.
+  - 작업 API의 내부 동작은 그 호출의 일부로 허용된다. 등록 action의 자식 실행, 읽기 전용 git 조회, ignored 저장 경로의 디렉터리와 기록 생성이 여기에 해당한다.
+  - S0 진입 확인: 다음을 모두 만족하면 PASS다.
+    - 직접 Git(D6)으로 확인: HEAD = Ce SHA, HEAD tree = Ce tree, 현재 branch = TARGET_BRANCH
+    - git status --porcelain=v1 -z --untracked-files=all 출력이 0바이트
+    - 계약 두 파일의 작업 파일 바이트 sha256 = 승인 W
+    - git cat-file blob <Ce SHA>:<경로> 바이트 sha256 = 승인 S
+    - data/processed가 링크가 아닌 일반 디렉터리
+    - data/processed/workstate/AUTO-06과 data/processed/runlog/AUTO-06이 없음
+    - sys.flags.dont_write_bytecode가 참
+    - sys.prefix와 moneylab 위치가 D3과 같음
+    - 확인된 불일치는 FAIL이며 FIRST_FAIL_CODE는 PRECONDITION이다. 직접 Git의 실패, 회수 실패, 예외는 UNKNOWN이며 코드는 D6과 W0의 회수·출력 실패 코드를 따른다.
+  - B0: D8의 기준 목록을 메모리에 만든다. D8의 목록 실패는 B0 UNKNOWN이며, 코드는 D8이 정한 실패 코드다.
+  - W0 workstate CLI 결과의 공통 처리 (E1, E2, E4에 적용한다):
+    - 회수와 출력 실패: 다음 경우 그 단계는 UNKNOWN이다. 원본 필드는 NONE으로 둔다.
+      - 자식 timeout: FIRST_FAIL_CODE=TIMEOUT
+      - stdout 또는 stderr 상한 초과: OUTPUT_LIMIT
+      - kill 뒤 wait 또는 reader join 실패: REAP_FAILED
+      - P 쪽의 다른 예외: EXCEPTION
+    - 출력 미수락: D6의 workstate CLI 출력 수락 조건을 하나라도 어기면 그 단계는 UNKNOWN이고 FIRST_FAIL_CODE=CLI_REJECTED이다. 원본 필드는 NONE이다.
+    - 결과 객체 형식: 수락된 출력은 다음 검사를 모두 통과해야 한다. 통과하지 못하면 그 단계는 UNKNOWN이고 FIRST_FAIL_CODE=CLI_REJECTED이다.
+      - 키 집합이 정확히 다음 18개다: schema, command, status, exit_code, task_id, snapshot_id, file_sha256, final_file_created, state_sha256_stored, state_sha256_current, reported, reported_status, differences, warnings, error, authority, compared, not_compared.
+      - command는 E1에서 snapshot, E2와 E4에서 verify다.
+      - task_id는 AUTO-06이다.
+      - status는 문자열이며 정규식 [A-Z][A-Z_]{0,39}에 전체가 일치한다.
+      - exit_code는 type이 정확히 int이고 0, 1, 2 중 하나다. bool은 수락하지 않는다.
+      - warnings와 differences는 list다.
+      - error는 None이거나, 키가 정확히 code와 detail이고 두 값이 str인 dict다.
+      - error가 dict이면 status가 error의 code와 같고 exit_code는 2다.
+    - 형식 검사를 통과한 원본 필드는 대응하는 D9 출력 키가 있을 때만 기록한다. error의 detail과 warnings 문자열은 출력하지 않고 개수만 기록한다.
+  - E1 snapshot: workstate CLI snapshot --task-id AUTO-06을 1회 실행한다. W0을 통과한 결과에 다음 매핑을 적용한다.
+    - PASS: 다음을 모두 만족한다.
+      - status STORED, exit_code 0, warnings 빈 list, error None
+      - final_file_created가 정확히 True, reported None
+      - snapshot_id와 file_sha256이 소문자 hex 64자
+      - state_sha256_stored가 None
+      - state_sha256_current가 소문자 hex 64자
+      - STATE_SHA256에는 검증한 state_sha256_current를 기록한다.
+    - status STORED이고 warnings가 비어 있지 않으면(exit_code 1) STAGE_E1=FAIL, FIRST_FAIL_CODE=CLI_STATUS다.
+    - status ALREADY_STORED이면 STAGE_E1=UNKNOWN, FIRST_FAIL_CODE=CLI_STATUS다. S0에서 저장 경로가 없음을 확인했으므로, 기존 기록과 이번 실행의 연결은 불명이다.
+    - error가 dict인 정의된 오류이면 STAGE_E1=FAIL, FIRST_FAIL_CODE=CLI_STATUS다.
+    - 그 밖의 조합이면 STAGE_E1=UNKNOWN, FIRST_FAIL_CODE=CLI_STATUS다.
+    - E1이 PASS가 아니어도, status STORED, final_file_created가 정확히 True, snapshot_id와 file_sha256이 hex인 관측은 보존해 D8의 산출물 판정에 쓴다.
+  - E1C snapshot 직접 읽기: D7의 검증을 수행한다.
+    - PASS: D7의 모든 대조가 일치한다.
+    - 다음은 STAGE_E1C=UNKNOWN이다.
+      - 링크·junction·reparse point를 발견했거나 판별할 수 없음: FIRST_FAIL_CODE=LINK_FOUND
+      - 읽기 실패: READ_FAILED
+      - 읽는 중 변경: CHANGED_WHILE_READ
+      - 크기 상한 초과: LIST_LIMIT
+      - 예외: EXCEPTION
+    - 다음은 STAGE_E1C=FAIL이다.
+      - 원바이트 sha256과 E1 file_sha256의 대조, schema·task_id·snapshot_id 대조, state_sha256 재계산 대조 중 하나라도 다름: FIRST_FAIL_CODE=STATE_MISMATCH
+      - 계약 항목의 경로 집합 또는 해시가 승인값과 다름: FIRST_FAIL_CODE=CONTRACT_MISMATCH
+  - E2 verify: workstate CLI verify --task-id AUTO-06 --snapshot-id <SNAPSHOT_ID>를 1회 실행한다. W0을 통과한 결과에 다음 매핑을 적용한다.
+    - PASS: 다음을 모두 만족한다.
+      - status MATCH, exit_code 0
+      - differences와 warnings가 빈 list, error None
+      - snapshot_id와 file_sha256이 E1 값과 같음
+      - state_sha256_stored와 state_sha256_current가 모두 E1의 STATE_SHA256과 같음
+    - status MISMATCH이고 exit_code 1이면 STAGE_E2=FAIL, FIRST_FAIL_CODE=STATE_MISMATCH다. 이 경우는 상태 비교가 성립한 확인된 불일치다.
+    - error가 dict인 정의된 오류이면 STAGE_E2=FAIL, FIRST_FAIL_CODE=CLI_STATUS다. 이 경우 상태 비교는 성립하지 않았다.
+    - status MATCH인데 PASS 조건의 대조값이 다르거나, 그 밖의 조합이면 STAGE_E2=UNKNOWN, FIRST_FAIL_CODE=CLI_STATUS다.
+  - E3R 실행: run_action("knowledge_validate")를 최대 1회 호출하고, 반환값을 아래 순서로 검증한다. 앞 검사가 실패하면 뒤 검사는 하지 않는다.
+    - V1 유형과 크기:
+      - 반환값의 type이 정확히 str이다.
+      - 그 UTF-8 바이트가 65536바이트 이하다.
+      - 이 바이트로 EVIDENCE_BYTES와 EVIDENCE_SHA256(끝 LF 없음)을 계산한다.
+    - V2 엄격한 해석: 바이트를 UTF-8로, 이어서 JSON으로 해석한다. 중복 키, NaN·Infinity 상수, 무한대로 넘치는 수는 거부한다. 결과는 JSON 객체여야 한다.
+    - V3 정규 바이트: 해석한 객체를 json.dumps(객체, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)로 다시 직렬화한 UTF-8 바이트가 V1의 바이트와 정확히 같다. 끝 LF는 없다.
+    - V4 키 집합: 키 집합이 정확히 다음 8개다: action_id, decision, duration_ms, exit_code, schema, status, stderr_sha256, stdout_sha256.
+    - V5 공통 값:
+      - schema는 문자열 moneylab.automation.evidence/1이다.
+      - decision은 문자열 ALLOW 또는 DENY다.
+      - status는 다음 7개 중 하나다: SUCCEEDED, VALIDATION_FAILED, SOURCE_UNVERIFIED, TIMEOUT, OUTPUT_LIMIT_EXCEEDED, UNEXPECTED_EXIT, DENIED.
+      - decision이 DENY인 것과 status가 DENIED인 것은 함께만 성립한다.
+    - V6 DENIED 문서: decision이 DENY이면 action_id, exit_code, duration_ms, stdout_sha256, stderr_sha256이 모두 null이어야 한다.
+    - V7 실행 문서: decision이 ALLOW이면 다음을 모두 만족해야 한다.
+      - action_id는 문자열 knowledge_validate다.
+      - duration_ms는 type이 정확히 int이고 0 이상이다. bool은 수락하지 않는다.
+      - stdout_sha256과 stderr_sha256은 문자열이고 정규식 [0-9a-f]{64}에 전체가 일치한다.
+    - V8 상태와 종료 코드의 대응: decision이 ALLOW이면 다음 중 하나를 만족해야 한다. 정수는 type이 정확히 int인 값만 인정하며 bool은 수락하지 않는다.
+      - status가 TIMEOUT 또는 OUTPUT_LIMIT_EXCEEDED이면 exit_code는 null이다.
+      - status가 SUCCEEDED이면 exit_code는 정수 0이다.
+      - status가 VALIDATION_FAILED이면 exit_code는 정수 1이다.
+      - status가 SOURCE_UNVERIFIED이면 exit_code는 정수 3이다.
+      - status가 UNEXPECTED_EXIT이면 exit_code는 0, 1, 3이 아닌 정수다. 음수와 큰 양수도 정수로 인정한다.
+    - PASS 조건: V1–V8을 모두 통과하고, decision이 ALLOW이며, status가 SUCCEEDED이고, exit_code가 정수 0이다. PASS일 때만 E3S로 진행한다.
+    - 결과별 단계와 축 매핑:
+      - 예외: run_action이 AutomationError(그 하위 EvidenceError 포함)나 다른 Exception을 내면 다음과 같이 기록한다.
+        - STAGE_E3R=UNKNOWN, AXIS_EXEC=UNKNOWN, AXIS_TASK=NOT_AVAILABLE, AXIS_STORE=NOT_RUN
+        - EVIDENCE_BYTES, EVIDENCE_SHA256, EVIDENCE_VALID, EVIDENCE_STATUS, EVIDENCE_EXIT_CODE는 NONE
+        - FIRST_FAIL_CODE는 AutomationError 계열이면 AUTOMATION_ERROR, 그 밖이면 EXCEPTION
+        - 예외 원문은 출력하지 않는다. KeyboardInterrupt는 D4와 D11을 따른다.
+      - 잘못된 반환: 값이 반환되었으나 V1–V8 중 하나라도 통과하지 못하면 다음과 같이 기록한다.
+        - STAGE_E3R=UNKNOWN, AXIS_EXEC=EVIDENCE_RETURNED, AXIS_TASK=UNKNOWN, AXIS_STORE=NOT_ATTEMPTED
+        - EVIDENCE_VALID=FALSE, FIRST_FAIL_CODE=EVIDENCE_UNRECOGNIZED
+        - EVIDENCE_BYTES와 EVIDENCE_SHA256은 V1에서 계산했으면 그 값, 아니면 NONE
+        - EVIDENCE_STATUS와 EVIDENCE_EXIT_CODE는 NONE
+        - 이 evidence는 저장하지 않는다.
+      - 유효한 DENIED: V1–V8을 통과하고 decision이 DENY이면 다음과 같이 기록한다.
+        - STAGE_E3R=FAIL, AXIS_EXEC=EVIDENCE_RETURNED, AXIS_TASK=DENIED, AXIS_STORE=NOT_ATTEMPTED
+        - EVIDENCE_VALID=TRUE, EVIDENCE_STATUS=DENIED, EVIDENCE_EXIT_CODE=NULL, FIRST_FAIL_CODE=TASK_STATUS
+      - 유효한 비성공: V1–V8을 통과하고 decision이 ALLOW이지만 status가 SUCCEEDED가 아니면 다음과 같이 기록한다.
+        - STAGE_E3R=FAIL, AXIS_EXEC=EVIDENCE_RETURNED, AXIS_TASK=<그 status>, AXIS_STORE=NOT_ATTEMPTED
+        - EVIDENCE_VALID=TRUE, EVIDENCE_STATUS=<그 status>, EVIDENCE_EXIT_CODE=<그 정수 또는 NULL>, FIRST_FAIL_CODE=TASK_STATUS
+      - 성공: PASS 조건을 만족하면 다음과 같이 기록한다.
+        - STAGE_E3R=PASS, AXIS_EXEC=EVIDENCE_RETURNED, AXIS_TASK=SUCCEEDED
+        - EVIDENCE_VALID=TRUE, EVIDENCE_STATUS=SUCCEEDED, EVIDENCE_EXIT_CODE=0
+    - TIMEOUT의 의미:
+      - status가 TIMEOUT이면, executor가 시간 한도로 직접 자식을 종료했다는 기록이다.
+      - action 작업이 실제로 끝났는지와 자식이 파일을 만들었는지는 불명으로 따로 기록한다.
+      - 파일 생성 여부는 B1 비교 결과로만 말한다.
+    - 근거 구분:
+      - 아래 사실은 기준 tree a5984d1e6e18f476e89d513638b9c2be931aa874의 코드를 읽어 확인했다.
+        - 반환 문자열은 evidence.canonical_json으로 만들어진다.
+        - V4의 키, schema 값, 7개 status는 evidence.FIELDS, evidence.SCHEMA, evidence.STATUSES와 같다.
+        - TIMEOUT과 OUTPUT_LIMIT_EXCEEDED의 exit_code는 null이다.
+        - 0, 1, 3의 대응은 policy.EXIT_STATUS와 같다.
+        - 설정·회수 실패는 AutomationError로 전달된다.
+        - evidence.check는 상태와 종료 코드의 대응을 검사하지 않으므로, P가 V8을 직접 검사한다.
+      - 다음은 이 계약이 정한 값이거나 미확인이다.
+        - 65536바이트 상한은 runlog 입력 상한에 맞춘 이 계약의 선택이다.
+        - 이 환경에서 run_action의 실제 반환값, 소요 시간, 종료 코드는 관측하지 않았다.
+        - 등록 action에서 DENIED 문서가 반환되는 경로는 코드상 도달하지 않으며, 이 매핑은 방어용이다.
+  - R0 저장·조회 결과의 공통 규칙 (E3S와 E5에 적용한다):
+    - 원본 API 값과 파생 값을 구분한다.
+      - 원본 API 값: STORE_STATUS, STORE_EXIT_CODE, STORE_FINAL_FILE_CREATED, STORE_WARNING_COUNT, STORE_ERROR_CODE, RECORD_ID, RECORD_FILE_SHA256, LOOKUP_STATUS, LOOKUP_EXIT_CODE, LOOKUP_WARNING_COUNT, LOOKUP_ERROR_CODE. R1을 통과한 결과의 필드를 그대로 옮기며, warnings는 개수만 옮긴다. 대응하는 D9 출력 키가 없는 원본 필드(evidence, task_id, command, authority 등)는 출력하지 않는다.
+      - 파생 값: AXIS_STORE, AXIS_LOOKUP, MATCH_RECORD_ID, MATCH_FILE_SHA256, MATCH_EVIDENCE_SHA256, LOOKUP_EVIDENCE_CANONICAL_SHA256. 이 값들은 원본 API 필드가 아니라 P가 계산한 검사값이다.
+      - R1을 통과하지 못한 결과의 원본 필드는 출력하지 않고 NONE으로 둔다.
+    - 출력 금지: error의 detail, warnings의 문자열, evidence 원문, 기록 원문, 예외 원문은 출력하지 않는다.
+    - 중단과 재호출 금지:
+      - E3S나 E5가 FAIL 또는 UNKNOWN이면 그 뒤의 기능 단계는 NOT_RUN이다.
+      - 어떤 결과에서도 store_evidence와 load_evidence를 다시 호출하지 않는다.
+  - R1 공통 형식 검증:
+    - R1은 성공 조건이 아니다. 결과 형식이 runlog 결과 객체로 성립하는지만 확인하며, 정의된 오류도 R1을 통과할 수 있다.
+    - R1-1 반환값의 type이 정확히 dict다.
+    - R1-2 키 집합이 정확히 다음 12개다: schema, command, status, exit_code, authority, task_id, record_id, file_sha256, final_file_created, evidence, warnings, error.
+    - R1-3 고정값과 유형:
+      - schema는 문자열 moneylab.runlog.result/1이다.
+      - authority는 문자열 NONE이다.
+      - command는 E3S에서 문자열 store, E5에서 문자열 show다.
+      - task_id는 문자열 AUTO-06이다.
+      - status는 문자열이며 정규식 [A-Z][A-Z_]{0,39}에 전체가 일치한다.
+      - exit_code는 type이 정확히 int이고 0, 1, 2 중 하나다. bool은 수락하지 않는다.
+      - warnings는 list이고 모든 원소가 str이다.
+      - record_id와 file_sha256은 각각 None이거나, 정규식 [0-9a-f]{64}에 전체가 일치하는 문자열이다.
+      - final_file_created는 None이거나 type이 정확히 bool이다.
+      - evidence는 None이거나 dict다.
+      - error는 None이거나, 키가 정확히 code와 detail이고 두 값이 모두 str인 dict다.
+    - R1-4 결과 객체 내부의 일관성:
+      - error가 None이면, status는 STORED, ALREADY_STORED, FOUND 중 하나이고 exit_code는 warnings가 비어 있으면 0, 아니면 1이다.
+      - error가 dict이면 다음을 모두 만족한다.
+        - status가 error의 code와 같다.
+        - 그 code는 다음 12개 중 하나다: ARGUMENT_INVALID, ENVIRONMENT_INVALID, INPUT_INVALID, LIMIT_EXCEEDED, GIT_FAILED, STORE_PATH_INVALID, STORE_FAILED, NOT_FOUND, RECORD_UNREADABLE, RECORD_CORRUPT, RECORD_INCOMPATIBLE, RECORD_CONFLICT.
+        - exit_code는 2다.
+    - R1을 통과하지 못한 결과는 잘못된 반환이다.
+  - E3S 저장:
+    - 진입: E3R가 PASS인 경우에만 store_evidence("AUTO-06", <E3R 바이트>)를 최대 1회 호출한다. 바이트는 바꾸지 않는다.
+    - 기대 record_id: P는 호출 전에 기대 record_id를 계산한다.
+      - 계산식: sha256(canonical_json({"evidence": <E3R 객체>, "schema": "moneylab.runlog.record/1", "task_id": "AUTO-06"}))
+      - canonical_json은 E3R의 V3와 같은 직렬화이며, UTF-8 바이트로 해시한다.
+    - 매핑. 위에서부터 처음 해당하는 경우를 적용한다.
+      - S-1 예외: store_evidence가 Exception을 내면 다음과 같다.
+        - STAGE_E3S=UNKNOWN, AXIS_STORE=UNKNOWN, FIRST_FAIL_CODE=EXCEPTION
+        - STORE_ 키, RECORD_ID, RECORD_FILE_SHA256은 NONE이다.
+        - 기록 파일의 생성 여부는 불명이며 추정하지 않는다. KeyboardInterrupt는 D4와 D11을 따른다.
+      - S-2 잘못된 반환: R1을 통과하지 못하면 다음과 같다.
+        - STAGE_E3S=UNKNOWN, AXIS_STORE=UNKNOWN, FIRST_FAIL_CODE=STORE_RESULT
+        - 원본 필드는 NONE이다.
+      - S-3 정의된 오류: R1을 통과하고 error가 dict이면 다음과 같다.
+        - STAGE_E3S=FAIL, AXIS_STORE=DEFINED_ERROR, FIRST_FAIL_CODE=STORE_RESULT
+        - R1을 통과한 원본 필드는 대응하는 D9 키에 기록한다.
+        - STORE_STATUS와 STORE_ERROR_CODE는 원본 오류 code, STORE_EXIT_CODE는 2다.
+        - final_file_created, record_id, file_sha256의 원본 관측값은 보존하되, 이 값만으로 실행 여부나 파일 생성 여부를 추가 추정하지 않는다.
+        - 이후 기능 단계는 진행하지 않고 D11을 따른다.
+      - S-4 이미 저장됨: R1을 통과하고 status가 ALREADY_STORED이면 다음과 같다.
+        - STAGE_E3S=UNKNOWN, AXIS_STORE=ALREADY_STORED_UNEXPECTED, FIRST_FAIL_CODE=STORE_RESULT
+        - 원본 필드는 대응하는 D9 키에 기록한다.
+        - 기존 기록이 있다는 관측과 이번 실행과의 연결 불명을 구분한다.
+        - 이후 기능 단계는 진행하지 않고 D11을 따른다.
+      - S-5 경고와 함께 저장: R1을 통과하고 status가 STORED이며, warnings가 비어 있지 않고(exit_code 1), final_file_created가 정확히 True이면 다음과 같다.
+        - STAGE_E3S=FAIL, AXIS_STORE=STORED_WITH_WARNINGS, FIRST_FAIL_CODE=STORE_RESULT
+        - 원본 필드는 그대로 기록한다.
+        - 저장 성공 보고와 경고를 함께 유지하며 UNKNOWN으로 바꾸지 않는다.
+        - 이 결과를 생성 근거로 쓰는 범위는 D8의 RL 묶음 확인됨-생성 조건을 따른다. record_id와 file_sha256이 hex이고 record_id가 기대 record_id와 같을 때만 생성 근거가 된다. 그렇지 않으면 경고와 생성 보고는 보존하되 파일 동일성은 불명이다.
+      - S-6 성공: 다음을 모두 만족하면 STAGE_E3S=PASS, AXIS_STORE=STORED_NEW이며 원본 필드를 그대로 기록한다.
+        - R1을 통과했다.
+        - status STORED, exit_code 0, warnings 빈 list, error None이다.
+        - final_file_created가 정확히 True이고 evidence가 None이다.
+        - record_id가 hex이고 기대 record_id와 같다.
+        - file_sha256이 hex다.
+      - S-7 그 밖의 조합: 위 어디에도 해당하지 않으면 다음과 같다.
+        - STAGE_E3S=UNKNOWN, AXIS_STORE=UNKNOWN, FIRST_FAIL_CODE=STORE_RESULT
+        - 원본 필드는 R1을 통과했으므로 그대로 기록한다.
+        - 예: status STORED인데 final_file_created가 True가 아님, record_id가 기대값과 다르거나 None임, status가 FOUND임, evidence가 None이 아님.
+  - E4 verify: E3S가 PASS인 경우에만 E2와 같은 명령을 1회 실행한다. W0을 통과한 결과에 E2와 같은 매핑을 적용한다.
+    - PASS: 다음을 모두 만족한다.
+      - status MATCH, exit_code 0
+      - differences와 warnings가 빈 list, error None
+      - snapshot_id와 file_sha256이 E1 값과 같다.
+      - state_sha256_stored와 state_sha256_current가 모두 E1의 STATE_SHA256과 같다.
+    - status MISMATCH이고 exit_code 1이면 STAGE_E4=FAIL, FIRST_FAIL_CODE=STATE_MISMATCH다.
+    - error가 dict인 정의된 오류이면 STAGE_E4=FAIL, FIRST_FAIL_CODE=CLI_STATUS다. 이 경우 상태 비교는 성립하지 않았다.
+    - status MATCH인데 대조값이 다르거나, 그 밖의 조합이면 STAGE_E4=UNKNOWN, FIRST_FAIL_CODE=CLI_STATUS다.
+    - 회수·출력 실패와 출력 미수락은 W0을 따른다.
+  - E5 조회:
+    - 진입: E4가 PASS이고 AXIS_STORE가 STORED_NEW인 경우에만 load_evidence("AUTO-06", <RECORD_ID>)를 1회 호출한다.
+    - 매핑. 위에서부터 처음 해당하는 경우를 적용한다.
+      - L-1 예외: load_evidence가 Exception을 내면 다음과 같다.
+        - STAGE_E5=UNKNOWN, AXIS_LOOKUP=UNKNOWN, FIRST_FAIL_CODE=EXCEPTION
+        - LOOKUP_ 키와 MATCH_ 키는 NONE이다.
+      - L-2 잘못된 반환: R1을 통과하지 못하면 다음과 같다.
+        - STAGE_E5=UNKNOWN, AXIS_LOOKUP=UNKNOWN, FIRST_FAIL_CODE=LOOKUP_RESULT
+        - 원본 필드와 MATCH_ 키는 NONE이다.
+      - L-3 정의된 오류: R1을 통과하고 error가 dict이면 다음과 같다.
+        - STAGE_E5=FAIL, AXIS_LOOKUP=DEFINED_ERROR, FIRST_FAIL_CODE=LOOKUP_RESULT
+        - LOOKUP_STATUS=<code>, LOOKUP_EXIT_CODE=2, LOOKUP_ERROR_CODE=<code>, LOOKUP_WARNING_COUNT=<개수>
+        - MATCH_ 키는 NONE이다.
+        - 이 경우는 UNKNOWN이 아니다.
+      - L-4 형식이 맞는 FOUND: R1을 통과하고 다음을 모두 만족하면 대조를 수행한다.
+        - 조건: status FOUND, exit_code 0, warnings 빈 list, error None, evidence가 dict, final_file_created None
+        - 대조 항목:
+          - MATCH_RECORD_ID: 결과 record_id가 E3S의 RECORD_ID와 같은지
+          - MATCH_FILE_SHA256: 결과 file_sha256이 E3S의 RECORD_FILE_SHA256과 같은지
+          - MATCH_EVIDENCE_SHA256: 결과 evidence를 E3R의 V3와 같은 방식으로 직렬화한 UTF-8 바이트의 sha256이 EVIDENCE_SHA256과 같은지. 이 sha256은 LOOKUP_EVIDENCE_CANONICAL_SHA256에 기록한다.
+        - 직렬화가 실패하면 STAGE_E5=UNKNOWN, AXIS_LOOKUP=UNKNOWN, FIRST_FAIL_CODE=LOOKUP_RESULT이고, MATCH_EVIDENCE_SHA256은 NONE이다.
+        - 세 대조가 모두 TRUE이면 STAGE_E5=PASS, AXIS_LOOKUP=MATCHED다.
+        - 하나라도 FALSE이면 STAGE_E5=FAIL, AXIS_LOOKUP=MISMATCH, FIRST_FAIL_CODE=LOOKUP_RESULT다.
+      - L-5 그 밖의 조합: 위 어디에도 해당하지 않으면 다음과 같다.
+        - STAGE_E5=UNKNOWN, AXIS_LOOKUP=UNKNOWN, FIRST_FAIL_CODE=LOOKUP_RESULT
+        - 원본 필드는 R1을 통과했으므로 그대로 기록하고, MATCH_ 키는 NONE이다.
+        - 예: status FOUND인데 warnings가 비어 있지 않음, final_file_created가 None이 아님, status가 STORED 또는 ALREADY_STORED임.
+  - E6 상태: 직접 Git(D6)으로 다음 두 명령을 각 1회 실행한다.
+    - git status --porcelain=v1 -z --untracked-files=all
+      - 출력 항목 수를 E6_CHANGED_COUNT로 기록한다.
+      - 1 이상이면 STAGE_E6=FAIL, FIRST_FAIL_CODE=TRACKED_CHANGES다.
+    - git status --porcelain=v1 -z --untracked-files=normal --ignored=matching
+      - ignored 항목을 E6_IGNORED_로 시작하는 키로 진단 기록한다.
+    - 직접 Git의 실패, 회수 실패, stderr 출력, 예외는 STAGE_E6=UNKNOWN이며, 코드는 GIT_REJECTED, TIMEOUT, OUTPUT_LIMIT, REAP_FAILED, EXCEPTION 중 해당하는 것이다.
+    - E6은 정상 진행과 종료 진단을 합쳐 최대 1회 실행한다.
+  - B1: D8의 사후 목록을 1회 만든다. D8의 목록 실패는 STAGE_B1=UNKNOWN이다. B1은 E6의 결과와 관계없이 D11의 조건에서 시도한다.
+  - CMP: B1이 PASS인 경우에만 D8의 비교와 산출물 판정을 1회 수행한다.
+    - AXIS_ARTIFACT=MATCH이면 STAGE_CMP=PASS다.
+    - MISMATCH이면 STAGE_CMP=FAIL, FIRST_FAIL_CODE=ARTIFACT_MISMATCH다.
+    - UNKNOWN이면 STAGE_CMP=UNKNOWN이다.
+    - B1이 PASS가 아니면 STAGE_CMP=NOT_RUN이고 AXIS_ARTIFACT=UNKNOWN이다.
+  - REPORT: D9의 출력을 D4의 규칙대로 끝에서 한 번만 쓴다.
+  - AXIS_STATE 종합 규칙:
+    - MATCH: E1, E1C, E2, E4가 모두 PASS다.
+    - MISMATCH: 비교가 성립해 불일치가 확인되었다. E2 또는 E4가 STATE_MISMATCH로 FAIL이거나, E1C가 FAIL인 경우다.
+    - UNKNOWN: MISMATCH가 아니면서 다음 중 하나다.
+      - 네 단계 중 하나가 UNKNOWN이다.
+      - 정의된 오류나 경고로 FAIL해 상태 비교가 성립하지 않았다.
+      - 비교가 성립하지 않은 경우는 MISMATCH로 추정하지 않는다.
+    - NOT_RUN: 위에 해당하지 않으면서 네 단계 중 하나라도 NOT_RUN이다.
+  - 근거 구분:
+    - 아래 사실은 기준 tree a5984d1e6e18f476e89d513638b9c2be931aa874의 runlog/store.py, workstate/__main__.py를 읽어 확인했다.
+      - 결과 키와 고정값
+      - exit_code 규칙. runlog는 오류 2, 성공 상태에서 경고가 있으면 1, 없으면 0이다. verify는 MATCH 0, MISMATCH 1이다.
+      - 정의 오류 코드 목록
+      - store 성공 결과의 evidence는 None이다.
+      - show 성공 결과의 final_file_created는 None이고 warnings는 비어 있다.
+      - record_id 계산식
+      - 정의되지 않은 내부 예외는 호출자에게 그대로 전파된다.
+    - 다음은 미확인이다.
+      - 이 환경에서 store_evidence, load_evidence, workstate CLI의 실제 반환값은 관측하지 않았다.
+      - 오류 결과의 record_id, file_sha256, final_file_created가 오류 종류별로 어떤 값을 갖는지. 이 계약은 이 값들을 관측값으로만 기록한다.
+      - S-7과 L-5의 조합은 코드상 생기지 않는 것으로 읽었다. 이 조항은 방어용이다.
+- D6 P의 자식 프로세스:
+  - argv:
+    - workstate CLI: [sys.executable, "-B", "-m", "moneylab.workstate", <하위 명령과 인자>]. 하위 명령과 인자는 D5가 정한 것만 쓴다.
+    - 직접 Git: [shutil.which("git")의 결과, "-C", <TARGET_WORKTREE>, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", <하위 명령과 인자>]. 하위 명령은 rev-parse, status, cat-file만 쓴다. shutil.which("git")가 None이면 그 단계는 UNKNOWN이고 FIRST_FAIL_CODE=GIT_REJECTED이다.
+  - 공통 실행 조건:
+    - shell=False, cwd = TARGET_WORKTREE, stdin은 DEVNULL이다.
+    - stdout과 stderr는 파이프로 받는다. reader thread 2개가 두 파이프를 동시에 읽으며, 읽는 동안 상한을 적용한다. capture_output이나 상한 없는 수집은 쓰지 않는다.
+  - 환경:
+    - P 환경의 사본에서 이름이 PYTHON 또는 GIT_로 시작하는 변수를 모두 뺀다.
+    - 그 사본에 GIT_OPTIONAL_LOCKS=0을 더한다.
+    - 이 규칙은 P의 직접 자식에만 적용한다. executor의 build_env는 바꾸지 않는다.
+  - 상한:
+    - workstate CLI: timeout 60초, stdout 1 MiB, stderr 64 KiB
+    - 직접 Git: timeout 30초, stdout 1 MiB, stderr 64 KiB
+  - timeout, 상한 초과, 회수:
+    - timeout이나 상한 초과가 생기면 직접 자식을 kill한다. 이어서 wait를 최대 10초, reader thread join을 합계 최대 10초 수행한다.
+    - 그 단계는 UNKNOWN이다. FIRST_FAIL_CODE는 timeout이면 TIMEOUT, 상한 초과면 OUTPUT_LIMIT이다.
+    - wait나 join이 시간 안에 끝나지 않으면 그 단계는 UNKNOWN이고 FIRST_FAIL_CODE=REAP_FAILED이다.
+    - 잘린 출력은 결과로 쓰지 않는다.
+    - 자식 트리 전체의 종료는 보장하지 않는다.
+  - workstate CLI 출력 수락 조건 (모두 만족해야 한다):
+    - stderr가 0바이트다.
+    - stdout이 정확히 한 줄이고 끝에 LF가 1개 있다.
+    - 그 줄은 중복 키와 비표준 상수(NaN, Infinity)를 거부하는 해석에서 JSON 객체다.
+    - stdout 바이트가 canonical 재직렬화(키 정렬, 구분자 ",",":", ensure_ascii 거짓, NaN 불허, UTF-8)에 LF를 더한 것과 같다.
+    - schema = moneylab.workstate.result/1, authority = NONE이다.
+    - 결과 객체의 exit_code가 프로세스 종료 코드와 같다.
+    - 하나라도 어기면 그 단계는 UNKNOWN이고 FIRST_FAIL_CODE=CLI_REJECTED이다. 수락된 출력의 결과 매핑은 D5의 W0을 따른다.
+  - 직접 Git 수락 조건:
+    - 종료 코드가 0이고 stderr가 0바이트여야 한다.
+    - 경고를 포함해 stderr에 출력이 있으면 숨기지 않고 그 단계를 중단한다. 그 단계는 UNKNOWN이고 FIRST_FAIL_CODE=GIT_REJECTED이다.
+- D7 snapshot 직접 읽기 (E1C, 읽기 전용, 쓰기 없음):
+  - 경로:
+    - SNAPSHOT_ID가 정규식 [0-9a-f]{64}에 전체가 일치하는지 먼저 검증한다. 검증한 뒤에만 data/processed/workstate/AUTO-06/<SNAPSHOT_ID>.json 경로를 구성한다.
+    - 경로의 각 구성요소를 lstat로 확인한다. 중간 구성요소는 symlink, junction, Windows reparse point가 아닌 일반 디렉터리여야 한다. 대상은 같은 조건을 만족하는 일반 파일이어야 한다. 판별할 수 없으면 실패다.
+    - 링크를 해석한 대상 경로가 TARGET_WORKTREE 안에 있어야 한다.
+  - 원바이트:
+    - 읽기 전 lstat 크기가 1 MiB(1048576바이트) 이하여야 한다.
+    - 1 MiB + 1바이트까지만 읽는다. 읽은 바이트 수가 읽기 전 크기와 같아야 한다.
+    - 읽기 전후 lstat의 크기와 mtime_ns가 같아야 한다.
+    - 원바이트의 sha256이 E1 결과의 file_sha256과 같아야 한다.
+  - 엄격한 JSON:
+    - 원바이트를 UTF-8로 해석한다. 중복 키, NaN, Infinity, -Infinity를 거부하는 JSON 해석으로 객체를 얻는다.
+    - schema는 moneylab.workstate.snapshot/1, task_id는 AUTO-06이어야 한다. snapshot_id는 E1 값과 같아야 한다.
+    - state는 객체여야 하고 contract 키를 가져야 한다.
+  - 계약 두 파일:
+    - state.contract는 정확히 2항목의 배열이다. 각 항목은 키가 정확히 path, head_sha256, work_sha256인 객체이며 값은 모두 문자열이다.
+    - path 집합이 승인된 두 상대 경로 docs/tasks/AUTO-06/WORK_ORDER.md, docs/tasks/AUTO-06/ERRATA-001.md와 정확히 같아야 한다. 끝 파일명만 같은 것은 일치로 보지 않는다.
+    - 각 항목의 head_sha256은 그 파일의 승인 S와 같아야 한다. work_sha256은 그 파일의 승인 W와 같아야 한다. 두 값은 각각 대조하며, W와 S가 같다고 가정하지 않는다.
+  - state 해시:
+    - state를 저장 형식의 정규화 방식(키 정렬, 구분자 ",",":", ensure_ascii 거짓, NaN 불허)으로 직렬화하고, 그 UTF-8 바이트의 sha256을 계산한다.
+    - 계산값은 다음 세 값과 모두 같아야 한다: snapshot 파일의 state_sha256, E1 결과의 state_sha256_current, STATE_SHA256.
+    - E1의 state_sha256_stored는 None이므로 해시 비교 대상으로 쓰지 않는다.
+  - 판정과 출력:
+    - 결과의 단계 매핑과 FIRST_FAIL_CODE는 D5의 E1C를 따른다.
+    - 출력은 CONTRACT_ENTRIES, CONTRACT_MATCH, STATE_SHA256_RECOMPUTED_MATCH와 해시 값으로 한정한다. snapshot 원문, state 내용, 경로 외 필드 값은 출력하지 않는다.
+  - 근거 구분:
+    - 다음은 기준 tree a5984d1e6e18f476e89d513638b9c2be931aa874의 workstate/store.py와 workstate/collect.py를 읽어 확인한 사실이다.
+      - snapshot 경로 형식, 1 MiB 파일 상한
+      - schema 값, contract 항목의 키
+      - state_sha256의 직렬화 방식(canonical_text: sort_keys, 구분자 ",",":", ensure_ascii 거짓)
+      - contract가 docs/tasks/<TASK_ID>/ 아래 HEAD와 작업 파일의 합집합으로 수집된다는 점
+    - 이 환경에서의 실제 snapshot 내용은 관측하지 않았다.
+- D8 파일 목록과 비교:
+  - 범위와 영역:
+    - 범위는 TARGET_WORKTREE 루트 아래 전체다.
+    - 루트 바로 아래의 .git 항목 하나(파일 또는 디렉터리)만 제외하고, 그 아래로 들어가지 않는다. 다른 위치의 .git이라는 이름은 제외하지 않는다.
+    - 영역 VENV는 루트 바로 아래의 .venv 디렉터리와 그 아래 전부다. 영역 WT는 나머지 전부다.
+    - 루트 자신은 목록에 넣지 않는다.
+  - 순회:
+    - os.scandir로 순회하며 링크를 따라가지 않는다(follow_symlinks 거짓).
+    - 항목마다 lstat로 확인한다. symlink, junction, Windows reparse point 속성이 있는 항목을 발견하거나 판별할 수 없으면 그 목록은 실패다. FIRST_FAIL_CODE는 LINK_FOUND다.
+    - 디렉터리와 일반 파일이 아닌 종류도 목록 실패다. FIRST_FAIL_CODE는 UNSUPPORTED_ENTRY다.
+    - 디렉터리 항목을 열거하지 못하면 목록 실패다. FIRST_FAIL_CODE는 READ_FAILED다.
+  - 파일 읽기:
+    - 파일마다 상대 경로, 크기, 내용 sha256을 기록한다.
+    - 읽기 전후 lstat의 크기와 mtime_ns가 같아야 하고, 읽은 바이트 수가 크기와 같아야 한다. 다르면 목록 실패이며 FIRST_FAIL_CODE는 CHANGED_WHILE_READ다.
+    - 읽기 실패는 목록 실패이며 FIRST_FAIL_CODE는 READ_FAILED다.
+    - 실패한 목록은 정상 목록으로 처리하지 않는다.
+  - 상한:
+    - WT: 파일 5000개, 디렉터리 1000개, 읽기 256 MiB
+    - VENV: 파일 30000개, 디렉터리 5000개, 읽기 1 GiB
+    - B0와 B1: 각 목록 전체 수집 300초(monotonic clock)
+    - 개수나 바이트 상한을 넘으면 목록 실패이며 FIRST_FAIL_CODE는 LIST_LIMIT다. 시간 상한을 넘으면 LIST_DEADLINE이다.
+    - deadline은 항목 사이와 읽기 청크 사이에서 확인한다. 운영체제 수준에서 멈춘 읽기의 중단은 보장하지 않는다.
+  - 목록과 집계 해시의 입력 형식:
+    - 상대 경로는 TARGET_WORKTREE 루트 기준이며 "/"로 구분한다. 끝 "/"는 쓰지 않는다. VENV 영역의 경로도 ".venv/"로 시작하는 루트 기준 경로다.
+    - 파일 목록: 영역별 배열 [[경로, 크기, sha256], ...]. 원소는 [문자열, 0 이상 정수, 소문자 hex 64자 문자열]이며, 경로의 Python 문자열 순서로 정렬한다.
+    - 디렉터리 목록: 영역별 배열 [경로, ...]. 같은 순서로 정렬하며, 빈 디렉터리도 포함한다.
+    - 집계 해시: 각 배열을 json.dumps(배열, ensure_ascii=True, separators=(",", ":"), allow_nan=False)로 직렬화한 UTF-8 바이트의 sha256이다. 결과는 B0_ 또는 B1_로 시작하는 _FILES_SHA256, _DIRS_SHA256 키에 기록한다.
+    - 개수 키: 영역별 파일 수, 디렉터리 수, 읽은 바이트 합계를 각각 _FILES, _DIRS, _BYTES 키에 기록한다.
+  - 실제 차이 집계 (CMP, 영역별):
+    - 파일 A: B1에만 있는 경로
+    - 파일 M: 두 목록에 모두 있고 크기나 sha256이 다른 경로
+    - 파일 D: B0에만 있는 경로
+    - 디렉터리 A: B1에만 있는 경로
+    - 디렉터리 D: B0에만 있는 경로
+    - 이 집계는 B0와 B1의 실제 차이만 센다. 결과는 DIFF_로 시작하는 키에 기록한다.
+  - 저장 경로 묶음:
+    - WS 묶음은 다음 항목만 포함한다.
+      - 디렉터리 항목 data/processed/workstate 자체
+      - 디렉터리 data/processed/workstate/AUTO-06과 그 아래 전부
+    - RL 묶음은 다음 항목만 포함한다.
+      - 디렉터리 항목 data/processed/runlog 자체
+      - 디렉터리 data/processed/runlog/AUTO-06과 그 아래 전부
+    - data/processed/workstate와 data/processed/runlog 아래의 다른 경로는 어느 묶음에도 속하지 않는다. 다른 task 디렉터리와 그 안의 파일이 여기에 해당한다.
+  - 묶음의 생성 상태:
+    - WS 확인됨-생성: E1이 D5의 W0 형식 검사를 통과했고 다음을 모두 만족한다. E1이 경고 등으로 FAIL이어도 이 관측을 쓴다.
+      - status STORED
+      - final_file_created가 정확히 True
+      - snapshot_id와 file_sha256이 소문자 hex 64자
+      - 이때 필수 파일은 data/processed/workstate/AUTO-06/<SNAPSHOT_ID>.json이고, 기대 sha256은 SNAPSHOT_FILE_SHA256이다.
+    - WS 확인됨-미생성: 다음 중 하나다.
+      - E1이 호출되지 않았다.
+      - E1이 W0 형식 검사를 통과했고, error가 dict이며, final_file_created가 정확히 False다.
+    - WS 불명: 그 밖의 경우다.
+    - RL 확인됨-생성: E3S가 D5의 R1을 통과했고 다음을 모두 만족한다. STORED_NEW와 STORED_WITH_WARNINGS에 모두 적용한다.
+      - status STORED
+      - final_file_created가 정확히 True
+      - record_id와 file_sha256이 소문자 hex 64자
+      - record_id가 기대 record_id와 같음
+      - 이때 필수 파일은 data/processed/runlog/AUTO-06/<RECORD_ID>.json이고, 기대 sha256은 RECORD_FILE_SHA256이다.
+    - RL 확인됨-미생성: 다음 중 하나다.
+      - E3S가 호출되지 않았다(NOT_RUN 또는 NOT_ATTEMPTED).
+      - E3S가 R1을 통과했고, error가 dict이며, final_file_created가 정확히 False다.
+    - RL 불명: 그 밖의 경우다. 다음이 포함된다.
+      - 예외, R1 실패, ALREADY_STORED
+      - 오류 결과의 final_file_created가 None인 경우
+      - STORED와 생성 보고가 있으나 ID나 해시가 위 조건을 충족하지 않는 경우. 이때 경고와 생성 보고는 보존하되, 파일 동일성은 불명이다.
+  - 필수 차이와 허용 가능 차이:
+    - 필수 차이: 확인됨-생성 묶음마다 다음 항목이 실제 차이에 있어야 한다.
+      - 필수 파일의 추가
+      - 필수 파일의 부모 디렉터리 가운데 B0에 없던 것의 추가. WS는 data/processed/workstate와 data/processed/workstate/AUTO-06, RL은 data/processed/runlog와 data/processed/runlog/AUTO-06 중 해당하는 것이다.
+    - 허용 가능 차이: E1이 호출되었으면 data/processed/workstate와 data/processed/workstate/AUTO-06 가운데 B0에 없던 디렉터리의 추가다. E3S가 호출되었으면 data/processed/runlog와 data/processed/runlog/AUTO-06 가운데 B0에 없던 디렉터리의 추가다. 이것은 작업 API 호출 중 실패로 남을 수 있는 디렉터리이며, 파일은 포함하지 않는다.
+  - 필수 파일 누락:
+    - 확인됨-생성 묶음의 필수 파일이 B1에 없으면 REQUIRED_MISSING에 1을 더한다.
+    - B0에 없던 필수 파일은 실제 삭제가 아니다. 그래서 파일 D 집계에 넣지 않는다.
+    - 필수 경로에 파일이 추가되었지만 sha256이 기대값과 다르면, 그 추가 항목은 기대 밖으로 분류한다. 누락으로 세지 않는다.
+  - 차이 항목의 분류:
+    - 기대 밖: 다음 중 하나에 해당하는 실제 차이 항목이다.
+      - VENV 영역의 모든 차이
+      - WS·RL 묶음 밖의 모든 차이
+      - 확인된 묶음 안에서 그 묶음의 필수 차이와 허용 가능 차이에 속하지 않는 항목. 확인됨-생성 묶음의 다른 파일, 확인됨-미생성 묶음의 모든 파일, 디렉터리 삭제, 파일 변경(M)과 삭제(D)가 여기에 해당한다.
+    - 불확실: 생성 상태가 불명인 묶음 안의 실제 차이 항목이다.
+    - 기대됨: 필수 차이와 허용 가능 차이에 해당하는 실제 차이 항목이다.
+    - DIFF_UNEXPECTED는 기대 밖 항목 수만 센다.
+    - DIFF_ITEM은 기대 밖, 불확실, 기대됨 순서로 나열한다.
+  - 판정 우선순위 (AXIS_ARTIFACT):
+    - 1. B1 또는 CMP를 얻지 못하면 UNKNOWN이다.
+    - 2. 기대 밖 항목이 1개 이상이거나 REQUIRED_MISSING이 1 이상이면 MISMATCH다. 불확실 항목이나 불명 묶음이 함께 있어도 MISMATCH이며, 불명 사실은 단계 값으로 따로 보존한다.
+    - 3. 2에 해당하지 않으면서 불확실 항목이 있거나 어느 묶음이 불명이면 UNKNOWN이다. 실제 차이가 0이어도 같다. 저장 결과가 불명이면 MATCH로 추정하지 않는다.
+    - 4. 그 밖에, 두 묶음의 생성 상태가 모두 확인되었고 실제 차이가 기대됨 항목뿐이며 필수 차이가 모두 있으면 MATCH다.
+    - UNKNOWN 판정은 VENV 영역 변경이나 묶음 밖 차이를 덮지 않는다. 그런 항목은 항상 기대 밖으로 센다.
+    - 기대 밖 차이가 없다는 관측(DIFF_UNEXPECTED=0)과 저장 결과 불명은 별도의 값으로 함께 보존한다.
+  - 관측 한계:
+    - 이 비교는 B0와 B1 두 시점의 최종 상태 비교다. 실행 중 생성된 뒤 삭제된 파일은 부정하지 못한다.
+    - TARGET_WORKTREE 밖(시스템 Python 설치 디렉터리, 사용자 디렉터리 등)과 루트의 .git 관리 정보는 관측하지 않는다.
+    - 이 검사는 신뢰된 작업공간의 관측이다. 경쟁 상태에 대한 보안 격리가 아니다.
+    - 회수에 실패한 손자 프로세스가 남아 있으면 B1과 경쟁할 수 있다.
+- D9 P 출력 스키마(moneylab.auto06.p_report/1):
+  - 형식:
+    - 출력은 줄마다 KEY=VALUE이고, ASCII와 LF만 쓴다. 줄 앞뒤 공백, 빈 줄, 주석은 없다.
+    - 아래 고정 키 92개는 정해진 순서로 정확히 1회씩 나온다.
+    - 번호 키는 정해진 위치에 나온다. 번호는 두 자리 01부터 시작하고, 개수는 바로 앞 LISTED 값과 같다.
+  - 값 유형:
+    - ENUM: 키마다 정한 목록의 값이다.
+    - COUNT: 음이 아닌 정수다.
+      - 원본 Python 값의 type이 정확히 int이고 0 이상이어야 한다. bool은 수락하지 않는다.
+      - 출력은 정규식 0|[1-9][0-9]*에 전체가 일치해야 한다.
+    - SINT: 음수를 포함할 수 있는 정수다.
+      - 원본 Python 값의 type이 정확히 int여야 한다. bool은 수락하지 않는다.
+      - 출력은 정규식 0|-?[1-9][0-9]*에 전체가 일치해야 한다. -0은 쓰지 않는다.
+    - 숫자 출력에는 부호 +, 앞자리 0, 소수점, 공백을 쓰지 않는다.
+    - BOOL: TRUE 또는 FALSE다. 원본 값의 type이 정확히 bool이어야 한다. 0, 1, 문자열은 수락하지 않는다.
+    - HEX: 정규식 [0-9a-f]{64}에 전체가 일치하는 문자열이다.
+    - TOKEN: API가 준 상태·코드 문자열이다.
+      - 정규식 [A-Z][A-Z_]{0,39}에 전체가 일치할 때만 그대로 쓴다.
+      - 일치하지 않으면 값은 NONE이고 그 단계는 UNKNOWN이다.
+    - UTC: YYYY-MM-DDTHH:MM:SSZ 형식의 UTC 시각이다.
+    - JSTR: json.dumps(문자열, ensure_ascii=True)의 결과다. 앞뒤 따옴표를 포함한다.
+  - NONE과 NULL:
+    - NONE은 값을 얻지 못했거나, 그 단계가 실행되지 않았거나, 형식 검사를 통과하지 못해 원본을 옮기지 않았음을 뜻한다.
+    - NULL은 형식 검사를 통과한 원본 JSON 값이 null임을 뜻한다. 유형에 NULL이 적힌 키에만 쓴다.
+  - 원본 API 값과 파생 검사값:
+    - 원본 API 값 키는 다음과 같다. 형식 검사(W0 또는 R1)를 통과한 결과의 필드를 그대로 옮긴다.
+      - SNAPSHOT_ID, SNAPSHOT_FILE_SHA256, STATE_SHA256, E2_STATUS, E4_STATUS
+      - STORE_STATUS, STORE_EXIT_CODE, STORE_FINAL_FILE_CREATED, STORE_ERROR_CODE, RECORD_ID, RECORD_FILE_SHA256
+      - LOOKUP_STATUS, LOOKUP_EXIT_CODE, LOOKUP_ERROR_CODE
+    - 원본 목록의 개수를 담는 키: STORE_WARNING_COUNT, LOOKUP_WARNING_COUNT
+    - E3R 검증 뒤 옮기는 값: EVIDENCE_STATUS, EVIDENCE_EXIT_CODE
+    - 그 밖의 키는 모두 P가 계산하거나 판정한 파생 검사값이다. STAGE_, FIRST_, AXIS_, CONTRACT_, STATE_SHA256_RECOMPUTED_MATCH, EVIDENCE_BYTES, EVIDENCE_SHA256, EVIDENCE_VALID, LOOKUP_EVIDENCE_CANONICAL_SHA256, MATCH_, E6_, B0_, B1_, DIFF_, REQUIRED_MISSING, 시각 키, REPORT_COMPLETE, PROGRAM_EXIT가 여기에 해당한다.
+  - 고정 키 순서와 유형:
+    - 1 REPORT_SCHEMA: moneylab.auto06.p_report/1 (고정)
+    - 2 RUN_STARTED_UTC: UTC
+    - 3 STAGE_S0: ENUM(PASS, FAIL, UNKNOWN, NOT_RUN). 4–14의 STAGE_ 키도 같은 ENUM이다.
+    - 4 STAGE_B0
+    - 5 STAGE_E1
+    - 6 STAGE_E1C
+    - 7 STAGE_E2
+    - 8 STAGE_E3R
+    - 9 STAGE_E3S
+    - 10 STAGE_E4
+    - 11 STAGE_E5
+    - 12 STAGE_E6
+    - 13 STAGE_B1
+    - 14 STAGE_CMP
+    - 15 FIRST_FAILED_STAGE: ENUM(S0, B0, E1, E1C, E2, E3R, E3S, E4, E5, E6, B1, CMP) | NONE
+    - 16 FIRST_FAIL_CODE: ENUM(PRECONDITION, CLI_REJECTED, CLI_STATUS, GIT_REJECTED, TIMEOUT, OUTPUT_LIMIT, REAP_FAILED, LINK_FOUND, UNSUPPORTED_ENTRY, READ_FAILED, CHANGED_WHILE_READ, LIST_LIMIT, LIST_DEADLINE, CONTRACT_MISMATCH, STATE_MISMATCH, AUTOMATION_ERROR, EVIDENCE_UNRECOGNIZED, TASK_STATUS, STORE_RESULT, LOOKUP_RESULT, TRACKED_CHANGES, ARTIFACT_MISMATCH, EXCEPTION) | NONE
+    - 17 AXIS_EXEC: ENUM(EVIDENCE_RETURNED, UNKNOWN, NOT_RUN)
+    - 18 AXIS_TASK: ENUM(SUCCEEDED, VALIDATION_FAILED, SOURCE_UNVERIFIED, TIMEOUT, OUTPUT_LIMIT_EXCEEDED, UNEXPECTED_EXIT, DENIED, UNKNOWN, NOT_AVAILABLE)
+    - 19 AXIS_STORE: ENUM(STORED_NEW, STORED_WITH_WARNINGS, ALREADY_STORED_UNEXPECTED, DEFINED_ERROR, NOT_ATTEMPTED, UNKNOWN, NOT_RUN)
+    - 20 AXIS_LOOKUP: ENUM(MATCHED, MISMATCH, DEFINED_ERROR, UNKNOWN, NOT_RUN)
+    - 21 AXIS_STATE: ENUM(MATCH, MISMATCH, UNKNOWN, NOT_RUN)
+    - 22 AXIS_ARTIFACT: ENUM(MATCH, MISMATCH, UNKNOWN, NOT_RUN)
+    - 23 SNAPSHOT_ID: HEX | NONE
+    - 24 SNAPSHOT_FILE_SHA256: HEX | NONE
+    - 25 STATE_SHA256: HEX | NONE (E1 결과의 state_sha256_current)
+    - 26 CONTRACT_ENTRIES: COUNT | NONE
+    - 27 CONTRACT_MATCH: BOOL | NONE
+    - 28 STATE_SHA256_RECOMPUTED_MATCH: BOOL | NONE
+    - 29 E2_STATUS: TOKEN | NONE
+    - 30 E4_STATUS: TOKEN | NONE
+    - 31 EVIDENCE_BYTES: COUNT | NONE
+    - 32 EVIDENCE_SHA256: HEX | NONE
+    - 33 EVIDENCE_VALID: BOOL | NONE
+    - 34 EVIDENCE_STATUS: TOKEN | NONE
+    - 35 EVIDENCE_EXIT_CODE: SINT | NULL | NONE
+    - 36 STORE_STATUS: TOKEN | NONE
+    - 37 STORE_EXIT_CODE: SINT | NONE
+    - 38 STORE_FINAL_FILE_CREATED: BOOL | NULL | NONE
+    - 39 STORE_WARNING_COUNT: COUNT | NONE
+    - 40 STORE_ERROR_CODE: TOKEN | NULL | NONE
+    - 41 RECORD_ID: HEX | NULL | NONE
+    - 42 RECORD_FILE_SHA256: HEX | NULL | NONE
+    - 43 LOOKUP_STATUS: TOKEN | NONE
+    - 44 LOOKUP_EXIT_CODE: SINT | NONE
+    - 45 LOOKUP_WARNING_COUNT: COUNT | NONE
+    - 46 LOOKUP_ERROR_CODE: TOKEN | NULL | NONE
+    - 47 LOOKUP_EVIDENCE_CANONICAL_SHA256: HEX | NONE
+    - 48 MATCH_RECORD_ID: BOOL | NONE
+    - 49 MATCH_EVIDENCE_SHA256: BOOL | NONE
+    - 50 MATCH_FILE_SHA256: BOOL | NONE
+    - 51 E6_CHANGED_COUNT: COUNT | NONE (첫 번째 E6 status의 항목 수)
+    - 52 E6_IGNORED_COUNT: COUNT | NONE (두 번째 E6 status의 ignored 항목 총건수)
+    - 53 E6_IGNORED_LISTED: COUNT. E6_IGNORED_COUNT가 COUNT이면 min(E6_IGNORED_COUNT, 20), NONE이면 0이다.
+    - 54 E6_IGNORED_OMITTED: COUNT | NONE. E6_IGNORED_COUNT - E6_IGNORED_LISTED이고, E6_IGNORED_COUNT가 NONE이면 NONE이다.
+    - 번호 키 E6_IGNORED_ITEM_01부터 E6_IGNORED_ITEM_<LISTED>까지:
+      - 값은 JSTR이다.
+      - 내용은 porcelain이 보인 ignored 항목의 상대 경로 그대로다.
+      - 전체 ignored 항목을 Python 문자열 순서로 정렬한 앞부분이다.
+      - E6_IGNORED_LISTED가 0이면 이 번호 키는 나오지 않는다.
+    - 55 B0_WT_FILES: COUNT | NONE
+    - 56 B0_WT_DIRS: COUNT | NONE
+    - 57 B0_WT_BYTES: COUNT | NONE
+    - 58 B0_WT_FILES_SHA256: HEX | NONE
+    - 59 B0_WT_DIRS_SHA256: HEX | NONE
+    - 60 B0_VENV_FILES: COUNT | NONE
+    - 61 B0_VENV_DIRS: COUNT | NONE
+    - 62 B0_VENV_BYTES: COUNT | NONE
+    - 63 B0_VENV_FILES_SHA256: HEX | NONE
+    - 64 B0_VENV_DIRS_SHA256: HEX | NONE
+    - 65 B1_WT_FILES: COUNT | NONE
+    - 66 B1_WT_DIRS: COUNT | NONE
+    - 67 B1_WT_BYTES: COUNT | NONE
+    - 68 B1_WT_FILES_SHA256: HEX | NONE
+    - 69 B1_WT_DIRS_SHA256: HEX | NONE
+    - 70 B1_VENV_FILES: COUNT | NONE
+    - 71 B1_VENV_DIRS: COUNT | NONE
+    - 72 B1_VENV_BYTES: COUNT | NONE
+    - 73 B1_VENV_FILES_SHA256: HEX | NONE
+    - 74 B1_VENV_DIRS_SHA256: HEX | NONE
+    - 75 DIFF_WT_FILES_A: COUNT | NONE
+    - 76 DIFF_WT_FILES_M: COUNT | NONE
+    - 77 DIFF_WT_FILES_D: COUNT | NONE
+    - 78 DIFF_WT_DIRS_A: COUNT | NONE
+    - 79 DIFF_WT_DIRS_D: COUNT | NONE
+    - 80 DIFF_VENV_FILES_A: COUNT | NONE
+    - 81 DIFF_VENV_FILES_M: COUNT | NONE
+    - 82 DIFF_VENV_FILES_D: COUNT | NONE
+    - 83 DIFF_VENV_DIRS_A: COUNT | NONE
+    - 84 DIFF_VENV_DIRS_D: COUNT | NONE
+    - 85 DIFF_TOTAL: COUNT | NONE. 75–84 값의 합이며, 실제 차이 항목의 총건수다.
+    - 86 DIFF_UNEXPECTED: COUNT | NONE. D8의 기대 밖 항목 수다.
+    - 87 REQUIRED_MISSING: COUNT | NONE. D8의 필수 파일 누락 수다. DIFF_TOTAL과 DIFF_ 개수 키에 포함하지 않는다.
+    - 88 DIFF_LISTED: COUNT. DIFF_TOTAL이 COUNT이면 min(DIFF_TOTAL, 20), NONE이면 0이다.
+    - 89 DIFF_OMITTED: COUNT | NONE. DIFF_TOTAL - DIFF_LISTED이고, DIFF_TOTAL이 NONE이면 NONE이다.
+    - 번호 키 DIFF_ITEM_01부터 DIFF_ITEM_<LISTED>까지:
+      - 값은 JSTR이며, 내용은 "<A|M|D>:<F|D>:<상대 경로>"다.
+      - 실제 차이 항목 전체를 정렬 키 (분류 순위, 상대 경로, F 또는 D, A·M·D)로 Python 순서 정렬한 앞부분이다.
+      - 분류 순위는 기대 밖 0, 불확실 1, 기대됨 2다.
+      - 상대 경로 규칙은 D8을 따른다.
+      - DIFF_LISTED가 0이면 이 번호 키는 나오지 않는다.
+    - 90 RUN_FINISHED_UTC: UTC
+    - 91 REPORT_COMPLETE: YES (고정)
+    - 92 PROGRAM_EXIT: ENUM(0, 1, 2)
+  - 종료 코드:
+    - 2: 다음 중 하나에 해당하면 종료 코드는 2다. 확인된 위반이 함께 있어도 2다.
+      - 어느 STAGE나 AXIS가 UNKNOWN이다.
+      - AXIS_STORE가 ALREADY_STORED_UNEXPECTED다.
+      - D10의 판정 규칙에 해당하지 않는 조합이다.
+      - 보고를 완성하지 못했다.
+    - 1: 2가 아니면서 확인된 조건 위반이 하나 이상 있다.
+    - 0: D10의 SUCCESS 조건을 하나씩 모두 확인했고 모든 STAGE가 PASS다. 확인하지 못한 조건을 성공으로 채우지 않는다.
+  - 출력 수락 조건:
+    - 도구는 stdout과 stderr를 합쳐 보여준다. 관측 출력에 위 줄만 정해진 순서로 담겨야 한다.
+    - 각 값이 정해진 유형이어야 한다. 중복 키, 누락 키, 추가 줄, 형식 밖 값이 없어야 한다.
+    - 두 종류의 번호 키 개수가 각각 E6_IGNORED_LISTED, DIFF_LISTED와 같아야 한다. LISTED와 OMITTED의 합은 해당 COUNT 또는 TOTAL과 같아야 한다. COUNT 또는 TOTAL이 NONE이면 LISTED는 0, OMITTED는 NONE이어야 한다.
+    - 마지막 두 줄은 REPORT_COMPLETE=YES와 PROGRAM_EXIT=<n>이어야 하고, n은 도구가 보고한 프로세스 종료 코드와 같아야 한다.
+    - 하나라도 어기면 출력 미수락이다. 부분 출력은 수락하지 않는다.
+- D10 판정:
+  - 축 기록:
+    - 각 축은 P 출력값 그대로 기록하며, 최종 판정 때문에 바꾸지 않는다.
+    - 관측된 FAIL 항목과 UNKNOWN 항목은 모두 보존해 기록한다.
+    - 종료 코드만으로 파일 생성 여부나 실행 여부를 추정하지 않는다.
+  - 확인된 조건 위반: 출력이 수락된 경우, 다음 중 하나 이상이면 확인된 위반이 있다.
+    - 어느 STAGE가 FAIL이다. E1, E1C, E2, E4의 정의된 오류·경고·불일치에 의한 FAIL도 포함한다.
+    - AXIS_TASK가 SUCCEEDED가 아닌 정의된 status다(UNKNOWN과 NOT_AVAILABLE 제외).
+    - AXIS_STORE가 STORED_WITH_WARNINGS 또는 DEFINED_ERROR다.
+    - AXIS_LOOKUP이 MISMATCH 또는 DEFINED_ERROR다.
+    - AXIS_STATE가 MISMATCH다.
+    - E6_CHANGED_COUNT가 1 이상이다.
+    - AXIS_ARTIFACT가 MISMATCH다.
+  - 판정 순서:
+    - 1. P가 실행되지 않았으면 NOT_RUN이며, 사유를 기록한다.
+    - 2. 출력이 수락되지 않았으면 전체 UNKNOWN이다. 관측된 부분 값은 참고로만 기록하고 판정 근거로 쓰지 않는다.
+    - 3. 출력이 수락되고 확인된 위반이 하나 이상 있으면 FAIL이다. 같은 출력의 UNKNOWN 항목을 병기한다. 이 경우 PROGRAM_EXIT는 D9에 따라 1 또는 2일 수 있으며, 어느 쪽이든 판정은 FAIL이다.
+    - 4. 출력이 수락되고 확인된 위반이 없으면서, 다음 중 하나에 해당하면 UNKNOWN이다.
+      - 판정에 필요한 값 중 하나라도 UNKNOWN 또는 NONE이다.
+      - AXIS_STORE가 ALREADY_STORED_UNEXPECTED다.
+    - 5. 다음 SUCCESS 조건을 하나씩 모두 확인한 경우에만 SUCCESS다.
+      - PROGRAM_EXIT 0
+      - 모든 STAGE PASS
+      - AXIS_EXEC=EVIDENCE_RETURNED
+      - AXIS_TASK=SUCCEEDED이고 EVIDENCE_EXIT_CODE=0
+      - AXIS_STORE=STORED_NEW
+      - AXIS_LOOKUP=MATCHED
+      - AXIS_STATE=MATCH
+      - E6_CHANGED_COUNT=0
+      - AXIS_ARTIFACT=MATCH
+      - DIFF_UNEXPECTED=0, REQUIRED_MISSING=0
+    - 6. 위 어디에도 해당하지 않는 조합은 UNKNOWN이며, PROGRAM_EXIT는 2여야 한다. 판정 규칙 밖의 조합이라도 이미 확인된 위반은 없애지 않으며, 그 경우는 3에 따라 FAIL이다.
+  - TIMEOUT:
+    - AXIS_TASK=TIMEOUT은 확인된 작업 결과이며 FAIL 사유다.
+    - 실제 action 작업이 완료됐는지와 그 자식이 파일을 만들었는지는 불명으로 따로 기록한다.
+    - 파일 생성 여부는 B1 비교 결과로만 말한다.
+- D11 실패, UNKNOWN, 종료 진단:
+  - 기능 단계의 중단:
+    - 어느 단계가 FAIL이나 UNKNOWN이 되면 이후 기능 단계(E1, E1C, E2, E3R, E3S, E4, E5)는 NOT_RUN이다.
+    - run_action, store_evidence, load_evidence와 workstate CLI는 어떤 결과 뒤에도 다시 호출하지 않는다.
+  - S0 또는 B0에서 멈춘 경우: 쓰기가 없었으므로 E6, B1, CMP도 NOT_RUN이고 AXIS_ARTIFACT=NOT_RUN이다.
+  - 읽기 전용 종료 진단:
+    - E1부터 E5 사이에서 멈추고, P가 제어를 유지하며 출력 채널이 유효하면, 아직 실행하지 않은 E6, B1, CMP를 이 순서로 수행한다.
+    - E6이 FAIL 또는 UNKNOWN이어도 같은 조건이면 B1과 CMP를 시도한다. 정상 진행 중 E6이 실패한 경우에도 같다.
+    - B1이 FAIL 또는 UNKNOWN이면 CMP는 NOT_RUN이고 AXIS_ARTIFACT=UNKNOWN이다.
+    - 회수 실패나 동시 변경으로 안정된 비교를 얻지 못하면 AXIS_ARTIFACT=UNKNOWN이다.
+  - 횟수 제한: E6, B1, CMP는 정상 진행과 종료 진단을 합쳐 각각 최대 1회다. 이미 실행한 단계는 다시 실행하지 않는다.
+  - 최초 실패값 보존:
+    - FIRST_FAILED_STAGE와 FIRST_FAIL_CODE는 실행 순서상 처음으로 FAIL 또는 UNKNOWN이 된 단계와 그 코드로 정한다. 한 번 정하면 바꾸지 않는다.
+    - 종료 진단으로 실행한 E6, B1, CMP의 결과는 이 두 키를 덮어쓰지 않는다.
+    - 정상 진행에서 다른 실패 없이 E6, B1, CMP가 처음 실패하면 그 단계가 최초 실패다.
+    - 실패나 불명이 없으면 두 키는 NONE이다.
+  - 진단하지 않는 경우: KeyboardInterrupt, 출력 쓰기 실패, 프로세스 소실 뒤에는 자동 진단이나 재실행을 하지 않는다.
+  - P 이후의 처리:
+    - P 종료 코드가 0이 아니거나 출력이 수락되지 않으면 IMPLEMENTATION을 멈추고 보고한다.
+    - 이후 확인은 별도 승인된 EXECUTION_CLOSEOUT으로만 한다. 허용 범위는 다음 두 가지뿐이다.
+      - E6과 같은 git status 2종
+      - data/processed/workstate/AUTO-06과 data/processed/runlog/AUTO-06의 파일 이름 목록(내용 읽기 없음)
+    - P, run_action, store_evidence, load_evidence, snapshot, verify는 다시 실행하지 않는다.
+  - 문서화 전이:
+    - 중단 지점과 무관하게, 사례 기록 작성은 CASE_RECORD_DRAFT의 별도 승인으로 진행할 수 있다.
+    - 수행하지 못한 단계는 NOT_RUN과 사유로 기록한다.
+- D12 한계와 산출물 범위 불일치의 처리:
+  - 관측 한계:
+    - 실행 전 시도 기록이 없고 중복 실행 통제도 없다. executor 실행 lock은 한 프로세스 안에서만 작동한다.
+    - -B 전달의 근거는 기준 코드(policy.build_argv)와 AUTO-05 테스트다. 이 사례는 관측 범위 안에서 바이트코드가 생기지 않았는지만 확인하며, 실제 자식 argv를 직접 관측하지 않는다.
+    - executor가 kill하는 대상은 직접 자식뿐이다. 회수에 실패한 경우 손자 프로세스(읽기 전용 git)가 남아 종료 진단과 경쟁할 수 있다.
+    - 예외 경계 밖의 인터프리터 시작·종료, import 부수 출력, 강제 종료는 통제하지 못한다.
+    - D8의 관측 한계를 함께 적용한다.
+    - 허용 범위는 사람 승인 아래 사례 1건이다. 무인 운영 준비로 판정하지 않는다.
+  - 산출물 범위 불일치(사건 한정 문서화):
+    - AXIS_ARTIFACT=MISMATCH는 통합 사례 FAIL의 사유이며, FAIL은 바뀌지 않는다.
+    - MISMATCH가 관측되면 IMPLEMENTATION을 멈춘다. 별도 승인된 EXECUTION_CLOSEOUT과 문서화 전이(CASE_RECORD_DRAFT, CASE_RECORD_WRITE)를 거친 뒤 관측 사실을 사례 기록으로 보존할 수 있다.
+    - 이 처리는 다음을 모두 충족하는 차이에만 적용한다.
+      - 승인된 P 1회 실행 동안 생긴 차이다.
+      - P 출력에 차이 건수(DIFF_TOTAL, DIFF_UNEXPECTED, REQUIRED_MISSING)와, D9 출력 상한 안의 차이 항목이 기록되었다. 생략 항목(DIFF_OMITTED)은 생략된 사실과 건수만 기록하며, 확인했다고 주장하거나 추정해 복원하지 않는다.
+      - 보존되며 정리되지 않았다.
+      - 원인 설명은 추론으로 표시했다.
+    - 위 조건을 충족한 차이는 그것만으로 task 완료를 막는 설명되지 않은 상태 변경으로 보지 않는다.
+    - 이 조항은 범위 밖 쓰기를 미리 허용하지 않는다. 다른 위반을 면제하지도 않는다. 다음과 같은 다른 위반에는 완료 판정 규칙을 그대로 적용한다.
+      - tracked·untracked 변경
+      - 보호 파일 변경
+      - P나 작업 API의 재실행
+      - 정리
+      - 설명되지 않은 추가 변경
+  - 사례 판정과 task 완료:
+    - 통합 사례의 FAIL·UNKNOWN을 사례 기록으로 보존하는 것과 문서화 task의 완료(COMPLETE)는 별개로 판정한다.
+    - task 완료는 통합 사례의 최종 판정을 바꾸지 않는다.
+- D13 비식별화:
+  - 공개 기록과 P 출력에 넣는 것: 상대 경로, 내용 해시, ID, 판정 값, 개수, UTC 시각.
+  - 넣지 않는 것: 절대 경로, 사용자 이름, 파일 소유자, 세션 식별값, 인증정보, evidence·snapshot·runlog 원문, warnings 원문, error.detail, 예외 원문, traceback.
+  - evidence와 snapshot 원본은 ignored 경로에 둔다. 커밋하거나 정리하지 않는다.
+- D14 Guard와 보호의 적용 범위:
+  - 확인된 범위:
+    - 활성 Guard는 Claude 도구 호출의 명령 텍스트를 판정한다. P에 대해서는 heredoc 원문 전체가 1회 판정된다.
+    - 코드 수준 제약은 테스트로 확인된 범위에서 존재한다.
+      - executor: action allowlist, 고정 argv(-B 포함), 환경 allowlist, 출력 상한, 단일 실행 lock
+      - workstate: git 하위 명령 allowlist
+      - workstate·runlog 저장: 경로 경계 확인, ignored 확인, 링크 거부, 덮어쓰지 않는 생성
+  - 미확인 범위:
+    - P의 자식, executor의 손자, git 프로세스 각각에 Guard나 권한 창이 적용되는지. 적용된다고 가정하지 않는다.
+    - 운영체제나 도구 sandbox의 제한이 자식 프로세스에 적용되는지.
+    - 내부 호출에 아무 보호가 없다고 단정하지도 않는다.
+  - 운영:
+    - 허용된 전달 방식이 Guard나 권한 창에서 차단되면 우회하거나 변형하지 않고 중단한다.
+    - 각 명령의 Guard 결과와 승인 창은 관측한 대로만 보고한다.
+- D15 문서 검증:
+  - PRECOMMIT_AUDIT와 CLEAN_COMMIT_E2E의 로컬 검증은 다음으로 제한한다: 문서 내용, 비식별화, 바이트 형식, 변경 범위, 증거 값 대조.
+  - 검사는 BASE_PYTHON을 -I -B로 실행한다. 파일 읽기와 메모리 계산만 하며, moneylab을 import하지 않고 파일을 쓰지 않는다.
+  - 전체 pytest, ruff, mypy는 NOT_REQUIRED다.
+  - CLEAN_COMMIT_E2E에서는 검사 전후의 git status(ignored 포함)가 같은지 확인한다.
+- D16 CI 검사 대상 기록:
+  - PR_CI에서 다음을 구분해 기록한다: PR head SHA, run의 headSha, 실제 checkout SHA와 tree.
+  - checkout 대상이 시험용 merge commit이면 그 parents를 기록하고, 그 tree와 PR head tree의 관계도 기록한다.
+  - 필수 Windows job의 결과와 집계를 기록한다.
+  - Linux experimental의 기존 wrapper 실패 2건과 신규 실패를 구분한다. 실패 이름이 같다는 이유만으로 원인이 같다고 단정하지 않는다.
+  - CI는 수동 실행하거나 재실행하지 않는다.
+
+## TEST_GATES
+
+- 코드 변경이 없으므로 로컬 pytest, ruff, mypy는 NOT_REQUIRED다.
+- 로컬 검증은 D15의 문서 검사로 제한한다.
+- 계약 파일 확인:
+  - UTF-8, BOM 없음, CR 0, U+00A0 0, 탭 0, 줄 끝 공백 0, 끝 LF 1개
+  - 작업 파일, staged, commit blob의 내용 SHA-256이 승인값과 같음
+- 변경 집합과 보호 diff 확인, git diff --check.
+
+## E2E_GATES
+
+- CLEAN_COMMIT_E2E: clean 상태의 구현 커밋에서 D15 검사를 다시 하고, 검사 전후 git status(ignored 포함)가 같은지 확인한다.
+- PR_CI: 정확한 PR head의 필수 Windows CI SUCCESS를 확인하고 D16을 기록한다.
+- 통합 사례 실행(P)은 IMPLEMENTATION / EXECUTION_ONLY에서만 하며 E2E_GATES에서 다시 실행하지 않는다.
+
+## ACCEPTANCE_CRITERIA
+
+- AC1: C1·Ce·I의 parent와 변경 집합이 COMMIT_PLAN과 같다.
+- AC2: base..I는 COMMIT_PLAN의 파일뿐이다. 보호 diff는 0이고, 계약 해시는 변하지 않았다.
+- AC3: 다음 중 하나가 기록됨.
+  - D3의 환경 확인값, pip check 통과, 환경 준비 직후의 ignored 목록
+  - 중단된 경우 그 관측값, 실패 지점, 이후 단계의 NOT_RUN 사유
+- AC4: 다음 중 하나가 기록되었다.
+  - P가 실행된 경우: P 출력의 수락 여부와 그 근거. 출력이 수락되었으면 STAGE_S0 값(PASS, FAIL, UNKNOWN)과 실행 진입 HEAD 확인 결과. 미수락이면 S0 결과는 미확인으로 기록한다.
+  - P가 실행되지 않은 경우: NOT_RUN과 그 사유.
+- AC5: 다음 중 하나가 기록되었다.
+  - 출력이 수락된 경우: 실행·작업·저장·조회·상태·산출물 축과 통합 사례 최종 판정을 D10에 따라 각각 기록한다. 확인된 위반과 UNKNOWN이 함께 있으면 둘 다 기록한다.
+  - 출력이 수락되지 않은 경우: 최종 판정 UNKNOWN, 그리고 축 값 미확인 사유.
+- AC6: 다음 중 하나가 기록됨.
+  - B0·B1의 영역별 수와 집계 해시, 실제 차이 건수, DIFF_UNEXPECTED, REQUIRED_MISSING
+  - NOT_RUN·UNKNOWN과 그 사유
+- AC7: PRECOMMIT_AUDIT 시점에 base..HEAD 밖의 tracked·untracked 변경이 없음.
+- AC8: 사례 기록이 ACCEPTED ERRATA의 요건과 D13을 만족함.
+- AC9: W와 승인 S, staged blob, commit blob의 내용 SHA-256이 일치하고, commit 후 clean.
+- AC10: 정확한 PR head의 Windows CI SUCCESS와 D16 기록. PR_CI 이전 단계에서는 NOT_YET_APPLICABLE이다.
+- 완료 판정:
+  - 문서화 task의 COMPLETE는 다음을 모두 요구한다.
+    - AC1–AC10 충족
+    - 계약 위반이 없음
+    - 보호 파일 변경이 없음
+    - 설명되지 않은 상태 변경이 없음. D12의 사건 한정 처리를 포함한다.
+  - 통합 사례 SUCCESS는 완료 조건이 아니다. 완료는 통합 사례의 최종 판정을 바꾸지 않는다.
+  - 중단 후 문서화는 D11·D12의 별도 승인과 조건을 따른다.
+  - 아직 실행하지 않은 gate의 조건은 충족으로 표시하지 않고 NOT_YET_APPLICABLE 또는 NOT_RUN으로 표시한다.
+
+## REQUIRED_EVIDENCE
+
+- GIT_VERIFIABLE:
+  - base·C1·Ce·I·merge SHA, tree, parents
+  - 파일 집합, 계약 해시
+  - W·S·staged·commit blob 내용 해시
+- CLAUDE_REPORTED:
+  - 환경 확인값, 사전 검토 결과
+  - P 원문 sha256, P 출력과 프로세스 종료 코드, 출력 수락 여부
+  - 각 축과 판정
+  - D15 검사 결과
+  - Guard·권한 관측
+- INDEPENDENT:
+  - ChatGPT·사용자 검토
+  - 정확한 PR head의 GitHub CI와 D16의 checkout 대상 기록
+- 직접 관측, 보고, 추론을 구분한다. Claude가 실행한 결과를 INDEPENDENT로 쓰지 않는다.
+
+## REQUIRED_REPORT
+
+TASK_ID, GATE, SUBPHASE, HEAD, parent, tree, 계약 해시, 변경 집합, 보호 diff, 전후 상태, ignored 산출물, P 출력 수락 여부와 각 축·판정, UNKNOWN 항목, NOT_RUN 사유, GUARD_EVENTS, DEVIATIONS, ISSUES, PROPOSED_ERRATA, <GATE>_PASS = YES / NO, READY_FOR_<NEXT_GATE> = YES / NO, 다음 승인 경계를 보고하고 멈춘다.
+
+## STOP_CONDITIONS
+
+- 기준선·HEAD·tree·계약 해시·파일 범위 불일치, 예상 밖 untracked
+- 생성 전 대상 branch·worktree가 이미 있음, 생성 후 기대 상태와 다름
+- fetch 후 원격 추적 main이나 그 tree가 기대값과 다름, SOURCE_WORKTREE HEAD tree가 CANONICAL_BASE_TREE와 다름
+- PATH_VARIABLES 값이 승인문에 없거나 기대 상태와 다름
+- 환경 확인 불충족, pip check 실패
+- ENVIRONMENT_PREPARATION_ONLY 완료 시점의 확인에서, .venv 밖에 __pycache__가 있거나 D3 밖의 ignored 항목이 있다. 실행 뒤의 산출물은 이 조건이 아니라 D8로 판정한다.
+- 실행 진입 HEAD가 Ce가 아님
+- 실행할 P 원문의 sha256이 PROGRAM_REVIEW에서 수락된 값과 다름
+- P 종료 코드가 0이 아님, P 출력 미수락
+- ACCEPTED ERRATA 없이 사례 기록 파일을 만들거나 바꿈
+- 보호 파일 변경, 기존 코드·테스트·설정 변경
+- Guard DENY, 권한 거절·무응답, 예상 밖 ASK, 오류·결과 불명
+- 계약 모순, 상위 규칙과의 충돌
+- 위 조건에 따른 중단은 보고 후 멈춤을 뜻한다. D11과 D12의 별도 승인에 따른 EXECUTION_CLOSEOUT과 문서화 전이를 막지 않는다.
