@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import os
+import stat
 import threading
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from moneylab.storage.atomic import CreateNewError
 from moneylab.taskctl import lease as LS
 from moneylab.taskctl import ledger as LG
 from moneylab.taskctl.ledger import TaskctlError
+from moneylab.workstate.collect import is_link_like
 
 UTC_TEXT = NOW.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -369,3 +371,111 @@ def test_p8_existing_regular_pr_text_is_never_replaced(local_done):
     assert tc("pr-text", "--sha256", sha(PR_BODY), stdin=PR_BODY)["code"] == "PR_TEXT_EXISTS"
     assert (directory / "pr_text.md").read_bytes() == b"left before\n" and events_of(directory) == before
     assert not (directory / "LEASE").exists()
+
+
+# ------------------------------------------------------------------------------------------- PILOT-DELEGATION-01 IL1-IL6
+# init on a ledger path whose existing component is a link, a broken link or a junction (D4 of GOV-AUTOMATION-03).
+# Every test uses make_repo, Taskctl and TASK ("PILOT-X") from test_taskctl_cli: make_repo commits the temporary
+# Work Order docs/tasks/PILOT-X/WORK_ORDER.md and Taskctl.init passes --task-id PILOT-X, so the path init checks is
+# LEDGER_ROOT/TASK. Links and their targets are made only inside the tmp_path repository.
+
+
+def make_dir_symlink(target: Path, link: Path, case: str) -> None:
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314 or exc.errno in (errno.EPERM, errno.ENOTSUP):
+            pytest.skip(f"NOT_RUN_PLATFORM: {case}")
+        raise
+
+
+def init_env(tmp_path, monkeypatch):
+    repo, base, c1 = make_repo(tmp_path)
+    tc = Taskctl(repo, monkeypatch)
+    ledger_root = repo.root / LG.LEDGER_ROOT  # data/processed/taskctl
+    return repo, base, c1, tc, ledger_root, ledger_root / TASK
+
+
+def dir_with_file(path: Path) -> Path:
+    path.mkdir()
+    (path / "kept.txt").write_bytes(b"target bytes\n")
+    return path
+
+
+def files_of(path: Path) -> dict[str, bytes]:
+    if not path.exists():
+        return {}
+    return {p.relative_to(path).as_posix(): p.read_bytes() for p in sorted(path.rglob("*")) if p.is_file()}
+
+
+def assert_init_refused(repo, base, c1, tc, link: Path, target: Path) -> None:
+    """init is PATH_INVALID; the link, its target's files, HEAD and git status are unchanged; no ledger is made."""
+    before = (os.path.lexists(link), target.exists(), files_of(target), repo.git("rev-parse", "HEAD"),
+              repo.git("status", "--porcelain=v2", "--untracked-files=all", "--ignored=matching"))
+    out = tc.init(base, c1)
+    assert out["code"] == "PATH_INVALID", out
+    after = (os.path.lexists(link), target.exists(), files_of(target), repo.git("rev-parse", "HEAD"),
+             repo.git("status", "--porcelain=v2", "--untracked-files=all", "--ignored=matching"))
+    assert after == before
+    assert before[0] is True
+    assert not any(p.name in ("events", "LEASE") for p in target.rglob("*")) if target.exists() else True
+
+
+@needs_git
+def test_init_il1_ledger_root_symlink_is_refused(tmp_path, monkeypatch):
+    repo, base, c1, tc, ledger_root, _ = init_env(tmp_path, monkeypatch)
+    target = dir_with_file(repo.root / "data/processed/il1-target")
+    make_dir_symlink(target, ledger_root, "taskctl-init-ledger-root-symlink")
+    assert_init_refused(repo, base, c1, tc, ledger_root, target)
+
+
+@needs_git
+def test_init_il2_broken_ledger_root_symlink_is_refused(tmp_path, monkeypatch):
+    repo, base, c1, tc, ledger_root, _ = init_env(tmp_path, monkeypatch)
+    target = repo.root / "data/processed/il2-missing"
+    make_dir_symlink(target, ledger_root, "taskctl-init-ledger-root-broken-symlink")
+    assert_init_refused(repo, base, c1, tc, ledger_root, target)
+    assert not target.exists()
+
+
+@needs_git
+def test_init_il3_task_dir_symlink_is_refused(tmp_path, monkeypatch):
+    repo, base, c1, tc, ledger_root, task_dir = init_env(tmp_path, monkeypatch)
+    ledger_root.mkdir()
+    target = dir_with_file(repo.root / "data/processed/il3-target")
+    make_dir_symlink(target, task_dir, "taskctl-init-task-dir-symlink")
+    assert_init_refused(repo, base, c1, tc, task_dir, target)
+
+
+@needs_git
+@pytest.mark.parametrize("broken", [False, True])
+def test_init_il4_ledger_root_junction_is_refused(tmp_path, monkeypatch, broken):
+    repo, base, c1, tc, ledger_root, _ = init_env(tmp_path, monkeypatch)
+    target = dir_with_file(repo.root / "data/processed/il4-target")
+    make_junction(target, ledger_root, "taskctl-init-ledger-root-junction")
+    if broken:  # a junction whose target directory is gone (test setup inside tmp_path only)
+        (target / "kept.txt").unlink()
+        target.rmdir()
+    assert_init_refused(repo, base, c1, tc, ledger_root, target)
+
+
+@needs_git
+def test_init_il5_task_dir_junction_is_refused(tmp_path, monkeypatch):
+    repo, base, c1, tc, ledger_root, task_dir = init_env(tmp_path, monkeypatch)
+    ledger_root.mkdir()
+    target = dir_with_file(repo.root / "data/processed/il5-target")
+    make_junction(target, task_dir, "taskctl-init-task-dir-junction")
+    assert_init_refused(repo, base, c1, tc, task_dir, target)
+
+
+@needs_git
+def test_init_il6_regular_path_creates_plain_directories(tmp_path, monkeypatch):
+    repo, base, c1, tc, ledger_root, task_dir = init_env(tmp_path, monkeypatch)
+    assert not os.path.lexists(ledger_root)
+    assert tc.init(base, c1)["code"] == "OK"
+    for path in (ledger_root, task_dir, task_dir / "events"):
+        st = os.lstat(path)
+        assert not is_link_like(path, st) and stat.S_ISDIR(st.st_mode), path.name
+    event = task_dir / "events" / "000001.json"
+    st = os.lstat(event)
+    assert not is_link_like(event, st) and stat.S_ISREG(st.st_mode)
