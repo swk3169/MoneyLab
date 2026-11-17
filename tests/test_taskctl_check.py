@@ -15,6 +15,7 @@ from test_taskctl_cli import (
     make_repo,
     needs_git,
     sha,
+    taskctl_templates,  # noqa: F401  (autouse: checks the shared templates after each test)
     to_setup_done,
 )
 

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import stat
 import subprocess
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -14,6 +17,7 @@ import pytest
 from moneylab.taskctl import __main__ as M
 from moneylab.taskctl import lease as LS
 from moneylab.taskctl import ledger as LG
+from moneylab.workstate.collect import is_link_like
 
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
 
@@ -42,12 +46,18 @@ def sha(text: str | bytes) -> str:
     return hashlib.sha256(text.encode("utf-8") if isinstance(text, str) else text).hexdigest()
 
 
+# Fixed commit dates make the test repositories deterministic: a fresh make_repo() has the same BASE and C1
+# as the prebuilt templates below, and every later commit of the same content gets the same SHA.
+GIT_ENV = {**os.environ, "GIT_AUTHOR_DATE": "2026-11-16T12:00:00 +0000",
+           "GIT_COMMITTER_DATE": "2026-11-16T12:00:00 +0000"}
+
+
 class Repo:
     def __init__(self, root: Path) -> None:
         self.root = root
 
     def git(self, *args: str) -> str:
-        out = subprocess.run(["git", "-C", str(self.root), *args], capture_output=True, check=True)
+        out = subprocess.run(["git", "-C", str(self.root), *args], capture_output=True, check=True, env=GIT_ENV)
         return out.stdout.decode().strip()
 
     def write(self, rel: str, text: str) -> None:
@@ -124,7 +134,10 @@ def env(tmp_path, monkeypatch):
     return repo, base, c1, Taskctl(repo, monkeypatch)
 
 
-def to_setup_done(repo: Repo, base: str, c1: str, tc: Taskctl) -> None:
+def to_setup_done(repo: Repo, base: str, c1: str, tc: Taskctl, use_template: bool = True) -> None:
+    if use_template:
+        adopt("setup_done", repo, base, c1, tc)
+        return
     assert tc.init(base, c1)["code"] == "OK"
     tc.run_step("SETUP_ENV", lambda: (repo.root / ".venv").mkdir())
     assert tc.phase("SETUP_DONE")["code"] == "OK"
@@ -135,8 +148,7 @@ def implement(repo: Repo) -> None:
     repo.write("README.md", "readme 2\n")
 
 
-def to_committed(repo: Repo, base: str, c1: str, tc: Taskctl) -> str:
-    to_setup_done(repo, base, c1, tc)
+def _commit_steps(repo: Repo, tc: Taskctl) -> str:
     tc.run_step("IMPLEMENT", lambda: implement(repo))
     for step in ("TEST_TARGETED", "LINT", "TYPECHECK", "TEST_FULL", "LOCAL_AUDIT"):
         tc.run_step(step)
@@ -145,10 +157,23 @@ def to_committed(repo: Repo, base: str, c1: str, tc: Taskctl) -> str:
     return holder["i"]
 
 
-def to_local_done(repo: Repo, base: str, c1: str, tc: Taskctl) -> str:
-    i = to_committed(repo, base, c1, tc)
+def to_committed(repo: Repo, base: str, c1: str, tc: Taskctl, use_template: bool = True) -> str:
+    if use_template:
+        return adopt("committed", repo, base, c1, tc)["i"]
+    to_setup_done(repo, base, c1, tc, use_template=False)
+    return _commit_steps(repo, tc)
+
+
+def _local_done_steps(tc: Taskctl) -> None:
     tc.run_step("CLEAN_E2E")
     assert tc.phase("LOCAL_DONE")["code"] == "OK"
+
+
+def to_local_done(repo: Repo, base: str, c1: str, tc: Taskctl, use_template: bool = True) -> str:
+    if use_template:
+        return adopt("local_done", repo, base, c1, tc)["i"]
+    i = to_committed(repo, base, c1, tc, use_template=False)
+    _local_done_steps(tc)
     return i
 
 
@@ -156,11 +181,18 @@ PR_BODY = b"body\n"
 PUBLISH_EXPIRES = "2026-11-16T20:00:00Z"
 
 
-def to_ready(repo: Repo, base: str, c1: str, tc: Taskctl) -> tuple[str, str]:
-    i = to_local_done(repo, base, c1, tc)
+def _ready_steps(repo: Repo, tc: Taskctl, i: str) -> str:
     assert tc("pr-text", "--sha256", sha(PR_BODY), stdin=PR_BODY)["code"] == "OK"
     assert tc.phase("READY_TO_PUBLISH")["code"] == "OK"
-    return i, repo.git("rev-parse", f"{i}^{{tree}}")
+    return repo.git("rev-parse", f"{i}^{{tree}}")
+
+
+def to_ready(repo: Repo, base: str, c1: str, tc: Taskctl, use_template: bool = True) -> tuple[str, str]:
+    if use_template:
+        values = adopt("ready", repo, base, c1, tc)
+        return values["i"], values["tree"]
+    i = to_local_done(repo, base, c1, tc, use_template=False)
+    return i, _ready_steps(repo, tc, i)
 
 
 def record_publish(tc: Taskctl, c1: str, i: str, tree: str, base: str) -> dict:
@@ -168,11 +200,18 @@ def record_publish(tc: Taskctl, c1: str, i: str, tree: str, base: str) -> dict:
               "--pr-text-sha256", sha(PR_BODY), "--expires-utc", PUBLISH_EXPIRES)
 
 
-def to_publishing(repo: Repo, base: str, c1: str, tc: Taskctl) -> tuple[str, str]:
-    i, tree = to_ready(repo, base, c1, tc)
+def _publishing_steps(tc: Taskctl, c1: str, i: str, tree: str, base: str) -> None:
     out = record_publish(tc, c1, i, tree, base)
     assert out["code"] == "OK", out
     assert tc.phase("PUBLISHING")["code"] == "OK"
+
+
+def to_publishing(repo: Repo, base: str, c1: str, tc: Taskctl, use_template: bool = True) -> tuple[str, str]:
+    if use_template:
+        values = adopt("publishing", repo, base, c1, tc)
+        return values["i"], values["tree"]
+    i, tree = to_ready(repo, base, c1, tc, use_template=False)
+    _publishing_steps(tc, c1, i, tree, base)
     return i, tree
 
 
@@ -197,12 +236,155 @@ def good_merge(repo: Repo, base: str, i: str, tree: str) -> str:
     return repo.git("commit-tree", tree, "-p", base, "-p", i, "-m", "merge")
 
 
-def to_merged(repo: Repo, base: str, c1: str, tc: Taskctl, make_merge=good_merge) -> tuple[str, str, str]:
-    i, tree = to_publishing(repo, base, c1, tc)
+def _merged_steps(repo: Repo, tc: Taskctl, base: str, i: str, tree: str, make_merge) -> str:
     merge = make_merge(repo, base, i, tree)
     run_publish(tc, publish_remotes(i, base, merge), ("PUSH", "PR_CREATE", "CI_WAIT", "PREMERGE_CHECK", "MERGE"))
     assert tc.phase("MERGED")["code"] == "OK"
-    return i, tree, merge
+    return merge
+
+
+def to_merged(repo: Repo, base: str, c1: str, tc: Taskctl, make_merge=good_merge,
+              use_template: bool = True) -> tuple[str, str, str]:
+    if use_template and make_merge is good_merge:
+        values = adopt("merged", repo, base, c1, tc)
+        return values["i"], values["tree"], values["merge"]
+    i, tree = to_publishing(repo, base, c1, tc, use_template=use_template)
+    return i, tree, _merged_steps(repo, tc, base, i, tree, make_merge)
+
+
+# ------------------------------------------------------------------------------------------- templates (ERRATA-002)
+# Each prefix state (setup_done ... merged) is built once per test session with the real taskctl CLI and real
+# Git, from a copy of the previous template, under tmp_path_factory. A test never runs in a template: adopt()
+# copies it into the test's own tmp_path (own directory, .git and ledger), refuses link-like entries, checks the
+# copy and records that the template was used; the autouse fixture then checks the template is byte-for-byte
+# unchanged after the test. Tests that verify a prefix step itself build it with use_template=False.
+
+
+@dataclass
+class Template:
+    root: Path
+    base: str
+    c1: str
+    values: dict[str, str]
+    head_tree: str
+    status: bytes
+    events: dict[str, bytes]
+    manifest: dict[str, str]
+
+
+_FACTORY: list[pytest.TempPathFactory] = []
+_TEMPLATES: dict[str, Template] = {}
+_USED: set[str] = set()
+_PREVIOUS = {"committed": "setup_done", "local_done": "committed", "ready": "local_done",
+             "publishing": "ready", "merged": "publishing"}
+
+
+@pytest.fixture(autouse=True)
+def taskctl_templates(tmp_path_factory):
+    _FACTORY[:] = [tmp_path_factory]
+    _USED.clear()
+    yield
+    for stage in sorted(_USED):
+        template = _TEMPLATES[stage]
+        assert _manifest(template.root) == template.manifest, f"template {stage} was changed by a test"
+
+
+def _copy_tree(src: Path, dst: Path) -> None:
+    """Copy regular files and directories only. A link, junction or reparse point fails the copy."""
+    dst.mkdir()
+    with os.scandir(src) as entries:
+        for entry in entries:
+            path = Path(entry.path)
+            st = os.lstat(path)
+            if is_link_like(path, st):
+                raise AssertionError(f"link-like entry in a template: {entry.name}")
+            if stat.S_ISDIR(st.st_mode):
+                _copy_tree(path, dst / entry.name)
+            elif stat.S_ISREG(st.st_mode):
+                shutil.copyfile(path, dst / entry.name)
+            else:
+                raise AssertionError(f"unsupported entry in a template: {entry.name}")
+
+
+def _manifest(root: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for current, dirs, files in os.walk(root, followlinks=False):
+        rel = Path(current).relative_to(root).as_posix()
+        out[rel + "/"] = "dir"
+        for name in files:
+            out[f"{rel}/{name}"] = sha((Path(current) / name).read_bytes())
+    return out
+
+
+def _status(root: Path) -> bytes:
+    """Status without optional index writes, so reading a template never changes it."""
+    return subprocess.run(["git", "--no-optional-locks", "-C", str(root), "status", "--porcelain=v2", "-z",
+                           "--untracked-files=all", "--ignored=matching"],
+                          capture_output=True, check=True, env=GIT_ENV).stdout
+
+
+def _assert_no_template_path(copy: Path, template_root: Path) -> None:
+    needles = {os.fsencode(str(template_root)), template_root.as_posix().encode("utf-8")}
+    for current, _, files in os.walk(copy, followlinks=False):
+        if Path(current).relative_to(copy).as_posix().startswith(".git/objects"):
+            continue  # zlib-compressed objects; their content is covered by HEAD, tree and status
+        for name in files:
+            data = (Path(current) / name).read_bytes()
+            assert not any(needle in data for needle in needles), f"template path left in {name}"
+
+
+def _build(stage: str) -> Template:
+    work = _FACTORY[0].mktemp(f"taskctl-template-{stage}")
+    mp = pytest.MonkeyPatch()
+    try:
+        if stage == "setup_done":
+            repo, base, c1 = make_repo(work)
+            tc = Taskctl(repo, mp)
+            to_setup_done(repo, base, c1, tc, use_template=False)
+            values: dict[str, str] = {}
+        else:
+            previous = _template(_PREVIOUS[stage])
+            repo = Repo(work / "repo")
+            _copy_tree(previous.root, repo.root)
+            tc = Taskctl(repo, mp)
+            base, c1, values = previous.base, previous.c1, dict(previous.values)
+            if stage == "committed":
+                values["i"] = _commit_steps(repo, tc)
+            elif stage == "local_done":
+                _local_done_steps(tc)
+            elif stage == "ready":
+                values["tree"] = _ready_steps(repo, tc, values["i"])
+            elif stage == "publishing":
+                _publishing_steps(tc, c1, values["i"], values["tree"], base)
+            else:
+                values["merge"] = _merged_steps(repo, tc, base, values["i"], values["tree"], good_merge)
+    finally:
+        mp.undo()
+    assert not (repo.root / LG.LEDGER_ROOT / TASK / "LEASE").exists()
+    return Template(repo.root, base, c1, values, repo.git("rev-parse", "HEAD", "HEAD^{tree}"), _status(repo.root),
+                    event_files(repo), _manifest(repo.root))
+
+
+def _template(stage: str) -> Template:
+    if stage not in _TEMPLATES:
+        _TEMPLATES[stage] = _build(stage)
+    return _TEMPLATES[stage]
+
+
+def adopt(stage: str, repo: Repo, base: str, c1: str, tc: Taskctl) -> dict[str, str]:
+    """Move the test's repo to its own copy of the template and check the copy before the test goes on."""
+    template = _template(stage)
+    assert (base, c1) == (template.base, template.c1), "the test repository is not the template's BASE and C1"
+    copy = repo.root.parent / f"{repo.root.name}-{stage}"
+    _copy_tree(template.root, copy)
+    _USED.add(stage)
+    repo.root = copy
+    assert repo.git("rev-parse", "HEAD", "HEAD^{tree}") == template.head_tree
+    assert _status(copy) == template.status
+    assert event_files(repo) == template.events
+    assert tc("verify-ledger")["code"] == "OK"
+    _assert_no_template_path(copy, template.root)
+    return dict(template.values)
 
 
 # ------------------------------------------------------------------------------------------- happy path
@@ -211,7 +393,7 @@ def to_merged(repo: Repo, base: str, c1: str, tc: Taskctl, make_merge=good_merge
 @needs_git
 def test_full_delegation_path_reaches_complete(env):
     repo, base, c1, tc = env
-    i = to_local_done(repo, base, c1, tc)
+    i = to_local_done(repo, base, c1, tc, use_template=False)  # this test verifies every step itself
     text = b"PR body\n"
     assert tc("pr-text", "--sha256", sha(text), stdin=text)["code"] == "OK"
     assert tc.phase("READY_TO_PUBLISH")["code"] == "OK"

@@ -6,7 +6,14 @@ import json
 from pathlib import Path
 
 import pytest
-from test_taskctl_cli import TASK, Taskctl, make_repo, needs_git, to_setup_done
+from test_taskctl_cli import (
+    TASK,
+    Taskctl,
+    make_repo,
+    needs_git,
+    taskctl_templates,  # noqa: F401  (autouse: checks the shared templates after each test)
+    to_setup_done,
+)
 
 from moneylab.storage.atomic import CreateNewError
 from moneylab.taskctl import ledger as LG

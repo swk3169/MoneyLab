@@ -17,6 +17,7 @@ from test_taskctl_cli import (
     needs_git,
     record_publish,
     sha,
+    taskctl_templates,  # noqa: F401  (autouse: checks the shared templates after each test)
     to_local_done,
     to_ready,
     to_setup_done,
@@ -350,7 +351,10 @@ def test_p8_regular_lease_and_revoked_keep_their_behaviour(env):
 def test_p8_regular_pr_text_and_publish_keep_their_behaviour(tmp_path, monkeypatch):
     repo, base, c1 = make_repo(tmp_path)
     tc = Taskctl(repo, monkeypatch)
-    i, tree = to_ready(repo, base, c1, tc)  # pr-text OK on a regular file
+    i = to_local_done(repo, base, c1, tc)
+    assert tc("pr-text", "--sha256", sha(PR_BODY), stdin=PR_BODY)["code"] == "OK"  # pr-text OK on a regular file
+    assert tc.phase("READY_TO_PUBLISH")["code"] == "OK"
+    tree = repo.git("rev-parse", f"{i}^{{tree}}")
     directory = repo.root / LG.LEDGER_ROOT / TASK
     assert (directory / "pr_text.md").read_bytes() == PR_BODY
     assert tc("publish-draft")["code"] == "OK"
