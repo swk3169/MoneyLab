@@ -144,6 +144,19 @@ STOP_CONDITIONS:
 - 계약 모순, 상위 규칙과 충돌
 - 예상하지 못한 untracked 파일
 - <task별 추가 조건>
+
+## DELEGATION
+
+DELEGATION_SCHEMA: moneylab.delegation/1
+LEDGER_TASK_ID: <TASK_ID>
+BUDGET_TIME_SECONDS: <14400 이하 정수>
+BUDGET_FIX: <5 이하 정수>
+BUDGET_PYTEST: <3 이하 정수>
+BUDGET_SAME_FAIL: <2 이하 정수>
+REQUIRED_CI: <필수 CI job 이름, 예: pytest>
+PR_TITLE: <200자 이하 한 줄>
+SETUP_COMMAND_1: <정확한 환경 준비 명령. 필요하면 정확한 cd 결합>
+CHECK_COMMAND_1: <정확한 검사 명령(pytest·ruff·mypy). 필요하면 정확한 cd 결합. mypy는 --cache-dir .venv/.mypy_cache>
 ````
 
 ---

@@ -44,6 +44,7 @@ files = [
     "src/moneylab/pnl",
     "src/moneylab/scanner",
     "src/moneylab/sizing",
+    "src/moneylab/taskctl",
 ]
 follow_imports = "silent"
 
