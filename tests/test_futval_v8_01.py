@@ -440,3 +440,164 @@ def test_t12_run_through_the_real_git_path_records_verified_sources(src_repo, tm
     with pytest.raises(ValueError):
         F.run(tmp_path / "x", provenance=PROV)
     assert not (tmp_path / "x").exists()
+
+
+# --- precheck (Work Order FUTVAL-V8-01-PRECHECK; TEST namespace and small R only) -----------------------------------
+
+def pre_test(tmp_path: Path, name: str = "pre", reps: int = 6, prov: dict | None = None) -> dict:
+    return F.precheck(tmp_path / name, namespace=F.NS_TEST, cells=TEST_CELLS, reps=reps,
+                      provenance=PROV if prov is None else prov)
+
+
+@pytest.mark.parametrize("reps", [1, 5, 20, 37, 50])
+def test_precheck_reused_tails_equal_public_functions(reps):
+    for prob in (F.ALPHA, F.TOLERANCE):
+        tails = F._ExactTails(reps, prob)
+        for k in range(-1, reps + 2):
+            assert tails.upper(k) == F.exact_upper_tail(reps, prob, k)
+            assert tails.lower(k) == F.exact_lower_tail(reps, prob, k)
+    levels = F.holm_levels(12)
+    assert F._precheck_axis_a(F._ExactTails(reps, F.ALPHA), levels) == F.axis_a_thresholds(reps, levels)
+    assert F._precheck_axis_b(F._ExactTails(reps, F.TOLERANCE)) == F.axis_b_threshold(reps)
+
+
+def test_precheck_boundary_truth_table():
+    tails = F._ExactTails(40, F.ALPHA)
+    level = tails.upper(5)
+    assert F.boundary_check_a(tails.upper, 1, 5, level)["holds"] is True
+    assert F.boundary_check_a(tails.upper, 1, 4, level)["holds"] is False      # at-threshold fails
+    assert F.boundary_check_a(tails.upper, 1, 6, level)["holds"] is False      # neighbour fails
+    zero = F.boundary_check_a(tails.upper, 1, 0, Fraction(1))
+    assert zero["holds"] is True and zero["neighbour"] is None
+    low = F._ExactTails(6, F.TOLERANCE)
+    neg = F.boundary_check_b(low.lower, -1, F.LAMBDA)
+    assert neg["holds"] is True and neg["at_threshold"]["holds"] and neg["neighbour"]["point"] == 0
+    assert F.boundary_check_b(low.lower, 0, F.LAMBDA)["holds"] is False
+
+
+def test_precheck_b_nonnegative_condition_alone():
+    F.require_b_nonnegative(0)
+    with pytest.raises(F.StopRun) as err:
+        F.require_b_nonnegative(-1)
+    assert err.value.code == "B_NEGATIVE"
+
+
+def test_precheck_small_r_schema_order_and_no_seed_values(tmp_path, monkeypatch):
+    real = atomic.atomic_write_bytes
+    calls = []
+    monkeypatch.setattr(atomic, "atomic_write_bytes", lambda p, d: (calls.append(Path(p).name), real(p, d))[1])
+    doc = pre_test(tmp_path)
+    out = tmp_path / "pre"
+    assert calls == [F.PRECHECK_FILE, F.EXECUTION_FILE, F.SUMS_FILE]
+    assert sorted(os.listdir(out)) == sorted([F.PRECHECK_FILE, F.EXECUTION_FILE, F.SUMS_FILE])
+    stored = json.loads((out / F.PRECHECK_FILE).read_bytes())
+    assert stored == doc and set(stored) == {
+        "schema", "study", "preregistration", "decision_version", "code", "environment", "seed_check", "design",
+        "thresholds", "threshold_checks", "boundary_checks", "b_nonnegative", "classification"}
+    assert stored["schema"] == F.PRECHECK_SCHEMA and stored["classification"] == F.PRECHECK_CLASSIFICATION
+    assert stored["seed_check"] == {"namespace": F.NS_TEST, "count": 24, "distinct": 24, "pass": True}
+    assert stored["b_nonnegative"] is (stored["thresholds"]["b"] >= 0)
+    for rec in stored["threshold_checks"]:
+        assert rec["relative_error_ok"] is True and rec["same_direction"] is True
+    digest = hashlib.sha256((out / F.PRECHECK_FILE).read_bytes()).hexdigest()
+    assert (out / F.SUMS_FILE).read_text(encoding="ascii") == f"{digest}  {F.PRECHECK_FILE}\n"
+    text = b"".join((out / n).read_bytes() for n in os.listdir(out))
+    for n, th in TEST_CELLS:
+        for rep in range(6):
+            for st in F.STREAMS:
+                assert str(F.seed(F.NS_TEST, n, th, rep, st)).encode() not in text
+    assert json.loads((out / F.EXECUTION_FILE).read_bytes())["status"] == "COMPLETE"
+
+
+def test_precheck_does_not_call_data_bootstrap_or_rate_paths(tmp_path, monkeypatch):
+    def forbidden(*a, **k):
+        raise AssertionError("forbidden path")
+
+    for name in ("generate_p0", "v0_statistics", "v0_replicate", "_execute", "_work", "evaluate", "cp_interval",
+                 "verify_thresholds"):
+        monkeypatch.setattr(F, name, forbidden)
+    monkeypatch.setattr(P, "bootstrap_means", forbidden)
+    pre_test(tmp_path)
+
+
+def test_precheck_source_mismatch_stops_before_computation(src_repo, tmp_path, monkeypatch):
+    root, loaded = src_repo
+    (root / "tests/test_futval_v8_01.py").write_bytes(b"# edited test file\n")
+    called = []
+    monkeypatch.setattr(F, "seed_uniqueness", lambda *a, **k: called.append("seed"))
+    monkeypatch.setattr(F, "_ExactTails", lambda *a, **k: called.append("tails"))
+    with pytest.raises(F.StopRun) as err:
+        F.precheck(tmp_path / "out", namespace=F.NS_TEST, cells=TEST_CELLS, reps=6, source_root=root,
+                   loaded_sources=loaded)
+    assert err.value.code == "SOURCE_WORKTREE_MISMATCH" and called == []
+    assert os.listdir(tmp_path / "out") == [F.EXECUTION_FILE]
+    assert json.loads((tmp_path / "out" / F.EXECUTION_FILE).read_bytes())["code"] == "SOURCE_WORKTREE_MISMATCH"
+
+
+def test_precheck_real_git_path_records_verified_sources(src_repo, tmp_path):
+    root, loaded = src_repo
+    doc = F.precheck(tmp_path / "out", namespace=F.NS_TEST, cells=TEST_CELLS, reps=6, source_root=root,
+                     loaded_sources=loaded)
+    assert doc["code"] == F.git_provenance(root, loaded)
+
+
+@pytest.mark.parametrize("failing", [F.EXECUTION_FILE, F.SUMS_FILE])
+def test_precheck_failure_after_result_write_keeps_result(tmp_path, monkeypatch, failing):
+    pre_test(tmp_path, "ref")
+    reference = (tmp_path / "ref" / F.PRECHECK_FILE).read_bytes()
+    real = atomic.atomic_write_bytes
+    calls = []
+
+    def fail(path, data):
+        calls.append(Path(path).name)
+        if Path(path).name == failing:
+            raise OSError("injected")
+        return real(path, data)
+
+    monkeypatch.setattr(atomic, "atomic_write_bytes", fail)
+    with pytest.raises(OSError):
+        pre_test(tmp_path, "inj")
+    out = tmp_path / "inj"
+    assert (out / F.PRECHECK_FILE).read_bytes() == reference
+    assert not (out / F.SUMS_FILE).exists()
+    assert calls.count(failing) == 1 and calls.count(F.PRECHECK_FILE) == 1
+
+
+def test_precheck_method2_conditions_are_separate():
+    rel_bad = F._method2_record("A", 3, F.LAMBDA, Fraction(1, 100), 0.01 * (1 + 1e-6))
+    assert rel_bad["relative_error_ok"] is False and rel_bad["same_direction"] is True
+    dir_bad = F._method2_record("B", 3, F.LAMBDA, F.LAMBDA, 0.025 * (1 + 1e-12))
+    assert dir_bad["relative_error_ok"] is True and dir_bad["same_direction"] is False
+
+
+@pytest.mark.parametrize("patch", ["_relative_error", "_same_direction"])
+def test_precheck_method2_violation_stops_without_result(tmp_path, monkeypatch, patch):
+    monkeypatch.setattr(F, patch, (lambda *a: 1e-6) if patch == "_relative_error" else (lambda *a: False))
+    with pytest.raises(F.ComputationFailure):
+        pre_test(tmp_path)
+    out = tmp_path / "pre"
+    assert not (out / F.PRECHECK_FILE).exists() and not (out / F.SUMS_FILE).exists()
+    assert json.loads((out / F.EXECUTION_FILE).read_bytes())["code"] == "COMPUTATION_FAILURE"
+
+
+def test_precheck_existing_directory_is_left_unchanged(tmp_path):
+    out = tmp_path / "pre"
+    out.mkdir()
+    (out / "keep.txt").write_bytes(b"keep\n")
+    with pytest.raises(FileExistsError):
+        pre_test(tmp_path)
+    assert os.listdir(out) == ["keep.txt"] and (out / "keep.txt").read_bytes() == b"keep\n"
+
+
+def test_precheck_operational_overrides_and_cli(tmp_path, monkeypatch):
+    for kwargs in ({"reps": 5}, {"provenance": PROV}, {"source_root": tmp_path}, {"namespace": F.NS_PERF}):
+        with pytest.raises(ValueError):
+            F.precheck(tmp_path / "x", **kwargs)
+    assert not (tmp_path / "x").exists()
+    seen = []
+    monkeypatch.setattr(F, "precheck", lambda *a, **k: seen.append((a, k)))
+    assert F.main(["precheck", "--out", str(tmp_path / "y")]) == 0
+    assert seen == [((Path(tmp_path / "y"),), {})]
+    for argv in (["precheck"], ["precheck", "--out", "z", "--workers", "1"]):
+        with pytest.raises(SystemExit):
+            F.main(argv)

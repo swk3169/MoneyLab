@@ -585,6 +585,207 @@ def run(out_dir: Path, *, workers: int = 1, namespace: str = NS_MAIN, cells: Seq
             atomic.atomic_write_bytes(out / SUMS_FILE, _sums(out, RESULT_FILES))
 
 
+# --- deterministic precheck: seed uniqueness and thresholds only (Work Order FUTVAL-V8-01-PRECHECK) ------------------
+
+PRECHECK_SCHEMA = "moneylab.futval_v8_01.precheck/1"
+PRECHECK_FILE = "precheck.json"
+PRECHECK_CLASSIFICATION = "DESIGN_CONSTANTS_NOT_RESEARCH_RESULTS"
+
+
+class _ExactTails:
+    """Method 1 tails of Bin(R, prob) from one integer pmf pass: suffix sums (upper) and prefix sums (lower).
+
+    The values equal exact_upper_tail and exact_lower_tail; the public functions are not changed or called here.
+    """
+
+    def __init__(self, reps: int, prob: Fraction) -> None:
+        nums, den = _pmf_numerators(reps, prob)
+        self.reps, self.den = reps, den
+        self.suffix = [0] * (reps + 2)
+        for i in range(reps, -1, -1):
+            self.suffix[i] = self.suffix[i + 1] + nums[i]
+        self.prefix = [0] * (reps + 1)
+        total = 0
+        for i in range(reps + 1):
+            total += nums[i]
+            self.prefix[i] = total
+
+    def upper(self, k: int) -> Fraction:
+        if k <= 0:
+            return Fraction(1)
+        if k > self.reps:
+            return Fraction(0)
+        return Fraction(self.suffix[k], self.den)
+
+    def lower(self, x: int) -> Fraction:
+        if x < 0:
+            return Fraction(0)
+        if x >= self.reps:
+            return Fraction(1)
+        return Fraction(self.prefix[x], self.den)
+
+
+def _precheck_axis_a(tails: _ExactTails, levels: Sequence[Fraction]) -> list[int]:
+    """Same rule as axis_a_thresholds, on the reused suffix sums (exact integer cross-multiplication)."""
+    out = []
+    for t in levels:
+        a = tails.reps + 1
+        for k in range(tails.reps, -1, -1):
+            if tails.suffix[k] * t.denominator <= t.numerator * tails.den:
+                a = k
+            else:
+                break
+        out.append(a)
+    return out
+
+
+def _precheck_axis_b(tails: _ExactTails) -> int:
+    """Same rule as axis_b_threshold, on the reused prefix sums (exact integer cross-multiplication)."""
+    b = -1
+    for x in range(tails.reps + 1):
+        if tails.prefix[x] * LAMBDA.denominator <= LAMBDA.numerator * tails.den:
+            b = x
+        else:
+            break
+    return b
+
+
+def _relative_error(exact: float, approx: float) -> float:
+    return abs(approx - exact) / exact if exact > 0 else abs(approx)
+
+
+def _same_direction(exact: Fraction, approx: float, level: Fraction) -> bool:
+    return (exact <= level) == (approx <= float(level))
+
+
+def _method2_record(axis: str, point: int, level: Fraction, exact: Fraction, approx: float) -> dict[str, Any]:
+    """One method 1 / method 2 comparison. The two conditions are evaluated and recorded separately."""
+    ex = float(exact)
+    finite = math.isfinite(approx)
+    rel = _relative_error(ex, approx) if finite else math.inf
+    return {"axis": axis, "point": point, "level": str(level), "method1": repr(ex), "method2": repr(approx),
+            "relative_error": repr(rel), "relative_error_ok": finite and rel <= REL_TOL,
+            "same_direction": finite and _same_direction(exact, approx, level)}
+
+
+def _method2_checks(reps: int, a: Sequence[int], levels: Sequence[Fraction], b: int, upper: _ExactTails,
+                    lower: _ExactTails) -> list[dict[str, Any]]:
+    """Each threshold and its neighbour (§7). Either condition failing anywhere is COMPUTATION_FAILURE."""
+    records = []
+    for aj, t in zip(a, levels):
+        for point in (aj, aj - 1):
+            if 0 <= point <= reps:
+                records.append(_method2_record("A", point, t, upper.upper(point),
+                                               log_upper_tail(reps, float(ALPHA), point)))
+    for point in (b, b + 1):
+        if 0 <= point <= reps:
+            records.append(_method2_record("B", point, LAMBDA, lower.lower(point),
+                                           log_lower_tail(reps, float(TOLERANCE), point)))
+    if not all(r["relative_error_ok"] is True and r["same_direction"] is True for r in records):
+        raise ComputationFailure()
+    return records
+
+
+def boundary_check_a(upper: Callable[[int], Fraction], j: int, aj: int, level: Fraction) -> dict[str, Any]:
+    """P(X >= a_j) <= t_j and, when a_j > 0, P(X >= a_j - 1) > t_j (exact rational comparisons)."""
+    at = upper(aj) <= level
+    below: bool | None = upper(aj - 1) > level if aj > 0 else None
+    return {"axis": "A", "j": j, "threshold": aj, "level": str(level),
+            "at_threshold": {"point": aj, "relation": "P(X>=point)<=level", "holds": at},
+            "neighbour": None if below is None else {"point": aj - 1, "relation": "P(X>=point)>level",
+                                                     "holds": below},
+            "holds": at and below is not False}
+
+
+def boundary_check_b(lower: Callable[[int], Fraction], b: int, level: Fraction) -> dict[str, Any]:
+    """P(X <= b) <= lambda and P(X <= b + 1) > lambda (exact rational comparisons)."""
+    at = lower(b) <= level
+    above = lower(b + 1) > level
+    return {"axis": "B", "threshold": b, "level": str(level),
+            "at_threshold": {"point": b, "relation": "P(X<=point)<=level", "holds": at},
+            "neighbour": {"point": b + 1, "relation": "P(X<=point)>level", "holds": above},
+            "holds": at and above}
+
+
+def require_b_nonnegative(b: int) -> None:
+    """Operational precheck only (R 10,000, 3/50, lambda 1/40): b < 0 is B_NEGATIVE."""
+    if b < 0:
+        raise StopRun("B_NEGATIVE")
+
+
+def _precheck_document(namespace: str, cells: Sequence[tuple[int, str]], reps: int,
+                       verified: dict[str, Any]) -> dict[str, Any]:
+    for path, blob in EXPECTED_SOURCE_BLOBS.items():
+        if verified["files"].get(path, {}).get("blob") != blob:
+            raise StopRun("SOURCE_BLOB_MISMATCH")
+    seeds = seed_uniqueness(namespace, cells, reps)
+    levels = holm_levels(len(cells))
+    upper = _ExactTails(reps, ALPHA)
+    lower = _ExactTails(reps, TOLERANCE)
+    a = _precheck_axis_a(upper, levels)
+    b = _precheck_axis_b(lower)
+    checks = _method2_checks(reps, a, levels, b, upper, lower)
+    bounds = [boundary_check_a(upper.upper, j, aj, t) for j, (aj, t) in enumerate(zip(a, levels), start=1)]
+    bounds.append(boundary_check_b(lower.lower, b, LAMBDA))
+    if not all(row["holds"] for row in bounds):
+        raise StopRun("BOUNDARY_INEQUALITY_FAILED")
+    if namespace == NS_MAIN:
+        require_b_nonnegative(b)
+    return {"schema": PRECHECK_SCHEMA, "study": STUDY_ID,
+            "preregistration": {"path": PREREG_PATH, "sha256": PREREG_SHA256, "version": PREREG_VERSION},
+            "decision_version": DECISION_VERSION, "code": verified,
+            "environment": {"sys_version": sys.version, "implementation": platform.python_implementation(),
+                            "sys_platform": sys.platform},
+            "seed_check": seeds,
+            "design": {"R": reps, "alpha": str(ALPHA), "epsilon": str(EPSILON), "lambda": str(LAMBDA),
+                       "holm_levels": [str(t) for t in levels], "cells": [[n, th] for n, th in cells]},
+            "thresholds": {"a": a, "b": b}, "threshold_checks": checks, "boundary_checks": bounds,
+            "b_nonnegative": b >= 0, "classification": PRECHECK_CLASSIFICATION}
+
+
+def precheck(out_dir: Path, *, namespace: str = NS_MAIN, cells: Sequence[tuple[int, str]] = CELLS, reps: int = R,
+             provenance: dict[str, Any] | None = None, source_root: Path | None = None,
+             loaded_sources: dict[str, Path] | None = None) -> dict[str, Any]:
+    """Seed uniqueness and thresholds without data, bootstrap or rejection rates.
+
+    Order: exclusive output directory, source verification, seeds, thresholds, method 2, boundaries, then
+    precheck.json -> execution.json -> SHA256SUMS. A directory without SHA256SUMS is incomplete. After a failure
+    nothing is retried, removed or overwritten; a STOP record in execution.json is attempted once.
+    """
+    _check_scope(namespace, cells, reps, B, (NS_MAIN, NS_TEST), (CELLS, R, B))
+    if namespace != NS_TEST and (provenance, source_root, loaded_sources) != (None, None, None):
+        raise ValueError("provenance and source overrides are accepted only in the TEST namespace")
+    out = _fresh_dir(out_dir)
+    started, t0 = _now(), time.perf_counter()
+
+    def meta(status: str, code: str) -> bytes:
+        return canonical({"status": status, "code": code, "started_utc": started, "finished_utc": _now(),
+                          "elapsed_seconds": time.perf_counter() - t0, "host": platform.node(),
+                          "output_dir": str(out.resolve()), "os": platform.platform()})
+
+    try:
+        verified = provenance if provenance is not None else git_provenance(source_root, loaded_sources)
+        doc = _precheck_document(namespace, cells, reps, verified)
+    except Exception as exc:
+        code = exc.code if isinstance(exc, StopRun) else "INTERNAL_ERROR"
+        try:
+            atomic.atomic_write_bytes(out / EXECUTION_FILE, meta("STOP", code))
+        except Exception:  # the STOP record itself may fail; it is not retried (D6)
+            pass
+        raise
+    try:
+        atomic.atomic_write_bytes(out / PRECHECK_FILE, canonical(doc))
+    except Exception:
+        try:
+            atomic.atomic_write_bytes(out / EXECUTION_FILE, meta("STOP", "WRITE_FAILURE"))
+        except Exception:  # not retried (D6)
+            pass
+        raise
+    atomic.atomic_write_bytes(out / EXECUTION_FILE, meta("COMPLETE", "NONE"))
+    atomic.atomic_write_bytes(out / SUMS_FILE, _sums(out, [PRECHECK_FILE]))
+    return doc
+
+
 # --- §10 smoke and performance (no results recorded) ----------------------------------------------------------------
 
 def smoke(out_dir: Path, *, cells: Sequence[tuple[int, str]] = CELLS, reps: int = SMOKE_REPS, b: int = B) -> None:
@@ -646,6 +847,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m moneylab.research.v06.futval_v8_01")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("seed-check")
+    pre = sub.add_parser("precheck")
+    pre.add_argument("--out", required=True)
     for name in ("smoke", "perf", "run"):
         p = sub.add_parser(name)
         p.add_argument("--out", required=True)
@@ -659,6 +862,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             smoke(Path(args.out))
         elif args.command == "perf":
             perf(Path(args.out), args.workers)
+        elif args.command == "precheck":
+            precheck(Path(args.out))
         else:
             run(Path(args.out), workers=args.workers)
     except StopRun as exc:
