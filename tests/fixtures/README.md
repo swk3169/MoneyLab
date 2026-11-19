@@ -43,6 +43,10 @@ copied into `tests/fixtures/`**: they stay under `data/raw/upbit/recordings/` (g
 exactly) and turns them into **synthetic** Upbit REST candle pages served by an in-test fake client, so
 `pull_to_store` writes `provenance = fixture` pulls into `tmp_path` only. A "real" pull in the refusal tests is the same
 synthetic data with the provenance field set to `real` inside `tmp_path`; it is never market data and never evidence.
+The real-path connection test (R1) builds such provenance-`real` synthetic pulls for the locked request range with
+synthetic data from 2017-06-01, and a throw-away git repository in `tmp_path` holding a copy of the preregistration,
+so the clean-code and preregistration-hash checks run against real git. That repository proves the checks are wired;
+it does not prove that the code under test is committed. R1 reduces only the B1 draws (9,999 -> 3) inside the test.
 
 ## v0.4 research
 

@@ -473,6 +473,20 @@ def recovery_days(r: Sequence[float], ref_times: Sequence[datetime]) -> dict[str
     return value(None, "not_recovered", **info)
 
 
+def assert_finite(obj: Any, where: str) -> None:
+    """Every float inside obj (dicts, lists, tuples) must be finite; else a calculation error (prereg 11).
+    Undefined metrics stay None with a reason; nothing is replaced by 0."""
+    if isinstance(obj, float):
+        if not math.isfinite(obj):
+            raise ScreenComputationError(f"{where}: non-finite value {obj!r}")
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            assert_finite(v, f"{where}.{k}")
+    elif isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            assert_finite(v, f"{where}[{i}]")
+
+
 def describe(res: BacktestResult, spec: ScreenSpec, rule: str, scenario: str, fee: int, capital: Decimal) -> dict[str, Any]:
     led, cfg = res.ledger, res.config
     if led is None or len(led.daily) < 2:
@@ -480,6 +494,10 @@ def describe(res: BacktestResult, spec: ScreenSpec, rule: str, scenario: str, fe
     r = bt_metrics.daily_log_returns(led)
     refs = [d.ref_time for d in led.daily]
     t_days = (refs[-1] - refs[0]) / DAY
+    g_days = (spec.requested_end - (cfg.first_day + 2 * DAY)) / DAY
+    if not (len(r) == t_days == g_days):
+        raise ScreenComputationError(f"{rule} {scenario} {fee} {capital}: evaluation days differ "
+                                     f"(n {len(r)}, T_d {t_days}, G {g_days})")
     positions = ledger_positions(led)
     align = alignment(led, r, cfg.costs)
     c_b, c_s = leg_cost_logs(cfg.costs)
@@ -513,15 +531,24 @@ def describe(res: BacktestResult, spec: ScreenSpec, rule: str, scenario: str, fe
         fills[t.fill_kind] = fills.get(t.fill_kind, 0) + 1
     rts_all = len(rts)
     rts_done = sum(1 for rt in rts if not rt.virtual_close)
-    return {
+    annual_rt = rts_all / (g_days / 365)
+    ca_rt = ca["annual_round_trips"]["value"]
+    if ca["consistent"] and ca_rt is not None and abs(ca_rt - annual_rt) > 1e-12 * max(1.0, abs(annual_rt)):
+        raise ScreenComputationError(f"{rule} {scenario} {fee} {capital}: annual round trips differ "
+                                     f"({annual_rt!r} vs cost_analysis {ca_rt!r})")
+    out = {
+        "status": "COMPUTED",
         "rule": rule, "scenario": scenario, "fee_bps": fee, "capital_krw": str(capital),
         "costs": cfg.costs.to_dict(), "capacity": cfg.to_dict()["capacity"],
+        "evaluation_days": {"n_returns": n, "t_days": t_days, "g_days": g_days,
+                            "definition": "G = [F + 2 days, requested_end); n = T_d = G days is checked"},
         "n_returns": n, "t_days": t_days, "first_ref": utc_iso(refs[0]), "last_ref": utc_iso(refs[-1]),
         "net_mean_log_return": value(m) if m is not None else value(None, "no_returns"),
         "annualized_net_log_return": value(365 * m) if m is not None else value(None, "no_returns"),
         "cumulative_net_return": value(math.expm1(sum(r))),
         "round_trips": {"including_virtual_exit": rts_all, "completed_only": rts_done,
-                        "annual_including_virtual_exit": value(rts_all / (n / 365)) if n else value(None, "no_returns")},
+                        "annual_including_virtual_exit": value(annual_rt),
+                        "annual_denominator": "G days / 365"},
         "break_even_fee": bef,
         "mdd": max_drawdown_log(r),
         "recovery_days": recovery_days(r, refs),
@@ -538,6 +565,28 @@ def describe(res: BacktestResult, spec: ScreenSpec, rule: str, scenario: str, fe
         "q9_signal_none_days": {"total": sum(reasons.values()), "by_reason": reasons},
         "q10_fill_kinds": fills,
     }
+    assert_finite(out, f"{rule}/{scenario}/{fee}/{capital}")
+    return out
+
+
+NOT_COMPUTABLE_REASON = "insufficient_data_first_signal_after_last_signal"
+
+
+def not_computable(spec: ScreenSpec, d0: datetime) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """F > E: every rule x scenario x fee x capital is reported as NOT_COMPUTABLE with the data-shortage reason
+    (prereg 8 and 9), and every rule is SCREEN_NOT_EVALUABLE. No value is set to 0; simulate is not called."""
+    info = {"d0": utc_iso(d0), "first_signal_day": utc_iso(spec.first_signal_day(d0)),
+            "last_signal_day": utc_iso(spec.last_signal_day)}
+    none = value(None, NOT_COMPUTABLE_REASON)
+    combos = [{"status": "NOT_COMPUTABLE", "reason": NOT_COMPUTABLE_REASON, **info, "rule": rule, "scenario": scenario,
+               "fee_bps": fee, "capital_krw": str(capital), "net_mean_log_return": none,
+               "annualized_net_log_return": none, "cumulative_net_return": none, "mdd": none, "recovery_days": none,
+               "break_even_fee": none, "b1": {"status": "not_computable", "reason": NOT_COMPUTABLE_REASON}}
+              for rule in spec.rules for scenario in spec.scenarios for fee in spec.fees_bps
+              for capital in spec.capitals_krw]
+    flags = {rule: {"flag": FLAG_NOT_EVALUABLE, "reason": NOT_COMPUTABLE_REASON, "data_insufficient": True, **info}
+             for rule in spec.rules}
+    return combos, flags
 
 
 def run_matrix(daily: BarSeries, hourly: BarSeries, spec: ScreenSpec, settings_file: Path, *,
@@ -566,13 +615,18 @@ def _find(combos: list[dict[str, Any]], rule: str, scenario: str, fee: int, capi
     raise ScreenComputationError(f"combination {rule} {scenario} {fee} {capital} is missing")
 
 
-def screen_flags(combos: list[dict[str, Any]], spec: ScreenSpec, period_ok: bool) -> dict[str, Any]:
+def screen_flags(combos: list[dict[str, Any]], spec: ScreenSpec, period_ok: bool,
+                 period: dict[str, Any] | None = None) -> dict[str, Any]:
     """Preregistration 9. A full-year ratio that cannot be computed for an evaluable rule is a
-    calculation error (11): ScreenComputationError, no flag."""
+    calculation error (11): ScreenComputationError, no flag. `period` (bar_quality evaluation_period) adds the
+    data-shortage detail to the NOT_EVALUABLE reason."""
     out: dict[str, Any] = {}
     for rule in spec.rules:
         if not period_ok:
             out[rule] = {"flag": FLAG_NOT_EVALUABLE, "reason": "evaluation_period_below_minimum"}
+            if period is not None:
+                out[rule].update(data_insufficient=True, eval_days=period.get("eval_days"),
+                                 min_eval_days=period.get("min_eval_days"))
             continue
         base = _find(combos, rule, spec.base_scenario, spec.base_fee_bps, spec.base_capital_krw)
         if base["round_trips"]["including_virtual_exit"] < spec.min_round_trips:

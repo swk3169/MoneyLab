@@ -681,6 +681,12 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 - 명령: `econ-screen-prepare`(품질까지, 수익률 없음), `econ-screen-run`(선별 1회, 상태·해시만 출력), `econ-screen-measure`(합성 자원 측정).
   prepare와 run은 각각 별도 승인이 필요하다. run 시도 표시(`run-*`, `.tmp-run-*`)가 있으면 다시 실행하지 않는다.
 - 결과는 확증으로 승격하지 않는다. p값·V0·판정은 계산하지 않는다.
+- 보완(ECON-SCREEN-V06-01-IMPL-02): run 잠금은 real 실행에만 적용한다. 평가 기간이 5 × 365일 미만이어도 계산할 수 있으면
+  144조합을 계산·보고하고 표시만 SCREEN_NOT_EVALUABLE(데이터 부족)로 둔다. F > E면 144개 조합마다 NOT_COMPUTABLE과
+  사유를 기록한다(0 치환 없음). 연간 왕복의 분모는 G 일수이며 n = T_d = G 일수를 검사한다. 비유한 값은 계산 오류로 중단한다.
+- real 실행은 RUNWATCH(`src/moneylab/runwatch`, `codex/runwatch-01` a3197059의 blob 그대로) 아래에서, 별도 승인한
+  시간·가용 메모리 하한·감시 디렉터리로 한다. RUNWATCH의 메모리 기준은 시스템 가용 메모리(GlobalMemoryStatusEx)이며
+  프로세스 메모리가 아니다.
 - BT-6의 "실시간 모의거래"는 초안 기준으로 forward L3 평가와 다르다. forward 평가는 캔들 수집으로 하고, 실시간 모의거래(paper)는
   초안 11.3의 PAPER_CANDIDATE 이후에 별도 설계와 승인을 받는다.
 
@@ -713,4 +719,5 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 | BT-3d | 2026-10-17 | vault 잠금(10.3절, Work Order `docs/tasks/BT-3D/WORK_ORDER.md`): `backtest/vault.py` 라이브러리(CLI 없음). public bars/1 + 봉인된 locked holdout, `HistoricalHoldoutVault.open_once`, `ForwardVault.seal`·`open_analysis`(명시적 W_end), 증거·접근 기록(배타적 1회 생성, 기록 후 읽기), content 식별과 접근 상태 분리, IDENTICAL_EXISTING. 미룬 항목 DP1–DP4. 기존 스키마·코드 변경 없음, guard 변경 없음. SYNTHETIC / NOT_EVIDENCE |
 | BT-3e | 2026-10-17 | 월별 forward 위험 확인 장치(10.3절, Work Order `docs/tasks/BT-3E/WORK_ORDER.md`): `record_risk_policy`(holdout 개봉 전), `record_risk_strategies`(개봉 후·첫 forward 접근 전), `ForwardVault.check_risk`(달마다 F 전체 1회, 기록 후 읽기, 전략별 PASS/VIOLATION만), `risk_status`, 비공개 `backtest/risk_check.py`. 확증 기준은 public 데이터로 내부 재계산. 정책 값 기본값 없음(지원: MAX_DRAWDOWN_LOG, ENGINE_WINDOW_BT3B). `vault_status`·D14·기존 증거 3종 그대로. DP1 장치 구현(정책 값은 BT-4), DP2–DP4 미해결. SYNTHETIC / NOT_EVIDENCE |
 | BT-5S | 2026-11-19 | ECON-SCREEN-V06-01 전용 제한 허용(15.1절, Work Order `docs/tasks/ECON-SCREEN-V06-01-IMPL/WORK_ORDER.md`): `backtest/econ_screen.py`(permit, 품질 Q1–Q7, 144조합, SCREEN_FLAG, 회복 기간, 합성 측정), `bars_io`·`portfolio`·`bar_export`의 `real_permit` 키워드(없으면 기존 거부 그대로), CLI `econ-screen-prepare`·`econ-screen-run`·`econ-screen-measure`. 일반 real 금지·vault·run 변경 없음. 실데이터 수집·실행은 별도 승인 |
+| BT-5S 보완 | 2026-11-19 | ECON-SCREEN-V06-01-IMPL-02(15.1절): real 전용 run 잠금, 평가 기간 미달 시 144조합 보고·NOT_COMPUTABLE 표기, 연간 왕복 분모 G 일수와 n = T_d = G 검사, 비유한 값 조기 중단, RUNWATCH(a3197059 blob) 반입. 사전등록 변경 없음 |
 | MC-V06 | 2026-10-18 | 합성 Monte Carlo 위험 의미(10.5절, Work Order `docs/tasks/MC-V06/WORK_ORDER.md`): research 계층 독립 위험 모델 `research/v06/risk_model.py`(MAX_DRAWDOWN_LOG, 달력 월, CUMULATIVE_FROM_L, MONTH_ONLY, gt, ge), public ForwardVault와의 테스트 전용 동치, 제외 항목(엔진 equity, 1시간봉 경로, ENGINE_WINDOW_BT3B −2/−3일 이동) 한계, 시뮬레이션 달력 PRIMARY_MONTH_START(NOT_A_BT4_DECISION), 반복 축 R_OUTER·B_BOOT·K_RAND·TRUTH_YEARS 분리, 단일 검정 결과 `test_level`, 스키마 `moneylab.research_v06_sim/2`. backtest 코드·BT-3e 변경 없음, BT4-Q18 미해결. SYNTHETIC / NOT_EVIDENCE |

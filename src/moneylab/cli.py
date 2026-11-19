@@ -932,9 +932,9 @@ def cmd_econ_screen_prepare(args: argparse.Namespace, settings: Settings) -> int
         stage = econ_screen.pull_stage(checks)
         quality, permit, bars_info = None, None, {}
         if stage["passed"]:
-            file_sha, blob_sha = _econ_prereg_hashes()
+            file_sha, blob_sha = _econ_prereg_hashes(REPO_ROOT)
             permit = econ_screen.issue_permit(mode, spec, prereg_file_sha256=file_sha, prereg_blob_sha256=blob_sha,
-                                              code_state=backtest_code_state(), checks=checks,
+                                              code_state=backtest_code_state(REPO_ROOT), checks=checks,
                                               expected_pull_sha256=expected, out_root=root)
             bars_root = tmp / ("bars" if mode == "real" else "bars" + econ_screen.FIXTURE_SUFFIX)
             use = permit if mode == "real" else None
@@ -955,7 +955,7 @@ def cmd_econ_screen_prepare(args: argparse.Namespace, settings: Settings) -> int
                     "evidence": label, "created_utc": now.isoformat(), "spec": spec.to_dict(),
                     "spec_sha256": spec.sha256(), "prereg_sha256": econ_screen.PREREGISTRATION_SHA256,
                     "expected_pull_sha256": expected, "pulls": {iv: str(paths[iv].resolve()) for iv in paths},
-                    "bars": bars_info, "code_state": backtest_code_state(), "python": sys.version.split()[0],
+                    "bars": bars_info, "code_state": backtest_code_state(REPO_ROOT), "python": sys.version.split()[0],
                     "quality_sha256": hashlib.sha256(quality_bytes).hexdigest()}
         final, sums_sha = econ_screen.finish_output(tmp, "prepare", {"quality.json": quality_bytes,
                                                                       "manifest.json": econ_screen.json_bytes(manifest)})
@@ -986,7 +986,8 @@ def cmd_econ_screen_run(args: argparse.Namespace, settings: Settings) -> int:
     root = _econ_root(args, settings, mode)
     now = datetime.now(UTC)
     try:
-        econ_screen.check_run_lock(root)
+        if mode == "real":  # the one-run lock applies to the real study run only (Work Order IMPL-02 D1)
+            econ_screen.check_run_lock(root)
         tmp = econ_screen.begin_output(root, "run", now)  # the attempt marker exists before any computation
     except (econ_screen.EconScreenError, OSError) as exc:
         console.print(f"{label} | econ-screen-run refused: {type(exc).__name__}: {exc}", markup=False)
@@ -1011,9 +1012,9 @@ def cmd_econ_screen_run(args: argparse.Namespace, settings: Settings) -> int:
         stage = econ_screen.pull_stage(checks)
         if json.loads(econ_screen.json_bytes(stage)) != stored["pull_stage"] or not stage["passed"]:
             raise econ_screen.EconScreenError("pull checks differ from the prepare record")
-        file_sha, blob_sha = _econ_prereg_hashes()
+        file_sha, blob_sha = _econ_prereg_hashes(REPO_ROOT)
         permit = econ_screen.issue_permit(mode, spec, prereg_file_sha256=file_sha, prereg_blob_sha256=blob_sha,
-                                          code_state=backtest_code_state(), checks=checks,
+                                          code_state=backtest_code_state(REPO_ROOT), checks=checks,
                                           expected_pull_sha256=manifest["expected_pull_sha256"], out_root=root)
         bars = manifest["bars"]
         permit = permit.with_bars(bars["day"]["bars_sha256"], bars["hour"]["bars_sha256"])
@@ -1025,9 +1026,12 @@ def cmd_econ_screen_run(args: argparse.Namespace, settings: Settings) -> int:
         if json.loads(econ_screen.json_bytes(quality)) != stored["bar_quality"]:
             raise econ_screen.EconScreenError("recomputed Q2/Q3/Q4/Q7 differ from the prepare record")
         period_ok = quality["evaluation_period"]["status"] == econ_screen.PASS
-        combos = econ_screen.run_matrix(series["day"], series["hour"], spec, BACKTEST_SETTINGS,
-                                        real_permit=use) if period_ok else []
-        flags = econ_screen.screen_flags(combos, spec, period_ok)
+        d0 = series["day"].first_start
+        if spec.first_signal_day(d0) <= spec.last_signal_day:  # computable: report every combination (prereg 9)
+            combos = econ_screen.run_matrix(series["day"], series["hour"], spec, BACKTEST_SETTINGS, real_permit=use)
+            flags = econ_screen.screen_flags(combos, spec, period_ok, quality["evaluation_period"])
+        else:  # F > E: every combination NOT_COMPUTABLE with the data-shortage reason (prereg 8), no 0 values
+            combos, flags = econ_screen.not_computable(spec, d0)
         screen = {"schema": econ_screen.SCHEMA, "kind": "run", "study_id": econ_screen.STUDY_ID, "mode": mode,
                   "evidence": label, "labels": [label, "DESCRIPTIVE_ONLY", "FEE_UNCONFIRMED", "COSTS_ASSUMED"],
                   "spec": spec.to_dict(), "spec_sha256": spec.sha256(),
@@ -1039,11 +1043,12 @@ def cmd_econ_screen_run(args: argparse.Namespace, settings: Settings) -> int:
         run_manifest = {"schema": econ_screen.SCHEMA, "kind": "run", "study_id": econ_screen.STUDY_ID, "mode": mode,
                         "evidence": label, "created_utc": now.isoformat(), "spec_sha256": spec.sha256(),
                         "prereg_sha256": econ_screen.PREREGISTRATION_SHA256, "permit": permit.to_dict(),
-                        "code_state": backtest_code_state(), "python": sys.version.split()[0],
+                        "code_state": backtest_code_state(REPO_ROOT), "python": sys.version.split()[0],
                         "screen_sha256": hashlib.sha256(screen_bytes).hexdigest()}
         final, sums_sha = econ_screen.finish_output(tmp, "run", {"screen.json": screen_bytes,
                                                                   "manifest.json": econ_screen.json_bytes(run_manifest)})
-    except (econ_screen.EconScreenError, BarExportError, DataIntegrityError, OSError, ValueError, KeyError) as exc:
+    except (econ_screen.EconScreenError, BarExportError, DataIntegrityError, OSError, ValueError, KeyError,
+            ArithmeticError) as exc:
         console.print(f"{label} | econ-screen-run stopped: {type(exc).__name__}: {exc}; attempt and partial output "
                       f"kept at {tmp}", markup=False)
         return EXIT_ERROR

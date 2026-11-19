@@ -10,6 +10,7 @@ import bisect
 import inspect
 import json
 import math
+import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, localcontext
@@ -18,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from moneylab import cli as cli_module
+from moneylab.backtest import benchmarks
 from moneylab.backtest import econ_screen as es
 from moneylab.backtest.bars_io import load_bars
 from moneylab.backtest import metrics as bt_metrics
@@ -574,10 +577,10 @@ def test_t10_cli_fixture_end_to_end(tmp_path, pulls, capsys):
     squeezed = "".join(printed.split())  # the console wraps lines; no whitespace can hide a word
     for forbidden in ("net_mean", "SCREEN_FLAG", "mdd", "break_even", "flag"):
         assert forbidden not in squeezed
-    # a second run attempt in the same root is refused; the prepare directory did not lock the first one
+    # fixture runs are not locked (IMPL-02 D1; the real lock is tested in R1): a second fixture run completes too
     rc = main(["econ-screen-run", "--source", "fixture", "--spec-json", str(spec_file), "--b1-draws", "5",
                "--out", str(out), "--prepare", str(prep), "--expect-prepare-manifest-sha256", man])
-    assert rc == 1 and len(list(out.glob("run-*"))) == 1 and not list(out.glob(".tmp-run-*"))
+    assert rc == 0 and len(list(out.glob("run-*"))) == 2 and not list(out.glob(".tmp-run-*"))
 
 
 def test_t4_cli_stops_before_any_return(tmp_path, pulls, capsys, monkeypatch):
@@ -624,3 +627,246 @@ def test_t11_measure_writes_nothing(tmp_path, monkeypatch):
         "M20/E0", "M60/E0", "M120/E0", "R5/E0", "M20/E1", "M20/E2"}
     assert out["python_heap_peak_bytes"] > 0 and math.isfinite(out["extrapolation"]["t_est_s"])
     assert "not approved" in lines[-1]
+
+
+# --- IMPL-02: real connection, boundaries, B1 sharing, flags, period, evaluation days, non-finite ----------
+
+R1_DATA_START = datetime(2017, 6, 1, tzinfo=UTC)
+R2_FIRST_REF = {"E0": "2017-09-30T01:00:00Z", "E1": "2017-09-30T02:00:00Z", "E2": "2017-10-01T00:00:00Z"}
+R2_LAST_REF = {"E0": "2024-03-31T01:00:00Z", "E1": "2024-03-31T02:00:00Z", "E2": "2024-04-01T00:00:00Z"}
+R2_DAYS = 2374
+
+
+def _clean_repo_with_prereg(tmp_path: Path) -> Path:
+    """Throw-away git repository holding a byte copy of the preregistration (temporary commit inside tmp_path).
+    It lets the real clean-code and preregistration-hash checks run against real git; it does NOT prove that the
+    code under test is committed (the project commit is checked in CLEAN_COMMIT_E2E)."""
+    repo = tmp_path / "repo"
+    hooks = tmp_path / "no-hooks"
+    hooks.mkdir()
+    target = repo / es.PREREGISTRATION_PATH
+    target.parent.mkdir(parents=True)
+    target.write_bytes((ROOT / es.PREREGISTRATION_PATH).read_bytes())
+    base = ["git", "-c", "user.name=econ-screen-test", "-c", "user.email=test@example.invalid",
+            "-c", "commit.gpgsign=false", "-c", f"core.hooksPath={hooks}"]
+    for args in (["init", "-q"], ["add", "--", es.PREREGISTRATION_PATH], ["commit", "-q", "-m", "prereg copy"]):
+        subprocess.run(base + args, cwd=repo, check=True, capture_output=True, timeout=60)
+    return repo
+
+
+@pytest.fixture(scope="module")
+def r1_bars():
+    d, h = es.synthetic_bars(R1_DATA_START, es.LOCKED_SPEC.requested_end, seed=11, label="R1", kind="fixture")
+    return {"day": d, "hour": h}
+
+
+def test_r1_to_r4_real_path_connection_with_b1_reduced_to_3_draws(tmp_path, monkeypatch, capsys, r1_bars):
+    """R1: real prepare -> issued permit -> bars -> quality -> real run -> 144 combinations -> flags -> lock.
+    Inputs are SYNTHETIC pulls recorded with provenance "real" (not market data, not evidence). Only the B1 draws
+    are reduced inside this test (spy asserts 9,999 first, then calls the original with 3): this test does not
+    verify the full 9,999-draw computation or its run time. Permit, quality, hash, path and clean checks run as is.
+    R2 boundary times, R3 B1 placement sharing and R4 flag derivation are checked on the same run."""
+    repo = _clean_repo_with_prereg(tmp_path)
+    monkeypatch.setattr(cli_module, "REPO_ROOT", repo)
+    pulls_root = tmp_path / "pulls"
+    pull = {iv: make_pull(pulls_root, r1_bars, iv, es.LOCKED_SPEC, provenance="real") for iv in ("day", "hour")}
+    shas = {iv: sha256_file(pull[iv] / PULL_FILE) for iv in pull}
+    out = tmp_path / es.REAL_ROOT_NAME
+    rc = main(["econ-screen-prepare", "--day-pull", str(pull["day"]), "--hour-pull", str(pull["hour"]),
+               "--expect-day-pull-sha256", shas["day"], "--expect-hour-pull-sha256", shas["hour"], "--out", str(out)])
+    assert rc == 0, capsys.readouterr().out
+    prep = next(out.glob("prepare-*"))
+    quality = json.loads((prep / "quality.json").read_text(encoding="utf-8"))
+    assert quality["summary"]["required_all_pass"] and quality["permit"]["mode"] == "real"
+    assert quality["evidence"] == es.EVIDENCE_REAL and quality["bars"]["day"]["dir"].startswith("bars/")
+    bq = quality["bar_quality"]
+    assert (bq["d0"], bq["first_signal_day"], bq["last_signal_day"], bq["g_start"]) == (
+        "2017-06-01T00:00:00Z", "2017-09-29T00:00:00Z", "2024-03-29T00:00:00Z", "2017-10-01T00:00:00Z")
+    assert bq["evaluation_period"]["eval_days"] == R2_DAYS
+
+    seen: dict[str, object] = {}
+    original_matrix = es.run_matrix
+
+    def matrix_spy(daily, hourly, spec, settings_file, *, real_permit=None):
+        assert spec == es.LOCKED_SPEC and spec.b1_draws == 9_999
+        assert real_permit is not None and real_permit.mode == "real"
+        assert real_permit.bars_for("day") and real_permit.bars_for("hour")
+        seen["spec_draws"] = spec.b1_draws
+        return original_matrix(daily, hourly, replace(spec, b1_draws=3), settings_file, real_permit=real_permit)
+
+    placements: list[tuple[tuple[str, ...], list[tuple[int, ...]]]] = []
+    original_compare, original_b1 = es.compare, benchmarks.b1_positions
+    current: list[tuple[int, ...]] = []
+
+    def b1_spy(positions, rng):
+        result = original_b1(positions, rng)
+        current.append(tuple(result))
+        return result
+
+    def compare_spy(*args, **kwargs):
+        current.clear()
+        result = original_compare(*args, **kwargs)
+        placements.append((tuple(kwargs["labels"]), list(current)))
+        return result
+
+    monkeypatch.setattr(es, "run_matrix", matrix_spy)
+    monkeypatch.setattr(es, "compare", compare_spy)
+    monkeypatch.setattr(benchmarks, "b1_positions", b1_spy)
+    capsys.readouterr()
+    man = sha256_file(prep / "manifest.json")
+    rc = main(["econ-screen-run", "--prepare", str(prep), "--expect-prepare-manifest-sha256", man, "--out", str(out)])
+    assert rc == 0, capsys.readouterr().out
+    assert seen["spec_draws"] == 9_999
+    run = next(out.glob("run-*"))
+    es.verify_output(run)
+    screen = json.loads((run / "screen.json").read_text(encoding="utf-8"))
+    combos = screen["combinations"]
+    assert screen["combinations_count"] == 144 == len(combos) and screen["evidence"] == es.EVIDENCE_REAL
+    assert set(screen["flags"]) == {"M20", "M60", "M120", "R5"}
+
+    # R2 + R6: fixed UTC strings and evaluation days, not recomputed with the engine
+    for c in combos:
+        assert c["status"] == "COMPUTED"
+        assert (c["first_ref"], c["last_ref"]) == (R2_FIRST_REF[c["scenario"]], R2_LAST_REF[c["scenario"]])
+        assert c["evaluation_days"]["n_returns"] == c["evaluation_days"]["t_days"] == c["evaluation_days"]["g_days"] \
+            == R2_DAYS
+        ca_rt = c["cost_analysis"]["annual_round_trips"]["value"]
+        own = c["round_trips"]["annual_including_virtual_exit"]["value"]
+        assert ca_rt is not None and abs(ca_rt - own) <= 1e-12 * max(1.0, abs(own))
+        assert own == c["round_trips"]["including_virtual_exit"] / (R2_DAYS / 365)
+
+    # R3: the actual B1 placements are identical across the 12 cost combinations of one rule and scenario
+    groups: dict[tuple[str, ...], list[list[tuple[int, ...]]]] = {}
+    for labels, seq in placements:
+        groups.setdefault(labels, []).append(seq)
+    for rule in es.LOCKED_SPEC.rules:
+        for scen in es.LOCKED_SPEC.scenarios:
+            compared = [c for c in combos if (c["rule"], c["scenario"]) == (rule, scen) and c["b1"]["status"] == "compared"]
+            seqs = groups.get(("B1", rule, scen), [])
+            assert len(seqs) == len(compared)
+            assert all(s == seqs[0] and len(s) == 3 for s in seqs)
+
+    # R4: flags derived independently from the written combinations (prereg 6 and 9)
+    def find(rule, scen):
+        return next(c for c in combos if (c["rule"], c["scenario"], c["fee_bps"], c["capital_krw"]) ==
+                    (rule, scen, 25, "10000000"))
+
+    for rule in es.LOCKED_SPEC.rules:
+        base = find(rule, "E0")
+        if base["round_trips"]["including_virtual_exit"] < 20:
+            expected = "SCREEN_NOT_EVALUABLE"
+        elif base["b1"]["status"] != "compared":
+            expected = "SCREEN_NOT_EVALUABLE"
+        else:
+            ratio = base["yearly"]["positive_year_ratio_full_years"]
+            ok = (base["net_mean_log_return"]["value"] > 0 and base["b1"]["strategy_minus_mean_b1"]["value"] > 0
+                  and find(rule, "E1")["net_mean_log_return"]["value"] > 0
+                  and find(rule, "E2")["net_mean_log_return"]["value"] > 0
+                  and ratio["positive_years"] * 5 >= ratio["years"] * 3)
+            expected = "SCREEN_FLAG_PASS" if ok else "SCREEN_FLAG_NOT_MET"
+        assert screen["flags"][rule]["flag"] == expected
+
+    # R5 (real lock): a second real run in the same root is refused before any computation
+    capsys.readouterr()
+    rc = main(["econ-screen-run", "--prepare", str(prep), "--expect-prepare-manifest-sha256", man, "--out", str(out)])
+    assert rc == 1 and "already attempted" in _flat(capsys.readouterr().out)
+    assert len(list(out.glob("run-*"))) == 1 and not list(out.glob(".tmp-run-*"))
+
+
+def _fixture_prepare(tmp_path: Path, pulls: dict[str, Path], spec: es.ScreenSpec, out: Path) -> tuple[Path, Path]:
+    spec_file = _write_spec(tmp_path, spec)
+    shas = {iv: sha256_file(pulls[iv] / PULL_FILE) for iv in pulls}
+    rc = main(["econ-screen-prepare", "--source", "fixture", "--spec-json", str(spec_file), "--out", str(out),
+               "--day-pull", str(pulls["day"]), "--hour-pull", str(pulls["hour"]),
+               "--expect-day-pull-sha256", shas["day"], "--expect-hour-pull-sha256", shas["hour"]])
+    assert rc == 0
+    return spec_file, next(out.glob("prepare-*"))
+
+
+FULL_SETS_SHORT_PERIOD = replace(E2E_SPEC, rules=es.LOCKED_SPEC.rules, fees_bps=es.LOCKED_SPEC.fees_bps,
+                                 capitals_krw=es.LOCKED_SPEC.capitals_krw, min_eval_days=5_000)
+
+
+def test_r5_short_but_computable_period_reports_all_144(tmp_path, pulls):
+    out = tmp_path / "short-fixture"
+    spec_file, prep = _fixture_prepare(tmp_path, pulls, FULL_SETS_SHORT_PERIOD, out)
+    rc = main(["econ-screen-run", "--source", "fixture", "--spec-json", str(spec_file), "--b1-draws", "2",
+               "--out", str(out), "--prepare", str(prep),
+               "--expect-prepare-manifest-sha256", sha256_file(prep / "manifest.json")])
+    assert rc == 0
+    screen = json.loads((next(out.glob("run-*")) / "screen.json").read_text(encoding="utf-8"))
+    assert screen["combinations_count"] == 144 and all(c["status"] == "COMPUTED" for c in screen["combinations"])
+    for flag in screen["flags"].values():
+        assert flag["flag"] == "SCREEN_NOT_EVALUABLE" and flag["reason"] == "evaluation_period_below_minimum"
+        assert flag["data_insufficient"] is True and flag["min_eval_days"] == 5_000 and flag["eval_days"] < 5_000
+
+
+def test_r5_first_signal_after_last_signal_is_not_computable_for_all_144(tmp_path, pulls, monkeypatch):
+    out = tmp_path / "nocalc-fixture"
+    spec = replace(FULL_SETS_SHORT_PERIOD, warmup_days=1_000)
+    spec_file, prep = _fixture_prepare(tmp_path, pulls, spec, out)
+
+    def boom(*a, **k):
+        raise AssertionError("no simulation may run when F > E")
+
+    monkeypatch.setattr(es, "run_matrix", boom)
+    monkeypatch.setattr(es, "simulate", boom)
+    rc = main(["econ-screen-run", "--source", "fixture", "--spec-json", str(spec_file), "--b1-draws", "2",
+               "--out", str(out), "--prepare", str(prep),
+               "--expect-prepare-manifest-sha256", sha256_file(prep / "manifest.json")])
+    assert rc == 0
+    screen = json.loads((next(out.glob("run-*")) / "screen.json").read_text(encoding="utf-8"))
+    combos = screen["combinations"]
+    assert screen["combinations_count"] == 144 == len(combos)
+    keys = {(c["rule"], c["scenario"], c["fee_bps"], c["capital_krw"]) for c in combos}
+    assert len(keys) == 144
+    for c in combos:
+        assert c["status"] == "NOT_COMPUTABLE" and c["reason"] == es.NOT_COMPUTABLE_REASON
+        assert c["net_mean_log_return"] == {"value": None, "reason": es.NOT_COMPUTABLE_REASON}
+        assert c["first_signal_day"] > c["last_signal_day"]
+    assert 0 not in [c["net_mean_log_return"]["value"] for c in combos]
+    for flag in screen["flags"].values():
+        assert flag["flag"] == "SCREEN_NOT_EVALUABLE" and flag["reason"] == es.NOT_COMPUTABLE_REASON
+        assert flag["data_insufficient"] is True
+
+
+def test_r6_evaluation_days_mismatch_is_a_calculation_error(e2e_bars):
+    d, h = e2e_bars["day"], e2e_bars["hour"]
+    settings = load_cost_settings()[0]
+    costs, ok = cost_model(settings, 25, "E0", Decimal(10_000_000))
+    f = DATA_START + 120 * DAY
+    res = simulate(d, h, RunConfig("M20", f, E2E_SPEC.last_signal_day, Decimal(10_000_000), costs,
+                                   fill_substitution="prereg_6_3", capacity_verified=ok))
+    c = es.describe(res, replace(E2E_SPEC, b1_draws=2), "M20", "E0", 25, Decimal(10_000_000))
+    g = c["evaluation_days"]
+    assert g["n_returns"] == g["t_days"] == g["g_days"] == (E2E_SPEC.requested_end - (f + 2 * DAY)) // DAY
+    shifted = replace(E2E_SPEC, b1_draws=2, requested_end=E2E_SPEC.requested_end + DAY)
+    with pytest.raises(es.ScreenComputationError, match="evaluation days differ"):
+        es.describe(res, shifted, "M20", "E0", 25, Decimal(10_000_000))
+
+
+def test_r7_non_finite_values_stop_early_and_keep_the_attempt(tmp_path, pulls, monkeypatch, capsys):
+    with pytest.raises(es.ScreenComputationError, match="non-finite"):
+        es.assert_finite({"a": [1.0, {"b": float("inf")}]}, "x")
+    with pytest.raises(es.ScreenComputationError, match="non-finite"):
+        es.assert_finite({"a": float("nan")}, "x")
+    es.assert_finite({"a": None, "b": [1.0, 2], "c": "text"}, "x")
+    out = tmp_path / "nonfinite-fixture"
+    spec_file, prep = _fixture_prepare(tmp_path, pulls, E2E_SPEC, out)
+    args = ["econ-screen-run", "--source", "fixture", "--spec-json", str(spec_file), "--b1-draws", "2",
+            "--out", str(out), "--prepare", str(prep), "--expect-prepare-manifest-sha256",
+            sha256_file(prep / "manifest.json")]
+    original_recovery = es.recovery_days
+    monkeypatch.setattr(es, "recovery_days", lambda r, t: {**original_recovery(r, t), "injected": float("inf")})
+    capsys.readouterr()
+    assert main(args) == 1
+    assert "non-finite" in _flat(capsys.readouterr().out)
+    assert len(list(out.glob(".tmp-run-*"))) == 1 and not list(out.glob("run-*"))
+
+    def overflow(*a, **k):
+        raise OverflowError("math range error (test)")
+
+    monkeypatch.setattr(es, "run_matrix", overflow)
+    assert main(args) == 1
+    assert "OverflowError" in _flat(capsys.readouterr().out)
+    assert len(list(out.glob(".tmp-run-*"))) == 2 and not list(out.glob("run-*"))
