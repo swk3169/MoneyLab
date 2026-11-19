@@ -667,6 +667,24 @@ def check_run_lock(root: Path) -> None:
             raise EconScreenError(f"a screening run was already attempted under {root}: {found}")
 
 
+RUN_LOCK_NAME = "run-lock"
+
+
+def acquire_run_lock(root: Path) -> Path:
+    """Atomic one-run lock (Work Order IMPL-03 D3): the existing attempt check, then a single os.mkdir of
+    <root>/run-lock. Of two runs started at the same time only one mkdir succeeds. The lock is never removed;
+    its name starts with "run-", so check_run_lock keeps reporting it as an attempt."""
+    root = Path(root)
+    check_run_lock(root)
+    root.mkdir(parents=True, exist_ok=True)
+    lock = root / RUN_LOCK_NAME
+    try:
+        os.mkdir(lock)
+    except FileExistsError as exc:
+        raise EconScreenError(f"a screening run was already attempted under {root}: {RUN_LOCK_NAME} exists") from exc
+    return lock
+
+
 def begin_output(root: Path, kind: str, now: datetime) -> Path:
     """Create <root>/.tmp-<kind>-<stamp>/ (the attempt marker); never reuse an existing name."""
     if kind not in ("prepare", "run"):

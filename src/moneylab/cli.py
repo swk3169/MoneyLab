@@ -898,10 +898,21 @@ def _econ_mode_spec(args: argparse.Namespace) -> tuple[str, econ_screen.ScreenSp
 
 
 def _econ_root(args: argparse.Namespace, settings: Settings, mode: str) -> Path:
+    """Real mode: the one canonical root settings.processed_dir/econ_screen_v06_01 (resolved, absolute);
+    an --out elsewhere is refused even if its name matches (IMPL-03 D1). The root follows the runtime
+    settings (MONEYLAB_DATA_DIR); fixing the environment is the execution contract's job."""
+    if mode == "real":
+        fixed = (settings.processed_dir / econ_screen.REAL_ROOT_NAME).resolve()
+        if args.out is not None and Path(args.out).resolve() != fixed:
+            raise econ_screen.EconScreenError(f"real output root must be {fixed}, not {Path(args.out).resolve()}")
+        return fixed
     if args.out is not None:
         return Path(args.out)
-    name = econ_screen.REAL_ROOT_NAME + ("" if mode == "real" else econ_screen.FIXTURE_SUFFIX)
-    return settings.processed_dir / name
+    return settings.processed_dir / (econ_screen.REAL_ROOT_NAME + econ_screen.FIXTURE_SUFFIX)
+
+
+def _is_sha256_hex(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
 _ECON_PULL_KEYS = ("pull_dir", "pull_id", "pull_json_sha256", "provenance", "market", "interval", "requested_start",
@@ -914,11 +925,11 @@ def cmd_econ_screen_prepare(args: argparse.Namespace, settings: Settings) -> int
     """Q1, Q6, collection conditions, permit, bar export, Q2/Q3/Q4/Q7. No return is computed."""
     try:
         mode, spec = _econ_mode_spec(args)
+        root = _econ_root(args, settings, mode)
     except (econ_screen.EconScreenError, OSError, ValueError) as exc:
         console.print(f"econ-screen-prepare refused: {type(exc).__name__}: {exc}", markup=False)
         return EXIT_ERROR
     label = econ_screen.evidence_label(mode)
-    root = _econ_root(args, settings, mode)
     now = datetime.now(UTC)
     try:
         tmp = econ_screen.begin_output(root, "prepare", now)
@@ -977,44 +988,49 @@ def cmd_econ_screen_prepare(args: argparse.Namespace, settings: Settings) -> int
 
 def cmd_econ_screen_run(args: argparse.Namespace, settings: Settings) -> int:
     """One screening run on a passed prepare directory. Prints status, paths and hashes only."""
-    try:
+    try:  # D5 step 1-2: mode, spec, argument format, canonical root
         mode, spec = _econ_mode_spec(args)
+        root = _econ_root(args, settings, mode)
+        if not _is_sha256_hex(args.expect_prepare_manifest_sha256):
+            raise econ_screen.EconScreenError("--expect-prepare-manifest-sha256 must be 64 lowercase hex characters")
     except (econ_screen.EconScreenError, OSError, ValueError) as exc:
         console.print(f"econ-screen-run refused: {type(exc).__name__}: {exc}", markup=False)
         return EXIT_ERROR
     label = econ_screen.evidence_label(mode)
-    root = _econ_root(args, settings, mode)
     now = datetime.now(UTC)
-    try:
-        if mode == "real":  # the one-run lock applies to the real study run only (Work Order IMPL-02 D1)
-            econ_screen.check_run_lock(root)
-        tmp = econ_screen.begin_output(root, "run", now)  # the attempt marker exists before any computation
-    except (econ_screen.EconScreenError, OSError) as exc:
-        console.print(f"{label} | econ-screen-run refused: {type(exc).__name__}: {exc}", markup=False)
-        return EXIT_ERROR
+    # D5 steps 2-11: read-only pre-validation. A failure here creates no lock, no attempt marker and no output;
+    # no return computation has started, and this approved run stops (no automatic retry).
     try:
         prep = Path(args.prepare)
+        if mode == "real":
+            resolved = prep.resolve()
+            if resolved.parent != root or not resolved.name.startswith("prepare-") or not resolved.is_dir():
+                raise econ_screen.EconScreenError(f"real --prepare must be a prepare-* directory directly under {root}")
         econ_screen.verify_output(prep)
         man_sha = sha256_file(prep / "manifest.json")
         if man_sha != args.expect_prepare_manifest_sha256:
             raise econ_screen.EconScreenError("prepare manifest.json SHA-256 differs from the approved value")
         manifest = json.loads((prep / "manifest.json").read_text(encoding="utf-8"))
-        stored = json.loads((prep / "quality.json").read_text(encoding="utf-8"))
         if (manifest.get("study_id"), manifest.get("mode"), manifest.get("kind")) != (econ_screen.STUDY_ID, mode,
                                                                                     "prepare"):
             raise econ_screen.EconScreenError("prepare directory is not a prepare of this study and mode")
         prep_spec = econ_screen.ScreenSpec.from_dict(manifest["spec"])
         if replace(prep_spec, b1_draws=1) != replace(spec, b1_draws=1):
             raise econ_screen.EconScreenError("prepare spec differs from the run spec")
-        if not stored["summary"]["required_all_pass"]:
-            raise econ_screen.EconScreenError("prepare quality did not pass; no return is computed")
+        quality_bytes = (prep / "quality.json").read_bytes()  # D4 record binding: hash only, no recomputation
+        if hashlib.sha256(quality_bytes).hexdigest() != manifest.get("quality_sha256"):
+            raise econ_screen.EconScreenError("quality.json does not match the approved manifest quality_sha256")
+        stored = json.loads(quality_bytes.decode("utf-8"))
         checks = {iv: econ_screen_pull_checks(Path(manifest["pulls"][iv]), spec.requested_end) for iv in ("day", "hour")}
         stage = econ_screen.pull_stage(checks)
-        if json.loads(econ_screen.json_bytes(stage)) != stored["pull_stage"] or not stage["passed"]:
+        if json.loads(econ_screen.json_bytes(stage)) != stored["pull_stage"]:
             raise econ_screen.EconScreenError("pull checks differ from the prepare record")
+        code_state = backtest_code_state(REPO_ROOT)
+        if mode == "real" and code_state.get("commit") != (manifest.get("code_state") or {}).get("commit"):
+            raise econ_screen.EconScreenError("code commit differs from the prepare commit (D6)")
         file_sha, blob_sha = _econ_prereg_hashes(REPO_ROOT)
         permit = econ_screen.issue_permit(mode, spec, prereg_file_sha256=file_sha, prereg_blob_sha256=blob_sha,
-                                          code_state=backtest_code_state(REPO_ROOT), checks=checks,
+                                          code_state=code_state, checks=checks,
                                           expected_pull_sha256=manifest["expected_pull_sha256"], out_root=root)
         bars = manifest["bars"]
         permit = permit.with_bars(bars["day"]["bars_sha256"], bars["hour"]["bars_sha256"])
@@ -1022,9 +1038,24 @@ def cmd_econ_screen_run(args: argparse.Namespace, settings: Settings) -> int:
         series = {iv: load_bars(prep / bars[iv]["dir"], real_permit=use) for iv in ("day", "hour")}
         if any(series[iv].provenance.bars_sha256 != bars[iv]["bars_sha256"] for iv in series):
             raise econ_screen.EconScreenError("prepare bars differ from the manifest")
-        quality = econ_screen.bar_quality(series["day"], series["hour"], spec)
+        quality = econ_screen.bar_quality(series["day"], series["hour"], spec)  # the one recomputation (D4, D5 11)
         if json.loads(econ_screen.json_bytes(quality)) != stored["bar_quality"]:
             raise econ_screen.EconScreenError("recomputed Q2/Q3/Q4/Q7 differ from the prepare record")
+        if not econ_screen.quality_summary(stage, quality)["required_all_pass"]:
+            raise econ_screen.EconScreenError("prepare quality did not pass on recomputation; no return is computed")
+    except (econ_screen.EconScreenError, BarExportError, DataIntegrityError, OSError, ValueError, KeyError, TypeError,
+            ArithmeticError) as exc:
+        console.print(f"{label} | econ-screen-run refused before computation (no lock, no attempt marker): "
+                      f"{type(exc).__name__}: {exc}", markup=False)
+        return EXIT_ERROR
+    try:  # D5 steps 12-13: atomic lock (real), then the attempt marker
+        if mode == "real":
+            econ_screen.acquire_run_lock(root)
+        tmp = econ_screen.begin_output(root, "run", now)
+    except (econ_screen.EconScreenError, OSError) as exc:
+        console.print(f"{label} | econ-screen-run refused: {type(exc).__name__}: {exc}", markup=False)
+        return EXIT_ERROR
+    try:  # D5 step 14: computation and output; failures keep the lock, the marker and written files
         period_ok = quality["evaluation_period"]["status"] == econ_screen.PASS
         d0 = series["day"].first_start
         if spec.first_signal_day(d0) <= spec.last_signal_day:  # computable: report every combination (prereg 9)

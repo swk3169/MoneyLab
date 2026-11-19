@@ -687,6 +687,12 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 - real 실행은 RUNWATCH(`src/moneylab/runwatch`, `codex/runwatch-01` a3197059의 blob 그대로) 아래에서, 별도 승인한
   시간·가용 메모리 하한·감시 디렉터리로 한다. RUNWATCH의 메모리 기준은 시스템 가용 메모리(GlobalMemoryStatusEx)이며
   프로세스 메모리가 아니다.
+- 관문 보완(ECON-SCREEN-V06-01-IMPL-03): real root는 실행 시 settings가 정하는 `processed_dir/econ_screen_v06_01`의
+  정규 절대 경로 하나이며, 이름만 같은 다른 `--out`과 다른 root의 prepare는 거부한다(환경 변경까지 막는 보안 장치는 아니며
+  실행 계약이 환경·root·커밋을 고정한다). run은 승인 manifest의 `quality_sha256`과 quality.json을 대조하고, 품질을 1회
+  재계산해 필수 PASS를 직접 판정한다. prepare와 run의 커밋이 같아야 한다. 이 사전 검증을 모두 통과한 뒤에만 `run-lock`을
+  원자적으로(os.mkdir 1회) 얻고 시도 표시를 만든다. 사전 검증 실패는 계산이 시작되지 않았다는 사실로 기록하되 그 승인
+  실행은 STOP하며 재시도 권한을 만들지 않는다. 잠금 뒤 실패는 잠금·시도 표시·부분 산출물을 보존한다.
 - BT-6의 "실시간 모의거래"는 초안 기준으로 forward L3 평가와 다르다. forward 평가는 캔들 수집으로 하고, 실시간 모의거래(paper)는
   초안 11.3의 PAPER_CANDIDATE 이후에 별도 설계와 승인을 받는다.
 
@@ -720,4 +726,5 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 | BT-3e | 2026-10-17 | 월별 forward 위험 확인 장치(10.3절, Work Order `docs/tasks/BT-3E/WORK_ORDER.md`): `record_risk_policy`(holdout 개봉 전), `record_risk_strategies`(개봉 후·첫 forward 접근 전), `ForwardVault.check_risk`(달마다 F 전체 1회, 기록 후 읽기, 전략별 PASS/VIOLATION만), `risk_status`, 비공개 `backtest/risk_check.py`. 확증 기준은 public 데이터로 내부 재계산. 정책 값 기본값 없음(지원: MAX_DRAWDOWN_LOG, ENGINE_WINDOW_BT3B). `vault_status`·D14·기존 증거 3종 그대로. DP1 장치 구현(정책 값은 BT-4), DP2–DP4 미해결. SYNTHETIC / NOT_EVIDENCE |
 | BT-5S | 2026-11-19 | ECON-SCREEN-V06-01 전용 제한 허용(15.1절, Work Order `docs/tasks/ECON-SCREEN-V06-01-IMPL/WORK_ORDER.md`): `backtest/econ_screen.py`(permit, 품질 Q1–Q7, 144조합, SCREEN_FLAG, 회복 기간, 합성 측정), `bars_io`·`portfolio`·`bar_export`의 `real_permit` 키워드(없으면 기존 거부 그대로), CLI `econ-screen-prepare`·`econ-screen-run`·`econ-screen-measure`. 일반 real 금지·vault·run 변경 없음. 실데이터 수집·실행은 별도 승인 |
 | BT-5S 보완 | 2026-11-19 | ECON-SCREEN-V06-01-IMPL-02(15.1절): real 전용 run 잠금, 평가 기간 미달 시 144조합 보고·NOT_COMPUTABLE 표기, 연간 왕복 분모 G 일수와 n = T_d = G 검사, 비유한 값 조기 중단, RUNWATCH(a3197059 blob) 반입. 사전등록 변경 없음 |
+| BT-5S 관문 | 2026-11-19 | ECON-SCREEN-V06-01-IMPL-03(15.1절): 품질 관문의 승인 manifest 결속과 재계산 PASS 판정, real root 정규 경로 고정과 prepare 위치 제한, 원자적 `run-lock`, 사전 검증 뒤 잠금·시도 표시, prepare·run 커밋 일치. 사전등록·전략·비용·품질 기준 변경 없음 |
 | MC-V06 | 2026-10-18 | 합성 Monte Carlo 위험 의미(10.5절, Work Order `docs/tasks/MC-V06/WORK_ORDER.md`): research 계층 독립 위험 모델 `research/v06/risk_model.py`(MAX_DRAWDOWN_LOG, 달력 월, CUMULATIVE_FROM_L, MONTH_ONLY, gt, ge), public ForwardVault와의 테스트 전용 동치, 제외 항목(엔진 equity, 1시간봉 경로, ENGINE_WINDOW_BT3B −2/−3일 이동) 한계, 시뮬레이션 달력 PRIMARY_MONTH_START(NOT_A_BT4_DECISION), 반복 축 R_OUTER·B_BOOT·K_RAND·TRUTH_YEARS 분리, 단일 검정 결과 `test_level`, 스키마 `moneylab.research_v06_sim/2`. backtest 코드·BT-3e 변경 없음, BT4-Q18 미해결. SYNTHETIC / NOT_EVIDENCE |

@@ -9,8 +9,11 @@ from __future__ import annotations
 import bisect
 import inspect
 import json
+import hashlib
 import math
+import shutil
 import subprocess
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, localcontext
@@ -611,7 +614,8 @@ def test_t4_cli_stops_before_any_return(tmp_path, pulls, capsys, monkeypatch):
                "--out", str(out), "--prepare", str(prep),
                "--expect-prepare-manifest-sha256", sha256_file(prep / "manifest.json")])
     assert rc == 1 and "prepare quality did not pass" in _flat(capsys.readouterr().out)
-    assert len(list(out.glob(".tmp-run-*"))) == 1 and not list(out.glob("run-*"))
+    # IMPL-03 D5: a pre-validation refusal creates no attempt marker (no computation started)
+    assert not list(out.glob(".tmp-run-*")) and not list(out.glob("run-*"))
 
 
 # --- T11 measurement ------------------------------------------------------------------------------------
@@ -637,19 +641,19 @@ R2_LAST_REF = {"E0": "2024-03-31T01:00:00Z", "E1": "2024-03-31T02:00:00Z", "E2":
 R2_DAYS = 2374
 
 
-def _clean_repo_with_prereg(tmp_path: Path) -> Path:
+def _clean_repo_with_prereg(tmp_path: Path, message: str = "prereg copy") -> Path:
     """Throw-away git repository holding a byte copy of the preregistration (temporary commit inside tmp_path).
     It lets the real clean-code and preregistration-hash checks run against real git; it does NOT prove that the
     code under test is committed (the project commit is checked in CLEAN_COMMIT_E2E)."""
     repo = tmp_path / "repo"
     hooks = tmp_path / "no-hooks"
-    hooks.mkdir()
+    hooks.mkdir(parents=True)
     target = repo / es.PREREGISTRATION_PATH
     target.parent.mkdir(parents=True)
     target.write_bytes((ROOT / es.PREREGISTRATION_PATH).read_bytes())
     base = ["git", "-c", "user.name=econ-screen-test", "-c", "user.email=test@example.invalid",
             "-c", "commit.gpgsign=false", "-c", f"core.hooksPath={hooks}"]
-    for args in (["init", "-q"], ["add", "--", es.PREREGISTRATION_PATH], ["commit", "-q", "-m", "prereg copy"]):
+    for args in (["init", "-q"], ["add", "--", es.PREREGISTRATION_PATH], ["commit", "-q", "-m", message]):
         subprocess.run(base + args, cwd=repo, check=True, capture_output=True, timeout=60)
     return repo
 
@@ -668,10 +672,11 @@ def test_r1_to_r4_real_path_connection_with_b1_reduced_to_3_draws(tmp_path, monk
     R2 boundary times, R3 B1 placement sharing and R4 flag derivation are checked on the same run."""
     repo = _clean_repo_with_prereg(tmp_path)
     monkeypatch.setattr(cli_module, "REPO_ROOT", repo)
+    monkeypatch.setenv("MONEYLAB_DATA_DIR", str(tmp_path / "data"))  # the canonical real root follows settings (D1)
     pulls_root = tmp_path / "pulls"
     pull = {iv: make_pull(pulls_root, r1_bars, iv, es.LOCKED_SPEC, provenance="real") for iv in ("day", "hour")}
     shas = {iv: sha256_file(pull[iv] / PULL_FILE) for iv in pull}
-    out = tmp_path / es.REAL_ROOT_NAME
+    out = tmp_path / "data" / "processed" / es.REAL_ROOT_NAME
     rc = main(["econ-screen-prepare", "--day-pull", str(pull["day"]), "--hour-pull", str(pull["hour"]),
                "--expect-day-pull-sha256", shas["day"], "--expect-hour-pull-sha256", shas["hour"], "--out", str(out)])
     assert rc == 0, capsys.readouterr().out
@@ -717,7 +722,8 @@ def test_r1_to_r4_real_path_connection_with_b1_reduced_to_3_draws(tmp_path, monk
     rc = main(["econ-screen-run", "--prepare", str(prep), "--expect-prepare-manifest-sha256", man, "--out", str(out)])
     assert rc == 0, capsys.readouterr().out
     assert seen["spec_draws"] == 9_999
-    run = next(out.glob("run-*"))
+    assert (out / es.RUN_LOCK_NAME).is_dir()
+    run = next(p for p in out.glob("run-*") if p.name != es.RUN_LOCK_NAME)
     es.verify_output(run)
     screen = json.loads((run / "screen.json").read_text(encoding="utf-8"))
     combos = screen["combinations"]
@@ -770,7 +776,7 @@ def test_r1_to_r4_real_path_connection_with_b1_reduced_to_3_draws(tmp_path, monk
     capsys.readouterr()
     rc = main(["econ-screen-run", "--prepare", str(prep), "--expect-prepare-manifest-sha256", man, "--out", str(out)])
     assert rc == 1 and "already attempted" in _flat(capsys.readouterr().out)
-    assert len(list(out.glob("run-*"))) == 1 and not list(out.glob(".tmp-run-*"))
+    assert len([p for p in out.glob("run-*") if p.name != es.RUN_LOCK_NAME]) == 1 and not list(out.glob(".tmp-run-*"))
 
 
 def _fixture_prepare(tmp_path: Path, pulls: dict[str, Path], spec: es.ScreenSpec, out: Path) -> tuple[Path, Path]:
@@ -870,3 +876,199 @@ def test_r7_non_finite_values_stop_early_and_keep_the_attempt(tmp_path, pulls, m
     assert main(args) == 1
     assert "OverflowError" in _flat(capsys.readouterr().out)
     assert len(list(out.glob(".tmp-run-*"))) == 2 and not list(out.glob("run-*"))
+
+
+# --- IMPL-03: quality binding (S1), canonical root and atomic lock (S2), pre-validation (S3), commit (S4) -----
+
+S_DATA_START = datetime(2023, 6, 1, tzinfo=UTC)
+
+
+def _rewrite_sums(d: Path) -> None:
+    files = {k: p for k, p in es.tree_files(d).items() if k != es.SUMS_FILE}
+    (d / es.SUMS_FILE).write_bytes("".join(f"{sha256_file(p)}  {k}\n" for k, p in sorted(files.items())).encode())
+
+
+def _make_real_prepare(base: Path, bars: dict[str, BarSeries], repo: Path) -> tuple[Path, str]:
+    """A real-mode prepare from provenance-real SYNTHETIC pulls under base/data (its canonical root)."""
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setenv("MONEYLAB_DATA_DIR", str(base / "data"))
+        mp.setattr(cli_module, "REPO_ROOT", repo)
+        pulls = {iv: make_pull(base / "pulls", bars, iv, es.LOCKED_SPEC, provenance="real") for iv in ("day", "hour")}
+        shas = {iv: sha256_file(pulls[iv] / PULL_FILE) for iv in pulls}
+        main(["econ-screen-prepare", "--day-pull", str(pulls["day"]), "--hour-pull", str(pulls["hour"]),
+              "--expect-day-pull-sha256", shas["day"], "--expect-hour-pull-sha256", shas["hour"]])
+        prep = next((base / "data" / "processed" / es.REAL_ROOT_NAME).glob("prepare-*"))
+        return prep, sha256_file(prep / "manifest.json")
+    finally:
+        mp.undo()
+
+
+@pytest.fixture(scope="module")
+def s_env(tmp_path_factory):
+    """One clean temp repository and two real prepares (short synthetic period; data from 2023-06-01):
+    'good' passes every required Q; 'bad' misses 1 of every 40 hours, so Q3 is INVALID."""
+    base = tmp_path_factory.mktemp("s_env")
+    repo = _clean_repo_with_prereg(base)
+    d, h = es.synthetic_bars(S_DATA_START, es.LOCKED_SPEC.requested_end, seed=21, label="S", kind="fixture")
+    good, good_sha = _make_real_prepare(base / "good", {"day": d, "hour": h}, repo)
+    hours = [b for i, b in enumerate(h.bars) if i % 40 != 7]
+    h_bad = BarSeries.build(hours, provenance_for(hours, "fixture", "t"))
+    bad, bad_sha = _make_real_prepare(base / "bad", {"day": d, "hour": h_bad}, repo)
+    return {"repo": repo, "good": good, "good_sha": good_sha, "bad": bad, "bad_sha": bad_sha}
+
+
+def _stage(tmp_path: Path, monkeypatch, s_env: dict, which: str = "good") -> tuple[Path, Path]:
+    """Copy a prepare byte for byte under this test's own canonical root (manifest hash unchanged)."""
+    data = tmp_path / "data"
+    root = data / "processed" / es.REAL_ROOT_NAME
+    root.mkdir(parents=True)
+    prep = root / s_env[which].name
+    shutil.copytree(s_env[which], prep)
+    monkeypatch.setenv("MONEYLAB_DATA_DIR", str(data))
+    monkeypatch.setattr(cli_module, "REPO_ROOT", s_env["repo"])
+    return root.resolve(), prep
+
+
+def _no_attempt(root: Path) -> None:
+    assert not (root / es.RUN_LOCK_NAME).exists()
+    assert not list(root.glob(".tmp-run-*")) and not list(root.glob("run-*"))
+
+
+def _forbid_matrix(monkeypatch) -> None:
+    def boom(*a, **k):
+        raise AssertionError("run_matrix must not be called")
+
+    monkeypatch.setattr(es, "run_matrix", boom)
+
+
+def _run(prep: Path, sha: str, *extra: str) -> int:
+    return main(["econ-screen-run", "--prepare", str(prep), "--expect-prepare-manifest-sha256", sha, *extra])
+
+
+def test_s1_quality_json_is_bound_to_the_approved_manifest(tmp_path, monkeypatch, capsys, s_env):
+    root, prep = _stage(tmp_path, monkeypatch, s_env)
+    _forbid_matrix(monkeypatch)
+    q = json.loads((prep / "quality.json").read_text(encoding="utf-8"))
+    q["tampered"] = True
+    (prep / "quality.json").write_bytes(es.json_bytes(q))
+    _rewrite_sums(prep)
+    es.verify_output(prep)  # SHA256SUMS is consistent again: only the approved manifest can catch it
+    capsys.readouterr()
+    assert _run(prep, s_env["good_sha"]) == 1
+    assert "quality_sha256" in _flat(capsys.readouterr().out)
+    _no_attempt(root)
+    man = json.loads((prep / "manifest.json").read_text(encoding="utf-8"))
+    man["quality_sha256"] = hashlib.sha256((prep / "quality.json").read_bytes()).hexdigest()
+    (prep / "manifest.json").write_bytes(es.json_bytes(man))
+    _rewrite_sums(prep)
+    assert _run(prep, s_env["good_sha"]) == 1
+    assert "differs from the approved value" in _flat(capsys.readouterr().out)
+    _no_attempt(root)
+
+
+def test_s1_forged_summary_is_refused_by_the_recomputed_quality(tmp_path, monkeypatch, capsys, s_env):
+    root, prep = _stage(tmp_path, monkeypatch, s_env, which="bad")
+    _forbid_matrix(monkeypatch)
+    q = json.loads((prep / "quality.json").read_text(encoding="utf-8"))
+    assert q["summary"]["required_all_pass"] is False and q["bar_quality"]["Q3"]["status"] == "INVALID"
+    q["summary"]["required_all_pass"] = True
+    q["summary"]["bundle_status"] = "INCOMPLETE"
+    (prep / "quality.json").write_bytes(es.json_bytes(q))
+    man = json.loads((prep / "manifest.json").read_text(encoding="utf-8"))
+    man["quality_sha256"] = hashlib.sha256((prep / "quality.json").read_bytes()).hexdigest()
+    (prep / "manifest.json").write_bytes(es.json_bytes(man))
+    _rewrite_sums(prep)
+    forged_sha = sha256_file(prep / "manifest.json")  # passed as if it were the approved value
+    capsys.readouterr()
+    assert _run(prep, forged_sha) == 1
+    assert "did not pass on recomputation" in _flat(capsys.readouterr().out)
+    _no_attempt(root)
+
+
+def test_s2_canonical_root_and_prepare_location(tmp_path, monkeypatch, capsys, s_env):
+    root, prep = _stage(tmp_path, monkeypatch, s_env)
+    _forbid_matrix(monkeypatch)
+    other = tmp_path / "elsewhere" / es.REAL_ROOT_NAME
+    capsys.readouterr()
+    assert _run(prep, s_env["good_sha"], "--out", str(other)) == 1
+    assert "real output root must be" in _flat(capsys.readouterr().out)
+    rc = main(["econ-screen-prepare", "--day-pull", str(tmp_path / "x"), "--hour-pull", str(tmp_path / "y"),
+               "--expect-day-pull-sha256", "0" * 64, "--expect-hour-pull-sha256", "0" * 64, "--out", str(other)])
+    assert rc == 1 and "real output root must be" in _flat(capsys.readouterr().out)
+    assert not other.exists() and not list(root.glob(".tmp-prepare-*"))
+    assert [p.name for p in root.glob("prepare-*")] == [prep.name]
+    other.mkdir(parents=True)
+    moved = other / prep.name
+    shutil.copytree(prep, moved)
+    assert _run(moved, s_env["good_sha"]) == 1
+    assert "directly under" in _flat(capsys.readouterr().out)
+    _no_attempt(root)
+    _no_attempt(other)
+
+
+def test_s2_run_lock_is_atomic(tmp_path):
+    root = tmp_path / "lockroot"
+    es.acquire_run_lock(root)
+    with pytest.raises(es.EconScreenError, match="already attempted"):
+        es.acquire_run_lock(root)
+    race = tmp_path / "race"
+    barrier = threading.Barrier(8)
+    results: list[str] = []
+    lock = threading.Lock()
+
+    def worker():
+        barrier.wait()
+        try:
+            es.acquire_run_lock(race)
+            outcome = "ok"
+        except es.EconScreenError:
+            outcome = "refused"
+        with lock:
+            results.append(outcome)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert sorted(results) == ["ok"] + ["refused"] * 7
+    assert (race / es.RUN_LOCK_NAME).is_dir()
+
+
+def test_s3_pre_validation_errors_create_no_attempt(tmp_path, monkeypatch, capsys, s_env):
+    root, prep = _stage(tmp_path, monkeypatch, s_env)
+    _forbid_matrix(monkeypatch)
+    sha = s_env["good_sha"]
+    for wrong in (sha.upper(), "0" * 64, sha[:63]):
+        assert _run(prep, wrong) == 1
+    assert _run(root / "prepare-missing", sha) == 1
+    _no_attempt(root)
+
+
+def test_s3_failure_after_the_lock_keeps_the_attempt(tmp_path, monkeypatch, capsys, s_env):
+    root, prep = _stage(tmp_path, monkeypatch, s_env)
+
+    def fail(*a, **k):
+        raise ValueError("injected after the lock")
+
+    monkeypatch.setattr(es, "run_matrix", fail)
+    capsys.readouterr()
+    assert _run(prep, s_env["good_sha"]) == 1
+    assert "injected after the lock" in _flat(capsys.readouterr().out)
+    assert (root / es.RUN_LOCK_NAME).is_dir() and len(list(root.glob(".tmp-run-*"))) == 1
+    assert not [p for p in root.glob("run-*") if p.name != es.RUN_LOCK_NAME]
+    assert _run(prep, s_env["good_sha"]) == 1
+    assert "already attempted" in _flat(capsys.readouterr().out)
+    assert len(list(root.glob(".tmp-run-*"))) == 1
+
+
+def test_s4_a_different_clean_commit_is_refused(tmp_path, monkeypatch, capsys, s_env):
+    root, prep = _stage(tmp_path, monkeypatch, s_env)
+    _forbid_matrix(monkeypatch)
+    repo2 = _clean_repo_with_prereg(tmp_path / "second", message="a different clean commit")
+    monkeypatch.setattr(cli_module, "REPO_ROOT", repo2)
+    capsys.readouterr()
+    assert _run(prep, s_env["good_sha"]) == 1
+    assert "differs from the prepare commit" in _flat(capsys.readouterr().out)
+    _no_attempt(root)
