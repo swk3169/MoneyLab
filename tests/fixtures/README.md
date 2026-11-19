@@ -36,6 +36,14 @@ the golden values in `tests/test_simulation_e2e.py`.
 `tests/upbit_helpers.py` and the Upbit tests build further **synthetic** messages inline. **Real Upbit captures are never
 copied into `tests/fixtures/`**: they stay under `data/raw/upbit/recordings/` (git-ignored, `provenance = real`).
 
+## ECON-SCREEN-V06-01 (BT-5S)
+
+`tests/test_econ_screen.py` adds **no fixture files**. It builds **synthetic** bars with
+`backtest.econ_screen.synthetic_bars` (seeded hourly random walk in integer KRW, daily bars aggregated from the hours
+exactly) and turns them into **synthetic** Upbit REST candle pages served by an in-test fake client, so
+`pull_to_store` writes `provenance = fixture` pulls into `tmp_path` only. A "real" pull in the refusal tests is the same
+synthetic data with the provenance field set to `real` inside `tmp_path`; it is never market data and never evidence.
+
 ## v0.4 research
 
 The research tests (`tests/test_research_*.py`, `tests/research_helpers.py`) add **no fixture files**. They build

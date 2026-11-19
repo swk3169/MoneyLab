@@ -44,7 +44,8 @@ def _sums(path: Path) -> dict[str, str]:
     return out
 
 
-def load_bars(bars_dir: Path) -> BarSeries:
+def load_bars(bars_dir: Path, *, real_permit: Any = None) -> BarSeries:
+    """real_permit: ECON-SCREEN-V06-01 study permit (backtest.econ_screen); None keeps the general refusal."""
     bars_dir = Path(bars_dir)
     try:
         manifest = json.loads((bars_dir / MANIFEST_FILE).read_text(encoding="utf-8"))
@@ -56,7 +57,7 @@ def load_bars(bars_dir: Path) -> BarSeries:
     kind = manifest.get("provenance")
     if kind not in PROVENANCE_KINDS:
         raise DataIntegrityError(f"{bars_dir}: unknown provenance {kind!r}")
-    if kind in REFUSED_KINDS:
+    if kind in REFUSED_KINDS and not (real_permit is not None and real_permit.admits_bars_dir(manifest)):
         raise DataIntegrityError(f"{bars_dir}: provenance {kind!r} is refused before BT-5")
     bars_file = manifest.get("bars_file")
     if set(sums) != {bars_file, MANIFEST_FILE}:

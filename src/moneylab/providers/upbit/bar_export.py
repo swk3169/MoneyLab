@@ -24,14 +24,14 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from moneylab.core.exceptions import MoneyLabError
 from moneylab.domain.bars import NOT_EVIDENCE, Bar, bars_sha256, canonical_bar_rows
 from moneylab.providers.upbit.candle_store import PULL_FILE, SETTING_KEYS, StoredPageClient, verify_candle_pull
-from moneylab.providers.upbit.candles import Candle, pull_candles
+from moneylab.providers.upbit.candles import Candle, decode_candles, pull_candles
 from moneylab.storage.atomic import atomic_write_bytes, sha256_file
 
 SCHEMA = "moneylab.backtest.bars/1"
@@ -66,7 +66,10 @@ def _utc(text: str) -> datetime:
     return datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
-def export_bars(pull_dir: Path, out_root: Path, *, allowed_provenance: tuple[str, ...] = ("fixture",)) -> BarsExport:
+def export_bars(pull_dir: Path, out_root: Path, *, allowed_provenance: tuple[str, ...] = ("fixture",),
+                real_permit: Any = None) -> BarsExport:
+    """real_permit: ECON-SCREEN-V06-01 study permit (backtest.econ_screen). Without it a real pull is refused
+    exactly as before; "real" in allowed_provenance stays refused either way."""
     pull_dir, out_root = Path(pull_dir), Path(out_root)
     if "real" in allowed_provenance:
         raise BarExportError("real pulls are not exported before BT-5")
@@ -75,7 +78,9 @@ def export_bars(pull_dir: Path, out_root: Path, *, allowed_provenance: tuple[str
         raise BarExportError(f"pull verification failed: {rep.problems}")
     doc = json.loads((pull_dir / PULL_FILE).read_text(encoding="utf-8"))
     provenance = doc.get("provenance")
-    if provenance not in allowed_provenance:
+    admitted = (provenance == "real" and real_permit is not None
+                and real_permit.allows_pull(doc, sha256_file(pull_dir / PULL_FILE), out_root))
+    if provenance not in allowed_provenance and not admitted:
         raise BarExportError(f"provenance {provenance!r} is not allowed (allowed: {allowed_provenance})")
     if provenance == "fixture" and not out_root.name.endswith(FIXTURE_ROOT_SUFFIX):
         raise BarExportError(f"fixture bars must go under a '*{FIXTURE_ROOT_SUFFIX}' root, not {out_root}")
@@ -139,3 +144,43 @@ def export_bars(pull_dir: Path, out_root: Path, *, allowed_provenance: tuple[str
             pass  # an unexpected leftover keeps the hidden temp dir; the final path was never created
         raise
     return BarsExport(final, interval, len(bars), content_sha, manifest)
+
+
+def econ_screen_pull_checks(pull_dir: Path, requested_end: datetime) -> dict[str, Any]:
+    """ECON-SCREEN-V06-01 provider-side facts of one pull, read-only: Q1 (verify_candle_pull), the stored
+    quality report counts for Q6, the collection-condition fields and the buckets at or after
+    requested_end. The last count parses only the start-time field of each stored row; no value field
+    is turned into a bar."""
+    pull_dir = Path(pull_dir)
+    rep = verify_candle_pull(pull_dir)
+    out: dict[str, Any] = {"pull_dir": str(pull_dir.resolve()), "pull_dir_name": pull_dir.name,
+                           "verify_ok": rep.ok, "verify_problems": list(rep.problems), "status": rep.status}
+    try:
+        raw = (pull_dir / PULL_FILE).read_bytes()
+        doc = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError) as exc:
+        out["read_error"] = f"{type(exc).__name__}: {exc}"
+        return out
+    if not isinstance(doc, dict):
+        out["read_error"] = f"{PULL_FILE} is not an object"
+        return out
+    report = doc.get("report") or {}
+    out.update(pull_id=doc.get("pull_id"), pull_json_sha256=sha256_file(pull_dir / PULL_FILE),
+               provenance=doc.get("provenance"), market=doc.get("market"), interval=doc.get("interval"),
+               requested_start=doc.get("requested_start"), requested_end=doc.get("requested_end"),
+               reached_earliest=report.get("reached_earliest"), first_start=report.get("first_start"),
+               last_start=report.get("last_start"),
+               duplicates_conflicting=len(report.get("duplicates_conflicting") or []),
+               invalid=len(report.get("invalid") or []), duplicates_identical=report.get("duplicates_identical"),
+               excluded_out_of_range=report.get("excluded_out_of_range"), warnings=list(report.get("warnings") or []))
+    if rep.ok:
+        after: set[str] = set()
+        for p in doc.get("pages") or []:
+            for row in decode_candles((pull_dir / p["file"]).read_bytes()):
+                ts = row.get("candle_date_time_utc") if isinstance(row, dict) else None
+                if isinstance(ts, str) and datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=UTC) >= requested_end:
+                    after.add(ts)
+        out["at_or_after_requested_end"] = len(after)
+    else:
+        out["at_or_after_requested_end"] = None
+    return out

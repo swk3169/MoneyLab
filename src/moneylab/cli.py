@@ -23,10 +23,12 @@ Exit codes: 0 ok, 3 data source unavailable (handled), 1 unexpected error (handl
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import math
 import subprocess
+import sys
 import time
 import traceback
 from dataclasses import replace
@@ -134,7 +136,10 @@ from moneylab.backtest.settings import DEFAULT_SETTINGS_FILE as BACKTEST_SETTING
 from moneylab.backtest.settings import load_cost_settings
 from moneylab.backtest.strategy import RULES as BACKTEST_RULES
 from moneylab.domain.bars import NOT_EVIDENCE
-from moneylab.providers.upbit.bar_export import BarExportError, export_bars
+from moneylab.providers.upbit.bar_export import BarExportError, econ_screen_pull_checks, export_bars
+from moneylab.backtest import econ_screen
+from moneylab.backtest.bars_io import load_bars
+from moneylab.storage.atomic import sha256_file
 from moneylab.backtest.code_state import classify_worktree, parse_porcelain_z
 from moneylab.research.config import ROOT as REPO_ROOT
 
@@ -868,6 +873,193 @@ def cmd_backtest_report_verify(args: argparse.Namespace, settings: Settings) -> 
     return EXIT_OK if rep.ok else EXIT_ERROR
 
 
+# --- ECON-SCREEN-V06-01 (BT-5S): study-only real path, quality, screening, synthetic measurement ----------
+
+def _econ_prereg_hashes(root: Path = REPO_ROOT) -> tuple[str, str | None]:
+    """(LF-normalized SHA-256 of the working preregistration file, SHA-256 of its HEAD blob or None)."""
+    file_sha = econ_screen.lf_normalized_sha256((root / econ_screen.PREREGISTRATION_PATH).read_bytes())
+    try:
+        out = subprocess.run(["git", "cat-file", "blob", f"HEAD:{econ_screen.PREREGISTRATION_PATH}"], cwd=root,
+                             capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return file_sha, None
+    return file_sha, (hashlib.sha256(out.stdout).hexdigest() if out.returncode == 0 else None)
+
+
+def _econ_mode_spec(args: argparse.Namespace) -> tuple[str, econ_screen.ScreenSpec]:
+    mode = "fixture" if args.source == "fixture" else "real"
+    spec = None
+    draws = getattr(args, "b1_draws", None)
+    if mode == "real" and (args.spec_json is not None or draws is not None):
+        raise econ_screen.EconScreenError("--spec-json and --b1-draws are fixture-only")
+    if args.spec_json is not None:
+        spec = econ_screen.ScreenSpec.from_dict(json.loads(args.spec_json.read_text(encoding="utf-8")))
+    return mode, econ_screen.resolve_spec(mode, spec, draws)
+
+
+def _econ_root(args: argparse.Namespace, settings: Settings, mode: str) -> Path:
+    if args.out is not None:
+        return Path(args.out)
+    name = econ_screen.REAL_ROOT_NAME + ("" if mode == "real" else econ_screen.FIXTURE_SUFFIX)
+    return settings.processed_dir / name
+
+
+_ECON_PULL_KEYS = ("pull_dir", "pull_id", "pull_json_sha256", "provenance", "market", "interval", "requested_start",
+                   "requested_end", "status", "verify_ok", "verify_problems", "reached_earliest", "first_start",
+                   "last_start", "duplicates_conflicting", "invalid", "duplicates_identical", "excluded_out_of_range",
+                   "at_or_after_requested_end", "warnings")
+
+
+def cmd_econ_screen_prepare(args: argparse.Namespace, settings: Settings) -> int:
+    """Q1, Q6, collection conditions, permit, bar export, Q2/Q3/Q4/Q7. No return is computed."""
+    try:
+        mode, spec = _econ_mode_spec(args)
+    except (econ_screen.EconScreenError, OSError, ValueError) as exc:
+        console.print(f"econ-screen-prepare refused: {type(exc).__name__}: {exc}", markup=False)
+        return EXIT_ERROR
+    label = econ_screen.evidence_label(mode)
+    root = _econ_root(args, settings, mode)
+    now = datetime.now(UTC)
+    try:
+        tmp = econ_screen.begin_output(root, "prepare", now)
+    except (econ_screen.EconScreenError, OSError) as exc:
+        console.print(f"{label} | econ-screen-prepare refused: {type(exc).__name__}: {exc}", markup=False)
+        return EXIT_ERROR
+    expected = {"day": args.expect_day_pull_sha256, "hour": args.expect_hour_pull_sha256}
+    paths = {"day": Path(args.day_pull), "hour": Path(args.hour_pull)}
+    try:
+        checks = {iv: econ_screen_pull_checks(paths[iv], spec.requested_end) for iv in ("day", "hour")}
+        stage = econ_screen.pull_stage(checks)
+        quality, permit, bars_info = None, None, {}
+        if stage["passed"]:
+            file_sha, blob_sha = _econ_prereg_hashes()
+            permit = econ_screen.issue_permit(mode, spec, prereg_file_sha256=file_sha, prereg_blob_sha256=blob_sha,
+                                              code_state=backtest_code_state(), checks=checks,
+                                              expected_pull_sha256=expected, out_root=root)
+            bars_root = tmp / ("bars" if mode == "real" else "bars" + econ_screen.FIXTURE_SUFFIX)
+            use = permit if mode == "real" else None
+            exports = {iv: export_bars(paths[iv], bars_root, real_permit=use) for iv in ("day", "hour")}
+            permit = permit.with_bars(exports["day"].bars_sha256, exports["hour"].bars_sha256)
+            use = permit if mode == "real" else None
+            series = {iv: load_bars(exports[iv].dir, real_permit=use) for iv in ("day", "hour")}
+            quality = econ_screen.bar_quality(series["day"], series["hour"], spec)
+            bars_info = {iv: {"dir": exports[iv].dir.relative_to(tmp).as_posix(), "bars": exports[iv].bars,
+                              "bars_sha256": exports[iv].bars_sha256} for iv in ("day", "hour")}
+        summary = econ_screen.quality_summary(stage, quality)
+        body = {"schema": econ_screen.SCHEMA, "kind": "prepare", "study_id": econ_screen.STUDY_ID, "mode": mode,
+                "evidence": label, "pulls": {iv: {k: checks[iv].get(k) for k in _ECON_PULL_KEYS} for iv in checks},
+                "pull_stage": stage, "bar_quality": quality, "summary": summary,
+                "permit": permit.to_dict() if permit else None, "bars": bars_info}
+        quality_bytes = econ_screen.json_bytes(body)
+        manifest = {"schema": econ_screen.SCHEMA, "kind": "prepare", "study_id": econ_screen.STUDY_ID, "mode": mode,
+                    "evidence": label, "created_utc": now.isoformat(), "spec": spec.to_dict(),
+                    "spec_sha256": spec.sha256(), "prereg_sha256": econ_screen.PREREGISTRATION_SHA256,
+                    "expected_pull_sha256": expected, "pulls": {iv: str(paths[iv].resolve()) for iv in paths},
+                    "bars": bars_info, "code_state": backtest_code_state(), "python": sys.version.split()[0],
+                    "quality_sha256": hashlib.sha256(quality_bytes).hexdigest()}
+        final, sums_sha = econ_screen.finish_output(tmp, "prepare", {"quality.json": quality_bytes,
+                                                                      "manifest.json": econ_screen.json_bytes(manifest)})
+    except (econ_screen.EconScreenError, BarExportError, DataIntegrityError, OSError, ValueError) as exc:
+        console.print(f"{label} | econ-screen-prepare stopped: {type(exc).__name__}: {exc}; "
+                      f"partial output kept at {tmp}", markup=False)
+        return EXIT_ERROR
+    q = quality or {}
+    statuses = {"Q1": stage["Q1"], "Q6": {iv: stage["Q6"][iv]["status"] for iv in ("day", "hour")},
+                "collection": stage["collection"]["status"], **(q.get("required") or {}),
+                "evaluation_period": (q.get("evaluation_period") or {}).get("status")}
+    console.print(f"{label} | econ-screen-prepare {final}", markup=False)
+    console.print(f"  quality {summary['bundle_status']}, required_all_pass {summary['required_all_pass']}: {statuses}",
+                  markup=False)
+    console.print(f"  manifest.json {sha256_file(final / 'manifest.json')}, {econ_screen.SUMS_FILE} {sums_sha}",
+                  markup=False)
+    return EXIT_OK if summary["required_all_pass"] else EXIT_ERROR
+
+
+def cmd_econ_screen_run(args: argparse.Namespace, settings: Settings) -> int:
+    """One screening run on a passed prepare directory. Prints status, paths and hashes only."""
+    try:
+        mode, spec = _econ_mode_spec(args)
+    except (econ_screen.EconScreenError, OSError, ValueError) as exc:
+        console.print(f"econ-screen-run refused: {type(exc).__name__}: {exc}", markup=False)
+        return EXIT_ERROR
+    label = econ_screen.evidence_label(mode)
+    root = _econ_root(args, settings, mode)
+    now = datetime.now(UTC)
+    try:
+        econ_screen.check_run_lock(root)
+        tmp = econ_screen.begin_output(root, "run", now)  # the attempt marker exists before any computation
+    except (econ_screen.EconScreenError, OSError) as exc:
+        console.print(f"{label} | econ-screen-run refused: {type(exc).__name__}: {exc}", markup=False)
+        return EXIT_ERROR
+    try:
+        prep = Path(args.prepare)
+        econ_screen.verify_output(prep)
+        man_sha = sha256_file(prep / "manifest.json")
+        if man_sha != args.expect_prepare_manifest_sha256:
+            raise econ_screen.EconScreenError("prepare manifest.json SHA-256 differs from the approved value")
+        manifest = json.loads((prep / "manifest.json").read_text(encoding="utf-8"))
+        stored = json.loads((prep / "quality.json").read_text(encoding="utf-8"))
+        if (manifest.get("study_id"), manifest.get("mode"), manifest.get("kind")) != (econ_screen.STUDY_ID, mode,
+                                                                                    "prepare"):
+            raise econ_screen.EconScreenError("prepare directory is not a prepare of this study and mode")
+        prep_spec = econ_screen.ScreenSpec.from_dict(manifest["spec"])
+        if replace(prep_spec, b1_draws=1) != replace(spec, b1_draws=1):
+            raise econ_screen.EconScreenError("prepare spec differs from the run spec")
+        if not stored["summary"]["required_all_pass"]:
+            raise econ_screen.EconScreenError("prepare quality did not pass; no return is computed")
+        checks = {iv: econ_screen_pull_checks(Path(manifest["pulls"][iv]), spec.requested_end) for iv in ("day", "hour")}
+        stage = econ_screen.pull_stage(checks)
+        if json.loads(econ_screen.json_bytes(stage)) != stored["pull_stage"] or not stage["passed"]:
+            raise econ_screen.EconScreenError("pull checks differ from the prepare record")
+        file_sha, blob_sha = _econ_prereg_hashes()
+        permit = econ_screen.issue_permit(mode, spec, prereg_file_sha256=file_sha, prereg_blob_sha256=blob_sha,
+                                          code_state=backtest_code_state(), checks=checks,
+                                          expected_pull_sha256=manifest["expected_pull_sha256"], out_root=root)
+        bars = manifest["bars"]
+        permit = permit.with_bars(bars["day"]["bars_sha256"], bars["hour"]["bars_sha256"])
+        use = permit if mode == "real" else None
+        series = {iv: load_bars(prep / bars[iv]["dir"], real_permit=use) for iv in ("day", "hour")}
+        if any(series[iv].provenance.bars_sha256 != bars[iv]["bars_sha256"] for iv in series):
+            raise econ_screen.EconScreenError("prepare bars differ from the manifest")
+        quality = econ_screen.bar_quality(series["day"], series["hour"], spec)
+        if json.loads(econ_screen.json_bytes(quality)) != stored["bar_quality"]:
+            raise econ_screen.EconScreenError("recomputed Q2/Q3/Q4/Q7 differ from the prepare record")
+        period_ok = quality["evaluation_period"]["status"] == econ_screen.PASS
+        combos = econ_screen.run_matrix(series["day"], series["hour"], spec, BACKTEST_SETTINGS,
+                                        real_permit=use) if period_ok else []
+        flags = econ_screen.screen_flags(combos, spec, period_ok)
+        screen = {"schema": econ_screen.SCHEMA, "kind": "run", "study_id": econ_screen.STUDY_ID, "mode": mode,
+                  "evidence": label, "labels": [label, "DESCRIPTIVE_ONLY", "FEE_UNCONFIRMED", "COSTS_ASSUMED"],
+                  "spec": spec.to_dict(), "spec_sha256": spec.sha256(),
+                  "prepare": {"dir_name": prep.name, "manifest_sha256": man_sha},
+                  "settings": econ_screen.settings_hashes(BACKTEST_SETTINGS), "quality": quality,
+                  "combinations_count": len(combos), "combinations": combos, "flags": flags,
+                  "p_values": "not computed", "verdict": "not computed"}
+        screen_bytes = econ_screen.json_bytes(screen)
+        run_manifest = {"schema": econ_screen.SCHEMA, "kind": "run", "study_id": econ_screen.STUDY_ID, "mode": mode,
+                        "evidence": label, "created_utc": now.isoformat(), "spec_sha256": spec.sha256(),
+                        "prereg_sha256": econ_screen.PREREGISTRATION_SHA256, "permit": permit.to_dict(),
+                        "code_state": backtest_code_state(), "python": sys.version.split()[0],
+                        "screen_sha256": hashlib.sha256(screen_bytes).hexdigest()}
+        final, sums_sha = econ_screen.finish_output(tmp, "run", {"screen.json": screen_bytes,
+                                                                  "manifest.json": econ_screen.json_bytes(run_manifest)})
+    except (econ_screen.EconScreenError, BarExportError, DataIntegrityError, OSError, ValueError, KeyError) as exc:
+        console.print(f"{label} | econ-screen-run stopped: {type(exc).__name__}: {exc}; attempt and partial output "
+                      f"kept at {tmp}", markup=False)
+        return EXIT_ERROR
+    console.print(f"{label} | econ-screen-run {final}: {len(combos)} combination(s) written", markup=False)
+    console.print(f"  screen.json {sha256_file(final / 'screen.json')}, {econ_screen.SUMS_FILE} {sums_sha}",
+                  markup=False)
+    console.print("  results are not printed here; opening them needs its own approval", markup=False)
+    return EXIT_OK
+
+
+def cmd_econ_screen_measure(args: argparse.Namespace, settings: Settings) -> int:
+    """Synthetic resource measurement only (no file input, no file output)."""
+    econ_screen.measure(BACKTEST_SETTINGS, emit=lambda s: console.print(s, markup=False))
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="moneylab", description="MoneyLab - prediction market research (read-only)")
     p.add_argument("--version", action="version", version=f"moneylab {__version__}")
@@ -1040,6 +1232,31 @@ def build_parser() -> argparse.ArgumentParser:
     bq.add_argument("run_dir", type=Path)
     bq.add_argument("--json", action="store_true")
     bq.set_defaults(func=cmd_backtest_report_verify)
+
+    ep = sub.add_parser("econ-screen-prepare", help="ECON-SCREEN-V06-01: pull checks, permit, bar export and "
+                                                    "quality Q1-Q7 (no return is computed)")
+    ep.add_argument("--day-pull", type=Path, required=True)
+    ep.add_argument("--hour-pull", type=Path, required=True)
+    ep.add_argument("--expect-day-pull-sha256", required=True, help="approved SHA-256 of the day pull.json")
+    ep.add_argument("--expect-hour-pull-sha256", required=True, help="approved SHA-256 of the hour pull.json")
+    ep.add_argument("--source", choices=["real", "fixture"], default="real")
+    ep.add_argument("--spec-json", type=Path, default=None, help="fixture only: spec override")
+    ep.add_argument("--out", type=Path, default=None, help="default data/processed/econ_screen_v06_01[-fixture]")
+    ep.set_defaults(func=cmd_econ_screen_prepare)
+
+    er = sub.add_parser("econ-screen-run", help="ECON-SCREEN-V06-01: one screening run on a passed prepare "
+                                                "directory (prints status and hashes only)")
+    er.add_argument("--prepare", type=Path, required=True, help="prepare-<stamp> directory")
+    er.add_argument("--expect-prepare-manifest-sha256", required=True, help="approved SHA-256 of its manifest.json")
+    er.add_argument("--source", choices=["real", "fixture"], default="real")
+    er.add_argument("--spec-json", type=Path, default=None, help="fixture only: spec override")
+    er.add_argument("--b1-draws", type=int, default=None, help="fixture only: B1 placements")
+    er.add_argument("--out", type=Path, default=None, help="default data/processed/econ_screen_v06_01[-fixture]")
+    er.set_defaults(func=cmd_econ_screen_run)
+
+    em = sub.add_parser("econ-screen-measure", help="ECON-SCREEN-V06-01: synthetic resource measurement "
+                                                    "(no data, no files)")
+    em.set_defaults(func=cmd_econ_screen_measure)
 
     rb = sub.add_parser("research-build", help="v0.4: raw Upbit dataset -> grid/features/labels/split (offline)")
     rb.add_argument("dataset", type=Path, help="Upbit dataset directory (.../<session>/KRW-BTC)")

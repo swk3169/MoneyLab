@@ -663,8 +663,24 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 | BT-4 | v0.6 사전등록 고정(D1–D10, U1–U9 결정 반영) | – | 사전등록·config SHA | 사용자 결정 |
 | BT-5 | dry-run → 과거 캔들 수집(승인) → `candles-verify` → `bar_export` → 확증 평가 백테스트 1회 → research 쪽 검정 | **실데이터** | 판정표 결과(L1). 수익률은 이 단계에서 처음 생긴다 | 승인별 |
 | BT-6 | holdout 개봉(조건 충족 시) → forward 평가(월 1회 수집, 12개월 이상). 실시간 모의거래는 PAPER_CANDIDATE 이후의 별도 설계 | 실데이터 | L2/L3 | 12개월 이상 |
+| BT-5S | ECON-SCREEN-V06-01 전용 경제성 선별(15.1절). BT-5가 아니며 BT-5의 승인·판정을 대신하지 않는다 | **실데이터(study 전용 permit 경로만)** | 선별 표시(L1_SCREENING / NOT_CONFIRMATORY) | 승인별 |
 
 - 세션 수는 지금까지 작업 속도에 기반한 대략적 추정이며 약속이 아니다.
+
+### 15.1 BT-5S: ECON-SCREEN-V06-01 경제성 선별의 제한된 real 허용
+
+- 근거: 고정 사전등록 `docs/research_econ_screen_v06_01_preregistration.md`(SHA-256 `2ff766fa8e60adbc107b1ffe9ae4df30c455b616cd5345154704ff928b74705d`),
+  Work Order `docs/tasks/ECON-SCREEN-V06-01-IMPL/WORK_ORDER.md`. 증거 등급 L1_SCREENING / NOT_CONFIRMATORY.
+- 일반 BT-5 금지는 유지된다. `bar_export`, `bars_io`, `portfolio`, `vault`, `run`은 permit 없이 지금과 똑같이 real을 거부한다.
+- 허용은 `backtest/econ_screen.py`의 `EconScreenPermit`을 거친 경로뿐이다. permit은 study ID, 고정 spec, 사전등록 해시(작업 파일과
+  HEAD blob), 사용자가 승인한 두 pull의 `pull.json` SHA-256, requested 범위·시장·interval·provenance, real 모드의 clean 코드,
+  출력 root가 모두 맞을 때만 만들어진다. 코드는 값의 일치만 검사하며 승인 메시지를 인증하지 않는다. 보안 경계가 아니다.
+- 허용 범위: KRW-BTC 일봉·1시간봉, requested [2017-01-01T00:00Z, 2024-04-01T00:00Z), 사전등록 SHA 고정. vault·run·segment는 쓰지 않는다.
+- 순서(사전등록 5절): Q1(`candles-verify`) → Q6 → 수집 진행 조건 → permit → Bar 변환 → Q2·Q3·Q4·Q7 → 평가 기간 조건 → 계산.
+  앞 단계가 PASS가 아니면 뒤 단계를 실행하지 않는다.
+- 명령: `econ-screen-prepare`(품질까지, 수익률 없음), `econ-screen-run`(선별 1회, 상태·해시만 출력), `econ-screen-measure`(합성 자원 측정).
+  prepare와 run은 각각 별도 승인이 필요하다. run 시도 표시(`run-*`, `.tmp-run-*`)가 있으면 다시 실행하지 않는다.
+- 결과는 확증으로 승격하지 않는다. p값·V0·판정은 계산하지 않는다.
 - BT-6의 "실시간 모의거래"는 초안 기준으로 forward L3 평가와 다르다. forward 평가는 캔들 수집으로 하고, 실시간 모의거래(paper)는
   초안 11.3의 PAPER_CANDIDATE 이후에 별도 설계와 승인을 받는다.
 
@@ -696,4 +712,5 @@ D일 종가를 C_D, r(a, b] = ln(C_b / C_a)라 한다.
 | BT-3c | 2026-10-16 | 입력 segment와 식별(4절): `backtest-segment`(segment/1, `end_utc ≤ last_day + 3일`, 하한 없음, source 계보·content SHA·id·manifest SHA 분리. 계약 v1.2: content SHA에서 source 계보 제외), run manifest run/2(`config_sha256`, `boundary`, consumed 해시, segment 필드), `backtest-verify`의 독립 `identity` 검사, `SOURCE_UNAVAILABLE`과 run/1 legacy 상태. result·report/2·bt-metrics/2·bt-seed/1·bars/1 형식 변경 없음. vault 잠금은 BT-3d, 고정은 BT-4. SYNTHETIC / NOT_EVIDENCE |
 | BT-3d | 2026-10-17 | vault 잠금(10.3절, Work Order `docs/tasks/BT-3D/WORK_ORDER.md`): `backtest/vault.py` 라이브러리(CLI 없음). public bars/1 + 봉인된 locked holdout, `HistoricalHoldoutVault.open_once`, `ForwardVault.seal`·`open_analysis`(명시적 W_end), 증거·접근 기록(배타적 1회 생성, 기록 후 읽기), content 식별과 접근 상태 분리, IDENTICAL_EXISTING. 미룬 항목 DP1–DP4. 기존 스키마·코드 변경 없음, guard 변경 없음. SYNTHETIC / NOT_EVIDENCE |
 | BT-3e | 2026-10-17 | 월별 forward 위험 확인 장치(10.3절, Work Order `docs/tasks/BT-3E/WORK_ORDER.md`): `record_risk_policy`(holdout 개봉 전), `record_risk_strategies`(개봉 후·첫 forward 접근 전), `ForwardVault.check_risk`(달마다 F 전체 1회, 기록 후 읽기, 전략별 PASS/VIOLATION만), `risk_status`, 비공개 `backtest/risk_check.py`. 확증 기준은 public 데이터로 내부 재계산. 정책 값 기본값 없음(지원: MAX_DRAWDOWN_LOG, ENGINE_WINDOW_BT3B). `vault_status`·D14·기존 증거 3종 그대로. DP1 장치 구현(정책 값은 BT-4), DP2–DP4 미해결. SYNTHETIC / NOT_EVIDENCE |
+| BT-5S | 2026-11-19 | ECON-SCREEN-V06-01 전용 제한 허용(15.1절, Work Order `docs/tasks/ECON-SCREEN-V06-01-IMPL/WORK_ORDER.md`): `backtest/econ_screen.py`(permit, 품질 Q1–Q7, 144조합, SCREEN_FLAG, 회복 기간, 합성 측정), `bars_io`·`portfolio`·`bar_export`의 `real_permit` 키워드(없으면 기존 거부 그대로), CLI `econ-screen-prepare`·`econ-screen-run`·`econ-screen-measure`. 일반 real 금지·vault·run 변경 없음. 실데이터 수집·실행은 별도 승인 |
 | MC-V06 | 2026-10-18 | 합성 Monte Carlo 위험 의미(10.5절, Work Order `docs/tasks/MC-V06/WORK_ORDER.md`): research 계층 독립 위험 모델 `research/v06/risk_model.py`(MAX_DRAWDOWN_LOG, 달력 월, CUMULATIVE_FROM_L, MONTH_ONLY, gt, ge), public ForwardVault와의 테스트 전용 동치, 제외 항목(엔진 equity, 1시간봉 경로, ENGINE_WINDOW_BT3B −2/−3일 이동) 한계, 시뮬레이션 달력 PRIMARY_MONTH_START(NOT_A_BT4_DECISION), 반복 축 R_OUTER·B_BOOT·K_RAND·TRUTH_YEARS 분리, 단일 검정 결과 `test_level`, 스키마 `moneylab.research_v06_sim/2`. backtest 코드·BT-3e 변경 없음, BT4-Q18 미해결. SYNTHETIC / NOT_EVIDENCE |

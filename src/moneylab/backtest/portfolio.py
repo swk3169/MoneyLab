@@ -162,13 +162,15 @@ class _Pending:
     since: datetime  # signal day of the first attempt
 
 
-def _check_inputs(daily: BarSeries, hourly: BarSeries) -> None:
+def _check_inputs(daily: BarSeries, hourly: BarSeries, real_permit: Any = None) -> None:
     if daily.interval != "day" or hourly.interval != "hour":
         raise ValueError("need a daily series for signals and an hourly series for fills")
     if daily.market != hourly.market:
         raise ValueError("daily and hourly series are of different markets")
     kinds = {daily.provenance.kind, hourly.provenance.kind}
-    if not kinds <= set(ALLOWED_KINDS):
+    # ECON-SCREEN-V06-01 (BT-5S) only: real bars pass when a study permit admits exactly these series.
+    admitted = kinds == {"real"} and real_permit is not None and real_permit.admits(daily, hourly)
+    if not kinds <= set(ALLOWED_KINDS) and not admitted:
         raise DataIntegrityError(f"BT-1 accepts only {ALLOWED_KINDS} bars (real data is refused until BT-5), "
                                  f"got {sorted(kinds)}")
     if len(kinds) != 1:
@@ -177,15 +179,16 @@ def _check_inputs(daily: BarSeries, hourly: BarSeries) -> None:
     hourly.verify()
 
 
-def simulate(daily: BarSeries, hourly: BarSeries, config: RunConfig) -> BacktestResult:
-    """Run one rule over [first_day, last_day]. All money arithmetic uses PRECISION Decimal digits."""
+def simulate(daily: BarSeries, hourly: BarSeries, config: RunConfig, *, real_permit: Any = None) -> BacktestResult:
+    """Run one rule over [first_day, last_day]. All money arithmetic uses PRECISION Decimal digits.
+    real_permit: ECON-SCREEN-V06-01 study permit (backtest.econ_screen); None keeps the general refusal."""
     with localcontext() as ctx:
         ctx.prec = PRECISION
-        return _simulate(daily, hourly, config)
+        return _simulate(daily, hourly, config, real_permit)
 
 
-def _simulate(daily: BarSeries, hourly: BarSeries, config: RunConfig) -> BacktestResult:
-    _check_inputs(daily, hourly)
+def _simulate(daily: BarSeries, hourly: BarSeries, config: RunConfig, real_permit: Any = None) -> BacktestResult:
+    _check_inputs(daily, hourly, real_permit)
     bound = evaluation_boundary(config)
     g_end = bound.g_end
     if hourly.last_end < bound.valuation_end:
