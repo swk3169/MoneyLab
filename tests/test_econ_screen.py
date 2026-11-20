@@ -1,4 +1,5 @@
-"""ECON-SCREEN-V06-01 (BT-5S): study permit, quality order, screening matrix, flags, recovery, output, measurement.
+"""ECON-SCREEN-V06-02 (BT-5S, built for V06-01): study permit, quality order, screening matrix, flags, recovery, output,
+measurement.
 
 Offline. Inputs are SYNTHETIC: backtest.econ_screen.synthetic_bars, served as Upbit REST candle pages by an in-test
 fake client and stored with pull_to_store into tmp_path (tests/fixtures/README.md). A "real" pull here is the same
@@ -1072,3 +1073,51 @@ def test_s4_a_different_clean_commit_is_refused(tmp_path, monkeypatch, capsys, s
     assert _run(prep, s_env["good_sha"]) == 1
     assert "differs from the prepare commit" in _flat(capsys.readouterr().out)
     _no_attempt(root)
+
+
+# --- ECON-SCREEN-V06-02-IMPL: last_tick_missing (T7) and the 02 identity (T8) -------------------------------
+
+V01_PREREG_SHA256 = "2ff766fa8e60adbc107b1ffe9ae4df30c455b616cd5345154704ff928b74705d"
+
+
+def test_t7_last_tick_missing_is_report_only_and_scoped_to_quality_bars():
+    d, h = es.synthetic_bars(S_DATA_START, es.LOCKED_SPEC.requested_end, seed=7, label="T7", kind="fixture")
+    daily = BarSeries.build(d.bars[1:], provenance_for(d.bars[1:], "fixture", "t7"))  # d0 = second day
+    d0 = daily.first_start
+    before = next(i for i, b in enumerate(h.bars) if b.start_utc < d0)  # an hour bar before d0: out of scope
+    inside = next(i for i, b in enumerate(h.bars) if b.start_utc >= d0 + timedelta(days=3))
+    hours = [replace(b, last_tick_ms=None) if i in (before, inside) else b for i, b in enumerate(h.bars)]
+    hourly = BarSeries.build(hours, provenance_for(hours, "fixture", "t7"))
+    days_none = [replace(b, last_tick_ms=None) if i == 5 else b for i, b in enumerate(daily.bars)]
+    daily_none = BarSeries.build(days_none, provenance_for(days_none, "fixture", "t7"))
+    base = es.bar_quality(daily, h, es.LOCKED_SPEC)
+    with_none = es.bar_quality(daily_none, hourly, es.LOCKED_SPEC)
+    assert base["last_tick_missing"] == {"day": 0, "hour": 0, "scope": "[d0, requested_end) quality bars",
+                                         "report_only": True}
+    assert with_none["last_tick_missing"] == {"day": 1, "hour": 1, "scope": "[d0, requested_end) quality bars",
+                                              "report_only": True}
+    strip = {k: v for k, v in with_none.items() if k != "last_tick_missing"}
+    assert strip == {k: v for k, v in base.items() if k != "last_tick_missing"}
+    assert "last_tick_missing" not in with_none["required"] and set(with_none["required"]) == {"Q2", "Q3", "Q4", "Q7"}
+    stage = {"Q1": {"day": es.PASS, "hour": es.PASS}, "Q6": {"day": {"status": es.PASS}, "hour": {"status": es.PASS}},
+             "collection": {"status": es.PASS}}
+    assert es.quality_summary(stage, with_none) == es.quality_summary(stage, base)
+
+
+def test_t8_permit_takes_only_the_02_identity(tmp_path, pulls, real_pulls):
+    assert (es.STUDY_ID, es.PREREGISTRATION_PATH, es.REAL_ROOT_NAME) == (
+        "ECON-SCREEN-V06-02", "docs/research_econ_screen_v06_02_preregistration.md", "econ_screen_v06_02")
+    assert es.PREREGISTRATION_SHA256 == "c6bd5e7eb0bcd8d44e668a9289ea67dafc97462063003cc1f9d183c18f092f81"
+    assert es.lf_normalized_sha256((ROOT / es.PREREGISTRATION_PATH).read_bytes()) == es.PREREGISTRATION_SHA256
+    fx = _checks(pulls)
+    fx_exp = {iv: fx[iv]["pull_json_sha256"] for iv in fx}
+    permit = _issue("fixture", E2E_SPEC, fx, fx_exp, tmp_path / "root-fixture")
+    assert permit.study_id == "ECON-SCREEN-V06-02" and permit.prereg_sha256 == es.PREREGISTRATION_SHA256
+    with pytest.raises(es.PermitError, match="preregistration file does not hash"):
+        _issue("fixture", E2E_SPEC, fx, fx_exp, tmp_path / "root-fixture", file_sha=V01_PREREG_SHA256)
+    with pytest.raises(es.PermitError, match="HEAD blob"):
+        _issue("fixture", E2E_SPEC, fx, fx_exp, tmp_path / "root-fixture", blob_sha=V01_PREREG_SHA256)
+    rl = _checks(real_pulls)
+    rl_exp = {iv: rl[iv]["pull_json_sha256"] for iv in rl}
+    with pytest.raises(es.PermitError, match="must be named econ_screen_v06_02, not econ_screen_v06_01"):
+        _issue("real", es.LOCKED_SPEC, rl, rl_exp, tmp_path / "econ_screen_v06_01")

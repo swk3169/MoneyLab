@@ -20,6 +20,11 @@ Observed: newest first; day boundary 00:00 UTC (= 09:00 KST); one day candle's l
 after its boundary; the newest candle is still in progress.
 Unverified: sort order is not documented (we sort ourselves); whether `to` is exclusive (we
 de-duplicate either way); first available date; whether past candles are revised later.
+timestamp null (ECON-SCREEN-V06-02): on 2026-11-19 a stored hour page (2019-03 range) had 4 rows whose
+`timestamp` key was present with the value null; the other fields had the documented shape. The official
+docs define `timestamp` as required int64 and say nothing about null. A present-but-null value is kept as
+last_tick_ms None and reported in warnings; its meaning and the accuracy of the other values in those rows
+are unverified. A missing key or any other non-integer value is still rejected.
 
 Retries happen here (not in urllib3): build the HttpClient with `retries=0` (see
 `candle_http_client`). 451/401/403/418 and other 4xx are never retried.
@@ -113,7 +118,7 @@ class Candle:
     close: Decimal
     acc_trade_price: Decimal
     acc_trade_volume: Decimal
-    last_tick_ms: int
+    last_tick_ms: int | None  # None only when the response had "timestamp": null
 
     @property
     def end_utc(self) -> datetime:
@@ -177,7 +182,9 @@ def parse_candle(row: Any, market: str, interval: str) -> Candle:
     if not is_aligned(start, interval):
         raise CandleParseError(f"{interval} candle start {utc_iso(start)} is not on a bucket boundary")
     ts = row.get("timestamp")
-    if isinstance(ts, bool) or not isinstance(ts, int):
+    if "timestamp" in row and ts is None:
+        pass  # present but null: kept as None, reported by pull_candles (ECON-SCREEN-V06-02 D1)
+    elif isinstance(ts, bool) or not isinstance(ts, int):
         raise CandleParseError(f"timestamp: expected integer ms, got {ts!r}")
     o, h, lo, c = (_dec(row, k) for k in _PRICE_FIELDS)
     atp, atv = (_dec(row, k) for k in _ACC_FIELDS)
@@ -458,6 +465,9 @@ def pull_candles(
         problems = value_problems(c)
         if problems:
             rep.invalid.append({"start_utc": utc_iso(c.start_utc), "problems": problems})
+        if c.last_tick_ms is None:
+            rep.warnings.append(f"{utc_iso(c.start_utc)}: timestamp null, last-tick check not evaluated")
+            continue
         tick = datetime.fromtimestamp(c.last_tick_ms / 1000, UTC)
         if tick < c.start_utc or tick > c.end_utc + LAST_TICK_TOLERANCE:
             rep.warnings.append(f"{utc_iso(c.start_utc)}: last tick {tick.isoformat()} outside bucket")

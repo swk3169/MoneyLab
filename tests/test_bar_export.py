@@ -301,3 +301,21 @@ def test_bar_export_and_bars_io_dependencies():
     assert not {m for m in exp if m.startswith(("moneylab.backtest", "moneylab.research"))}
     io = mods(SRC / "backtest" / "bars_io.py")
     assert not {m for m in io if m.startswith(("moneylab.providers", "moneylab.research", "requests", "socket"))}
+
+
+def test_t5_null_timestamp_survives_export_and_reload(tmp_path):
+    """ECON-SCREEN-V06-02-IMPL T5. The null row is SYNTHETIC (not a copy of a real response row)."""
+    from test_upbit_candles import HOUR, Server, client, utc
+    from test_upbit_candles import series as candle_series
+
+    first = utc(2026, 10, 10)
+    rows = candle_series(first, 6, "hour")
+    rows[2]["timestamp"] = None
+    c, _ = client(Server(rows))
+    _, store = pull_to_store(c, tmp_path / "pulls", "KRW-BTC", "hour", first, first + 6 * HOUR, provenance="fixture")
+    exp = export_bars(store.dir, tmp_path / "bars-fixture")
+    lines = (exp.dir / "bars_hour.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["last_tick_ms"] is None for line in lines] == [False, False, True, False, False, False]
+    loaded = bars_io.load_bars(exp.dir)
+    assert [b.last_tick_ms is None for b in loaded.bars] == [False, False, True, False, False, False]
+    assert loaded.provenance.bars_sha256 == exp.bars_sha256

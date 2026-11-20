@@ -873,7 +873,7 @@ def cmd_backtest_report_verify(args: argparse.Namespace, settings: Settings) -> 
     return EXIT_OK if rep.ok else EXIT_ERROR
 
 
-# --- ECON-SCREEN-V06-01 (BT-5S): study-only real path, quality, screening, synthetic measurement ----------
+# --- ECON-SCREEN-V06-02 (BT-5S): study-only real path, quality, screening, synthetic measurement ----------
 
 def _econ_prereg_hashes(root: Path = REPO_ROOT) -> tuple[str, str | None]:
     """(LF-normalized SHA-256 of the working preregistration file, SHA-256 of its HEAD blob or None)."""
@@ -898,7 +898,7 @@ def _econ_mode_spec(args: argparse.Namespace) -> tuple[str, econ_screen.ScreenSp
 
 
 def _econ_root(args: argparse.Namespace, settings: Settings, mode: str) -> Path:
-    """Real mode: the one canonical root settings.processed_dir/econ_screen_v06_01 (resolved, absolute);
+    """Real mode: the one canonical root settings.processed_dir/econ_screen_v06_02 (resolved, absolute);
     an --out elsewhere is refused even if its name matches (IMPL-03 D1). The root follows the runtime
     settings (MONEYLAB_DATA_DIR); fixing the environment is the execution contract's job."""
     if mode == "real":
@@ -1269,7 +1269,7 @@ def build_parser() -> argparse.ArgumentParser:
     bq.add_argument("--json", action="store_true")
     bq.set_defaults(func=cmd_backtest_report_verify)
 
-    ep = sub.add_parser("econ-screen-prepare", help="ECON-SCREEN-V06-01: pull checks, permit, bar export and "
+    ep = sub.add_parser("econ-screen-prepare", help="ECON-SCREEN-V06-02: pull checks, permit, bar export and "
                                                     "quality Q1-Q7 (no return is computed)")
     ep.add_argument("--day-pull", type=Path, required=True)
     ep.add_argument("--hour-pull", type=Path, required=True)
@@ -1277,20 +1277,20 @@ def build_parser() -> argparse.ArgumentParser:
     ep.add_argument("--expect-hour-pull-sha256", required=True, help="approved SHA-256 of the hour pull.json")
     ep.add_argument("--source", choices=["real", "fixture"], default="real")
     ep.add_argument("--spec-json", type=Path, default=None, help="fixture only: spec override")
-    ep.add_argument("--out", type=Path, default=None, help="default data/processed/econ_screen_v06_01[-fixture]")
+    ep.add_argument("--out", type=Path, default=None, help="default data/processed/econ_screen_v06_02[-fixture]")
     ep.set_defaults(func=cmd_econ_screen_prepare)
 
-    er = sub.add_parser("econ-screen-run", help="ECON-SCREEN-V06-01: one screening run on a passed prepare "
+    er = sub.add_parser("econ-screen-run", help="ECON-SCREEN-V06-02: one screening run on a passed prepare "
                                                 "directory (prints status and hashes only)")
     er.add_argument("--prepare", type=Path, required=True, help="prepare-<stamp> directory")
     er.add_argument("--expect-prepare-manifest-sha256", required=True, help="approved SHA-256 of its manifest.json")
     er.add_argument("--source", choices=["real", "fixture"], default="real")
     er.add_argument("--spec-json", type=Path, default=None, help="fixture only: spec override")
     er.add_argument("--b1-draws", type=int, default=None, help="fixture only: B1 placements")
-    er.add_argument("--out", type=Path, default=None, help="default data/processed/econ_screen_v06_01[-fixture]")
+    er.add_argument("--out", type=Path, default=None, help="default data/processed/econ_screen_v06_02[-fixture]")
     er.set_defaults(func=cmd_econ_screen_run)
 
-    em = sub.add_parser("econ-screen-measure", help="ECON-SCREEN-V06-01: synthetic resource measurement "
+    em = sub.add_parser("econ-screen-measure", help="ECON-SCREEN-V06-02: synthetic resource measurement "
                                                     "(no data, no files)")
     em.set_defaults(func=cmd_econ_screen_measure)
 

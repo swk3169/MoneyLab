@@ -48,6 +48,13 @@ synthetic data from 2017-06-01, and a throw-away git repository in `tmp_path` ho
 so the clean-code and preregistration-hash checks run against real git. That repository proves the checks are wired;
 it does not prove that the code under test is committed. R1 reduces only the B1 draws (9,999 -> 3) inside the test.
 
+The same tests now run under the ECON-SCREEN-V06-02 identity (ECON-SCREEN-V06-02-IMPL). Its new tests for
+`"timestamp": null` (`tests/test_upbit_candles.py`, `tests/test_upbit_candles_verify.py`, `tests/test_bar_export.py`,
+`tests/test_econ_screen.py`) also add **no fixture files**: the null rows are **synthetic** rows built in the tests from
+the existing synthetic row helper, with only the `timestamp` value set to `null`. No row of a real response was copied;
+the real observation (a stored 2019-03 hour page with 4 null rows) is described only in
+`docs/incidents/20261119-econ-screen-v06-01-hour-timestamp-null.md`.
+
 ## v0.4 research
 
 The research tests (`tests/test_research_*.py`, `tests/research_helpers.py`) add **no fixture files**. They build

@@ -419,3 +419,20 @@ def test_cli_live_path_uses_now_for_last_and_a_single_small_request(tmp_path, mo
     assert [p for _, _, p in session.calls] == [{"market": "KRW-BTC", "count": 10, "to": "2026-10-13T00:00:00Z"}]
     r = load(only_pull(out) / "pull.json")["report"]
     assert r["candles"] == 9 and r["excluded_incomplete"] == 1 and r["missing_buckets"] == 0
+
+
+def test_t4_pull_with_null_timestamp_verifies_and_replays_to_the_stored_report(tmp_path):
+    """ECON-SCREEN-V06-02-IMPL T4. The null row is SYNTHETIC (not a copy of a real response row)."""
+    first = utc(2026, 10, 10)
+    rows = series(first, 25, "hour")
+    rows[7]["timestamp"] = None
+    c, _ = client(Server(rows))
+    pull, store = pull_to_store(c, tmp_path, "KRW-BTC", "hour", first, first + 25 * HOUR, provenance="fixture",
+                                page_count=10)
+    assert pull.candles[7].last_tick_ms is None
+    stored = load(store.dir / "pull.json")
+    assert stored["status"] == "complete" and stored["report"]["ok"] is True
+    assert stored["report"]["warnings"] == ["2026-10-10T07:00:00Z: timestamp null, last-tick check not evaluated"]
+    rep = verify_candle_pull(store.dir)
+    assert rep.ok, rep.problems
+    assert json.loads(json.dumps(rep.replay)) == stored["report"]

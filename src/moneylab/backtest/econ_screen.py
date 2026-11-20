@@ -1,5 +1,6 @@
-"""ECON-SCREEN-V06-01: economic screening of the four v0.6 primary rules (BT-5S; Work Order
-docs/tasks/ECON-SCREEN-V06-01-IMPL, preregistration docs/research_econ_screen_v06_01_preregistration.md).
+"""ECON-SCREEN-V06-02: economic screening of the four v0.6 primary rules (BT-5S; first built for ECON-SCREEN-V06-01,
+Work Orders docs/tasks/ECON-SCREEN-V06-01-IMPL..IMPL-03; linked to ECON-SCREEN-V06-02 by
+docs/tasks/ECON-SCREEN-V06-02-IMPL, preregistration docs/research_econ_screen_v06_02_preregistration.md).
 
 Evidence level of a real run: L1_SCREENING / NOT_CONFIRMATORY. Fixture and synthetic runs are
 SYNTHETIC / NOT_EVIDENCE. No p-value, no V0 futility test and no verdict is computed here.
@@ -54,11 +55,11 @@ from moneylab.backtest.yearly import yearly_report
 from moneylab.domain.bars import NOT_EVIDENCE, Bar, utc_iso
 from moneylab.storage.atomic import atomic_write_bytes, sha256_file
 
-STUDY_ID = "ECON-SCREEN-V06-01"
+STUDY_ID = "ECON-SCREEN-V06-02"
 SCHEMA = "moneylab.econ_screen/1"
-PREREGISTRATION_PATH = "docs/research_econ_screen_v06_01_preregistration.md"
-PREREGISTRATION_SHA256 = "2ff766fa8e60adbc107b1ffe9ae4df30c455b616cd5345154704ff928b74705d"
-REAL_ROOT_NAME = "econ_screen_v06_01"
+PREREGISTRATION_PATH = "docs/research_econ_screen_v06_02_preregistration.md"
+PREREGISTRATION_SHA256 = "c6bd5e7eb0bcd8d44e668a9289ea67dafc97462063003cc1f9d183c18f092f81"
+REAL_ROOT_NAME = "econ_screen_v06_02"
 FIXTURE_SUFFIX = "-fixture"
 EVIDENCE_REAL = "L1_SCREENING / NOT_CONFIRMATORY"
 MODES = ("real", "fixture")
@@ -424,10 +425,16 @@ def bar_quality(daily: BarSeries, hourly: BarSeries, spec: ScreenSpec) -> dict[s
     period = {"status": PASS if eval_days >= spec.min_eval_days else "SAMPLE_NOT_MET", "eval_days": eval_days,
               "min_eval_days": spec.min_eval_days}
     required = {"Q2": q2["status"], "Q3": q3["status"], "Q4": q4["status"], "Q7": q7["status"]}
+    # Report only (ECON-SCREEN-V06-02 preregistration 5): bars in [d0, requested_end) whose last tick time was
+    # null in the response. Not part of `required`, quality_summary or any computation.
+    last_tick_missing = {iv: sum(1 for b in s.bars if d0 <= b.start_utc < end and b.last_tick_ms is None)
+                         for iv, s in (("day", daily), ("hour", hourly))}
     return {"d0": utc_iso(d0), "first_signal_day": utc_iso(spec.first_signal_day(d0)),
             "last_signal_day": utc_iso(spec.last_signal_day), "g_start": utc_iso(g0), "g_end": utc_iso(end),
             "Q2": q2, "Q3": q3, "Q4": q4, "Q7": q7, "required": required,
             "report_only_not_evaluated": {k: NOT_EVALUATED for k in REPORT_ONLY_CHECKS},
+            "last_tick_missing": {**last_tick_missing, "scope": "[d0, requested_end) quality bars",
+                                  "report_only": True},
             "evaluation_period": period}
 
 

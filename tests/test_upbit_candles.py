@@ -476,3 +476,66 @@ def test_page_meta_has_no_row_count_from_before_parsing(tmp_path):
     _, store = pull_to_store(c, tmp_path, "KRW-BTC", "day", utc(2026, 9, 1), utc(2026, 9, 4), provenance="fixture")
     meta = json.loads((store.dir / "pages" / "0000.meta.json").read_text(encoding="utf-8"))
     assert "rows" not in meta and meta["bytes"] == len((store.dir / "pages" / "0000.json").read_bytes())
+
+
+# --- ECON-SCREEN-V06-02-IMPL: "timestamp": null (synthetic rows, not copies of real response rows) -------------
+
+def test_t1_null_timestamp_is_kept_and_other_bad_timestamps_are_refused():
+    good = row(utc(2026, 10, 1))
+    kept = parse_candle(good | {"timestamp": None}, "KRW-BTC", "day")
+    assert kept.last_tick_ms is None and kept.close == Decimal("105") and kept.start_utc == utc(2026, 10, 1)
+    assert parse_candle(good, "KRW-BTC", "day").last_tick_ms == good["timestamp"]  # integers unchanged
+    missing = {k: v for k, v in good.items() if k != "timestamp"}
+    for bad in (missing, good | {"timestamp": True}, good | {"timestamp": 1.5},
+                good | {"timestamp": Decimal("1751327999833")}, good | {"timestamp": "1751327999833"}):
+        with pytest.raises(CandleParseError, match="^timestamp: expected integer ms"):
+            parse_candle(bad, "KRW-BTC", "day")
+    with pytest.raises(CandleParseError, match="unit"):  # the other checks still run first
+        parse_candle(row(utc(2026, 10, 1, 3), "hour", unit=240) | {"timestamp": None}, "KRW-BTC", "hour")
+
+
+def test_t2_null_timestamp_row_is_kept_and_reported_in_warnings():
+    rows = series(utc(2026, 10, 1), 3, "hour")
+    rows[1]["timestamp"] = None
+    c, _ = client(Server(rows))
+    pull = pull_candles(c, "KRW-BTC", "hour", utc(2026, 10, 1), utc(2026, 10, 1, 3))
+    assert [x.start_utc for x in pull.candles] == [utc(2026, 10, 1, h) for h in range(3)]
+    assert [x.last_tick_ms is None for x in pull.candles] == [False, True, False]
+    r = pull.report
+    assert r.ok and r.duplicates_conflicting == [] and r.duplicates_identical == 0 and r.invalid == []
+    assert r.warnings == ["2026-10-01T01:00:00Z: timestamp null, last-tick check not evaluated"]
+
+
+def test_t3_null_and_integer_duplicates_conflict_and_null_pairs_are_identical():
+    def served(rows, dup):
+        return client(lambda m, u, p: make_response(200, dumps(list(reversed(rows)) + [dup]),
+                                                    {"Date": format_datetime(NOW, usegmt=True)}))[0]
+    rows = series(utc(2026, 10, 1), 3)
+    mixed = pull_candles(served(rows, row(utc(2026, 10, 2)) | {"timestamp": None}), "KRW-BTC", "day",
+                         utc(2026, 10, 1), utc(2026, 10, 4))
+    assert mixed.report.duplicates_conflicting == ["2026-10-02T00:00:00Z"] and not mixed.report.ok
+    assert mixed.candles[1].last_tick_ms is not None  # first received wins
+    rows = series(utc(2026, 10, 1), 3)
+    rows[1]["timestamp"] = None
+    both = pull_candles(served(rows, row(utc(2026, 10, 2)) | {"timestamp": None}), "KRW-BTC", "day",
+                        utc(2026, 10, 1), utc(2026, 10, 4))
+    assert both.report.duplicates_identical == 1 and both.report.duplicates_conflicting == [] and both.report.ok
+    assert both.report.warnings == ["2026-10-02T00:00:00Z: timestamp null, last-tick check not evaluated"]
+
+
+def test_t6_report_without_null_keeps_its_keys_values_and_warnings():
+    rows = series(utc(2026, 10, 1), 3)
+    rows[1] = row(utc(2026, 10, 2), tick=utc(2026, 10, 3, 0, 5))  # last tick outside the bucket: existing warning
+    c, _ = client(Server(rows))
+    d = pull_candles(c, "KRW-BTC", "day", utc(2026, 10, 1), utc(2026, 10, 4)).report.to_dict()
+    assert list(d) == ["market", "interval", "requested_start", "requested_end", "pages", "rows_received", "candles",
+                       "first_start", "last_start", "reached_earliest", "duplicates_identical",
+                       "duplicates_conflicting", "excluded_incomplete", "excluded_out_of_range", "gaps", "invalid",
+                       "warnings", "ok", "missing_buckets"]
+    assert d == {"market": "KRW-BTC", "interval": "day", "requested_start": "2026-10-01T00:00:00Z",
+                 "requested_end": "2026-10-04T00:00:00Z", "pages": 1, "rows_received": 3, "candles": 3,
+                 "first_start": "2026-10-01T00:00:00Z", "last_start": "2026-10-03T00:00:00Z",
+                 "reached_earliest": False, "duplicates_identical": 0, "duplicates_conflicting": [],
+                 "excluded_incomplete": 0, "excluded_out_of_range": 0, "gaps": [], "invalid": [],
+                 "warnings": ["2026-10-02T00:00:00Z: last tick 2026-10-03T00:05:00+00:00 outside bucket"],
+                 "ok": True, "missing_buckets": 0}
