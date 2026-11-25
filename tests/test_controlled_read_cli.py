@@ -140,16 +140,33 @@ def _norm(path: str) -> str:
     return os.path.normcase(os.path.abspath(path))
 
 
-def assert_inside(paths: list[str], *allowed: Path) -> None:
-    real_sessions = _norm(str(Path.home() / ".claude"))
-    repo_data = _norm(str(REPO / "data"))
+def _parts(path: str | Path) -> tuple[str, ...]:
+    """Normalized path components, so boundaries are judged per component and never by string prefix."""
+    return Path(_norm(str(path))).parts
+
+
+def _within(path: str | Path, base: str | Path) -> bool:
+    p, b = _parts(path), _parts(base)
+    return p[:len(b)] == b
+
+
+def _ancestors(base: Path) -> set[tuple[str, ...]]:
+    """The exact proper ancestor directories of base (root included), as component tuples."""
+    b = _parts(base)
+    return {b[:i] for i in range(1, len(b))}
+
+
+def assert_inside(paths: list[str], *allowed: Path, ancestors_of: tuple[Path, ...] = ()) -> None:
+    """Every path is inside one of `allowed`, or is exactly an ancestor directory of one of `ancestors_of`
+    (path resolution such as os.path.realpath lstats each parent on POSIX). Real session records and the
+    repository data/ are never allowed, whatever the other arguments say."""
+    exact_ancestors = set().union(*(_ancestors(a) for a in ancestors_of)) if ancestors_of else set()
     for p in paths:
         if p.startswith("fd:") or p == os.devnull:  # subprocess.DEVNULL for the git child's stdin
             continue
-        n = _norm(p)
-        assert not n.startswith(real_sessions), p
-        assert not n.startswith(repo_data), p
-        assert any(n.startswith(_norm(str(a))) for a in allowed), p
+        assert not _within(p, Path.home() / ".claude"), p
+        assert not _within(p, REPO / "data"), p
+        assert any(_within(p, a) for a in allowed) or _parts(p) in exact_ancestors, p
 
 
 # -------------------------------------------------------------------------- data is not executed
@@ -168,8 +185,31 @@ def test_hostile_content_is_data_only(capsysbinary, tmp_path, root, monkeypatch)
     assert monitor.forbidden == []
     assert monitor.git_subcommands() == ["rev-parse", "check-ignore"]
     assert monitor.argv[0][-1] == "--show-toplevel"
-    assert_inside(monitor.opened, tmp_path)
-    assert_inside(monitor.lstat, tmp_path)
+    assert_inside(monitor.opened, tmp_path)  # opens: inside the synthetic tree only, no ancestor
+    assert_inside(monitor.lstat, tmp_path, ancestors_of=(tmp_path,))  # lstat: also its exact ancestors
+
+
+def test_boundary_check_allows_only_exact_ancestors_for_lstat(tmp_path):
+    inner = tmp_path / "repo" / "x.json"
+    ancestors = [str(a) for a in tmp_path.parents]
+    assert ancestors  # tmp_path always has parents
+    assert_inside([str(inner)], tmp_path)
+    assert_inside(ancestors + [str(tmp_path), str(inner)], tmp_path, ancestors_of=(tmp_path,))
+    sibling = tmp_path.parent / (tmp_path.name + "-sibling")
+    prefix_twin = str(tmp_path) + "x"  # shares the string prefix but is another directory
+    outside = str(Path(tmp_path.anchor) / "zz-not-an-ancestor")
+    for bad in (str(sibling), str(sibling / "f"), prefix_twin, outside, str(tmp_path.parent / "other" / "f")):
+        with pytest.raises(AssertionError):
+            assert_inside([bad], tmp_path, ancestors_of=(tmp_path,))
+    for ancestor in ancestors:  # an ancestor is never acceptable for an open
+        with pytest.raises(AssertionError):
+            assert_inside([ancestor], tmp_path)
+
+
+def test_boundary_check_never_allows_sessions_or_repo_data(tmp_path):
+    for forbidden in (Path.home() / ".claude" / "projects" / "k" / "s.jsonl", REPO / "data" / "processed" / "x"):
+        with pytest.raises(AssertionError):
+            assert_inside([str(forbidden)], forbidden.parent, ancestors_of=(forbidden,))
 
 
 def test_no_content_leaks_to_outputs_or_records(capsysbinary, tmp_path, root):
