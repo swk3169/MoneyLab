@@ -77,7 +77,7 @@ def test_fresh_interpreter_loads_no_automation_runlog_provider_or_network_module
 
 
 @pytest.mark.parametrize("obj", [
-    {"b": 1, "a": [1, 2.5, None, True], "c": {"z": "éあ\U0001f600", "y": "line\nbreak"}},
+    {"b": 1, "a": [1, 2.5, None, True], "c": {"z": "\N{LATIN SMALL LETTER E WITH ACUTE}\N{HIRAGANA LETTER A}\U0001f600", "y": "line\nbreak"}},
     {"schema": "x", "values": {"sha256": "0" * 64, "bytes": 0, "lf": 0}},
     [],
 ])

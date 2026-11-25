@@ -49,6 +49,15 @@ STATUS_ERROR_CODES = frozenset({"ARGUMENT_INVALID", "ENVIRONMENT_INVALID"})
 # E1.6: codes whose documents are never written to result.json.
 NON_STORABLE = frozenset({"ARGUMENT_INVALID", "ENVIRONMENT_INVALID", "STORE_PATH_INVALID", "ATTEMPT_EXISTS",
                           "STORE_FAILED"})
+# E2.1: failures that always come before the prefix is established, so prefix_check is null.
+BEFORE_PREFIX = frozenset({"SESSION_NOT_FOUND", "SESSION_PATH_INVALID", "SESSION_LIMIT_EXCEEDED"})
+# E2.2: defined processing failures, which only happen after the prefix is established. SELECTOR_KIND_MISMATCH
+# is left out because E2.2 also names a case of it before the session is opened.
+AFTER_PREFIX = frozenset({"SESSION_CORRUPT", "LINE_LIMIT_EXCEEDED", "ENTRY_LIMIT_EXCEEDED", "TEXT_LIMIT_EXCEEDED",
+                          "BODY_LIMIT_EXCEEDED", "FORMAT_UNSUPPORTED", "ENTRY_NOT_FOUND", "ENTRY_DUPLICATE",
+                          "TOOL_RESULT_ERROR", "TEXT_BLOCK_NOT_FOUND", "TEXT_BLOCK_AMBIGUOUS", "ENCODING_INVALID",
+                          "BOM_PRESENT", "CR_PRESENT", "MARKER_MISSING", "MARKER_DUPLICATE",
+                          "MARKER_ORDER_INVALID", "BODY_EMPTY"})
 INTENT_KEYS = frozenset({"schema", "task_id", "attempt", "project_key", "session_id", "selector", "profile",
                          "started_utc", "authority", "approval", "boundary"})
 STORED_KEYS = frozenset({"schema", "finished_utc", "result"})
@@ -295,10 +304,14 @@ def valid_result(doc: dict[str, Any]) -> bool:
             and _valid_profile(doc["profile"]) and _valid_target(doc["target"])):
         return False
     status, exit_code, values, error = doc["status"], doc["exit_code"], doc["values"], doc["error"]
-    if isinstance(exit_code, bool) or not isinstance(status, str) or doc["record"] is not None:
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool):  # E1.2: an integer, never a bool or float
+        return False
+    if not isinstance(status, str) or doc["record"] is not None:
         return False
     check = doc["target"]["prefix_check"]
     if check in CHECK_STATUSES and status not in CHECK_STATUSES[check]:
+        return False
+    if (status in BEFORE_PREFIX and check is not None) or (status in AFTER_PREFIX and check is None):
         return False
     if status == SUCCEEDED:
         return (exit_code == 0 and error is None and check == "MATCHED" and isinstance(values, dict)

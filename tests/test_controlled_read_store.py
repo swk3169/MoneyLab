@@ -560,3 +560,49 @@ def test_f3_attempt_already_exists(capsysbinary, root, home, monkeypatch):
     attempt_dir(root).mkdir(parents=True)
     _prep_failure(capsysbinary, root, home, monkeypatch, "ATTEMPT_EXISTS")
     assert attempt_dir(root).is_dir() and list(attempt_dir(root).iterdir()) == []
+
+
+# ------------------------------------------------- review fixes: exit_code type and E1.3/E2 pairs
+
+
+@pytest.mark.parametrize("value", [0.0, 2.0, True, False, "0", None])
+def test_exit_code_must_be_an_integer(capsysbinary, root, home, value):
+    def mutate(p):
+        rewrite(p, lambda o: o["result"].update(exit_code=value))
+    assert _corrupt_stored(capsysbinary, root, home, mutate) == "RECORD_CORRUPT"
+
+
+def test_integer_exit_codes_still_pass(capsysbinary, root, home):
+    call(capsysbinary, run_argv(), root, home)
+    assert status_of(capsysbinary, root)["result"]["exit_code"] == 0
+    entry = {"type": "assistant", "uuid": UUID, "message": {"content": [{"type": "text", "text": "x"}]}}
+    (home / ".claude" / "projects" / PK / f"{SID}.jsonl").write_bytes(json.dumps(entry).encode() + b"\n")
+    call(capsysbinary, run_argv(attempt="002"), root, home)
+    st = status_of(capsysbinary, root, "002")
+    assert (st["state"], st["result"]["exit_code"]) == ("RESULT_FOUND", 2)
+
+
+def _as_failure(o, status, measured):
+    r = o["result"]
+    r.update(status=status, exit_code=2, values=None, error={"code": status, "detail": store.DETAILS[status]})
+    if not measured:
+        r["target"].update(prefix_bytes=None, prefix_sha256=None, line_count=None, trailing_partial_bytes=None,
+                           prefix_check=None)
+
+
+@pytest.mark.parametrize("status, measured, ok", [
+    ("SESSION_NOT_FOUND", True, False),  # E2.1: before the prefix, so prefix_check must be null
+    ("SESSION_PATH_INVALID", True, False),
+    ("SESSION_LIMIT_EXCEEDED", True, False),
+    ("SESSION_NOT_FOUND", False, True),
+    ("MARKER_MISSING", False, False),  # E2.2: a processing failure needs an established prefix
+    ("ENTRY_NOT_FOUND", False, False),
+    ("SESSION_CORRUPT", False, False),
+    ("MARKER_MISSING", True, True),
+    ("SELECTOR_KIND_MISMATCH", False, True),  # E2.2 names a case before the session is opened
+    ("SELECTOR_KIND_MISMATCH", True, True),
+])
+def test_status_and_prefix_check_pairs_from_e1_3_and_e2(capsysbinary, root, home, status, measured, ok):
+    def mutate(p):
+        rewrite(p, lambda o: _as_failure(o, status, measured))
+    assert _corrupt_stored(capsysbinary, root, home, mutate) == ("RESULT_FOUND" if ok else "RECORD_CORRUPT")

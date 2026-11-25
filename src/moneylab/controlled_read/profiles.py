@@ -66,7 +66,7 @@ def _marker_index(lines: list[bytes], marker: bytes) -> int:
 def extract(profile: Profile, text: str) -> bytes:
     """The approved body bytes of `text` under `profile` (D9 with D10 or D11)."""
     data = encode_text(text)
-    if text.startswith("﻿"):
+    if text.startswith("\N{ZERO WIDTH NO-BREAK SPACE}"):
         raise ControlledReadError("BOM_PRESENT")
     data = data.replace(b"\r\n", b"\n")
     if b"\r" in data:

@@ -98,8 +98,8 @@ def test_p6_end_before_begin():
 
 
 def test_p7_non_ascii_body_without_final_newline_after_end():
-    body = prereg(PB + "\n가나\r\n" + PE)
-    assert_values(body, "가나\n".encode("utf-8"))
+    body = prereg(PB + "\n\N{HANGUL SYLLABLE GA}\N{HANGUL SYLLABLE NA}\r\n" + PE)
+    assert_values(body, "\N{HANGUL SYLLABLE GA}\N{HANGUL SYLLABLE NA}\n".encode("utf-8"))
     assert len(body) == 7 and body.count(b"\n") == 1
 
 
@@ -108,7 +108,7 @@ def test_p8_no_line_between_markers_is_empty():
 
 
 def test_p9_bom_is_rejected():
-    assert code_of(prereg, "﻿" + PB + "\nx\n" + PE + "\n") == "BOM_PRESENT"
+    assert code_of(prereg, "\N{ZERO WIDTH NO-BREAK SPACE}" + PB + "\nx\n" + PE + "\n") == "BOM_PRESENT"
 
 
 def test_p10_assistant_selector_does_not_fit_prereg():
@@ -125,8 +125,8 @@ def test_prereg_empty_lines_only_are_kept():
 
 
 def test_w1_outer_empty_lines_dropped_indent_tab_and_trailing_spaces_kept():
-    text = "\n\n" + WB + "\n\n  # 제목\n\tx  \n\n" + WE + "\n\n"
-    assert_values(work_order(text), "  # 제목\n\tx  \n".encode("utf-8"))
+    text = "\n\n" + WB + "\n\n  # \N{HANGUL SYLLABLE JE}\N{HANGUL SYLLABLE MOG}\n\tx  \n\n" + WE + "\n\n"
+    assert_values(work_order(text), "  # \N{HANGUL SYLLABLE JE}\N{HANGUL SYLLABLE MOG}\n\tx  \n".encode("utf-8"))
 
 
 def test_w2_crlf_text():
