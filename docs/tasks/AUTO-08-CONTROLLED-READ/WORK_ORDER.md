@@ -74,8 +74,8 @@ ALLOWED_ACTIONS:
     - C1 SHA·parent·tree와 세 대조 결과를 보고한다.
     - 어느 대조든 다르면 STOP하고, 남은 파일·index·커밋을 보존한다. 삭제·덮어쓰기·자동 재시도·복구는 사전 승인되지 않으며, 실제 불일치가 생긴 뒤 별도로 결정한다.
   - (3) ENVIRONMENT_SETUP(별도 승인)
-    - TARGET_WORKTREE에서 `C:/Users/USER/AppData/Local/Programs/Python/Python314/python.exe --version`. 3.14.x가 아니면 설치·경로 변경 없이 STOP.
-    - `C:/Users/USER/AppData/Local/Programs/Python/Python314/python.exe -m venv .venv`
+    - TARGET_WORKTREE에서 `<PYTHON314_EXE> --version`. 3.14.x가 아니면 설치·경로 변경 없이 STOP.
+    - `<PYTHON314_EXE> -m venv .venv`
     - `.venv/Scripts/python.exe -m pip install -r requirements-dev.txt`
     - `.venv/Scripts/python.exe -m pip install -e . --no-deps`
     - `.venv/Scripts/python.exe --version`(3.14.x)
