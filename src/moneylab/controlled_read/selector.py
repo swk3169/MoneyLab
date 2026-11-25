@@ -24,6 +24,7 @@ ATTEMPT = re.compile(r"00[1-9]|0[1-9][0-9]|[1-9][0-9]{2}", re.ASCII)
 
 RUN_OPTIONS = ("--task", "--project-key", "--session", "--selector", "--profile", "--attempt")
 STATUS_OPTIONS = ("--task", "--attempt")
+PRECHECK_OPTIONS = ("--task", "--project-key", "--session", "--profile")
 
 ASSISTANT = "assistant"
 TOOL_RESULT = "tool_result"
@@ -50,6 +51,14 @@ class RunArgs:
 class StatusArgs:
     task_id: str
     attempt: str
+
+
+@dataclass(frozen=True)
+class PrecheckArgs:
+    task_id: str
+    project_key: str
+    session_id: str
+    profile: str
 
 
 def valid_task_id(value: object) -> bool:
@@ -110,3 +119,28 @@ def parse_status(argv: list[str]) -> StatusArgs:
     if not (valid_task_id(task_id) and valid_attempt(attempt)):
         raise ControlledReadError("ARGUMENT_INVALID")
     return StatusArgs(task_id, attempt)
+
+
+def parse_precheck(argv: list[str]) -> PrecheckArgs:
+    """AUTO-09 D1: the precheck form. Same value grammar as run, without --selector and --attempt."""
+    task_id, project_key, session_id, profile = _values(argv, "precheck", PRECHECK_OPTIONS)
+    if not (valid_task_id(task_id) and valid_project_key(project_key) and valid_session(session_id)
+            and valid_profile(profile)):
+        raise ControlledReadError("ARGUMENT_INVALID")
+    return PrecheckArgs(task_id, project_key, session_id, profile)
+
+
+def format_selector(kind: str, ident: object, text_index: int) -> str | None:
+    """AUTO-09 D5: the run selector of one candidate, always with `:text:<k>`. None when the identifier is
+    not a string or the written selector does not fullmatch the run grammar (for example k=100)."""
+    if not isinstance(ident, str):
+        return None
+    if kind == ASSISTANT:
+        text = f"assistant:{ident}:text:{text_index}"
+    elif kind == TOOL_RESULT:
+        text = f"tool_result:{ident}:text:{text_index}"
+    else:
+        return None
+    if SELECTOR.fullmatch(text) is None:
+        return None
+    return text

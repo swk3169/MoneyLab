@@ -3,6 +3,8 @@
   .venv/Scripts/python.exe -B -m moneylab.controlled_read run --task <TASK_ID> --project-key <PROJECT_KEY>
       --session <SESSION> --selector <SELECTOR> --profile <PROFILE> --attempt <ATTEMPT>
   .venv/Scripts/python.exe -B -m moneylab.controlled_read status --task <TASK_ID> --attempt <ATTEMPT>
+  .venv/Scripts/python.exe -B -m moneylab.controlled_read precheck --task <TASK_ID> --project-key <PROJECT_KEY>
+      --session <SESSION> --profile <PROFILE>   (AUTO-09: no record, not a status target)
 
 Each call prints exactly one canonical JSON document plus LF to stdout and nothing to stderr. A defined
 failure is a document with exit code 2; an undefined exception propagates without output and is never
@@ -132,10 +134,93 @@ def _status(argv: list[str], root: Path | None) -> dict[str, Any]:
     return store.status_document(base, args.task_id, args.attempt)
 
 
+PASSED = "PASSED"
+FAILED = "FAILED"
+NOT_REACHED = "NOT_REACHED"
+
+
+def _precheck(argv: list[str], root: Path | None, home: Path | None) -> dict[str, Any]:
+    """AUTO-09 D7: scan the whole prefix for candidate text blocks of the profile, and only when exactly one
+    exists check it on the run path and return its run selector. Nothing is recorded (D3)."""
+    try:
+        args = grammar.parse_precheck(argv)
+    except ControlledReadError as exc:  # P1: nothing is echoed
+        return store.precheck_document(exc.code)
+    target: dict[str, Any] = {"project_key": args.project_key, "session_id": args.session_id, "prefix_bytes": None,
+                              "prefix_sha256": None, "line_count": None, "trailing_partial_bytes": None,
+                              "prefix_check": None}
+    checks = {"scan": NOT_REACHED, "selected": NOT_REACHED}
+    known: dict[str, Any] = {"task_id": args.task_id, "target": target, "profile": store.profile_ref(args.profile),
+                             "checks": checks}
+    try:
+        confirmed_root(root)
+        home_dir = confirmed_home(home)
+    except ControlledReadError as exc:  # P2
+        return store.precheck_document(exc.code, **known)
+    profile = profiles.PROFILES[args.profile]
+    deadline = transcript.Deadline()
+    try:
+        session = transcript.open_session(home_dir, args.project_key, args.session_id, target, deadline)
+    except ControlledReadError as exc:  # P3: the prefix was not established, measured fields stay null
+        return store.precheck_document(exc.code, **known)
+    count: int | None = None
+    found: str | None = None
+    measured: dict[str, Any] | None = None
+    try:
+        try:
+            candidates = transcript.scan_candidates(
+                session.prefix, profile.kinds, lambda text: profiles.marker_line_present(profile, text), deadline)
+        except ControlledReadError as exc:
+            checks["scan"] = FAILED
+            if exc.code == "TIME_LIMIT_EXCEEDED":  # P5: no re-hash
+                target["prefix_check"] = transcript.INCOMPLETE
+                return store.precheck_document(exc.code, **known)
+            outcome = exc.code  # P4
+        else:
+            checks["scan"] = PASSED
+            count = len(candidates)
+            if count == 0:
+                outcome = "PRECHECK_NO_CANDIDATE"  # P6
+            elif count > 1:
+                outcome = "PRECHECK_MULTIPLE_CANDIDATES"  # P7
+            else:
+                only = candidates[0]
+                written = grammar.format_selector(only.kind, only.ident, only.text_index)
+                if written is None:
+                    outcome = "PRECHECK_SELECTOR_UNREPRESENTABLE"  # P8
+                else:
+                    try:
+                        selected = grammar.parse_selector(written)
+                        profiles.check_kind(profile, selected.kind)
+                        text = transcript.select_text(session.prefix, selected, deadline)
+                        measured = profiles.values(profiles.extract(profile, text))
+                    except ControlledReadError as exc:
+                        checks["selected"] = FAILED
+                        if exc.code == "TIME_LIMIT_EXCEEDED":  # P10: no re-hash
+                            target["prefix_check"] = transcript.INCOMPLETE
+                            return store.precheck_document(exc.code, candidate_count=1, **known)
+                        outcome = exc.code  # P9
+                    else:
+                        checks["selected"] = PASSED
+                        outcome = store.PRECHECK_OK  # P11 unless the re-hash replaces it
+                        found = written
+        replaced, check = session.rehash(deadline)  # R
+        target["prefix_check"] = check
+    finally:
+        session.handle.close()
+    if replaced is not None:
+        return store.precheck_document(replaced, **known)
+    if outcome != store.PRECHECK_OK:
+        return store.precheck_document(outcome, candidate_count=count, **known)
+    return store.precheck_document(outcome, candidate_count=count, selector=found, values=measured, **known)
+
+
 def run(argv: list[str], *, root: Path | None = None, home: Path | None = None) -> dict[str, Any]:
     """The one output document of a call. `root` and `home` are test seams."""
     if argv[:1] == ["status"]:
         return _status(argv, root)
+    if argv[:1] == ["precheck"]:
+        return _precheck(argv, root, home)
     return _run(argv, root, home)
 
 

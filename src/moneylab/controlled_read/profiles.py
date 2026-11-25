@@ -94,6 +94,14 @@ def extract(profile: Profile, text: str) -> bytes:
     return body
 
 
+def marker_line_present(profile: Profile, text: str) -> bool:
+    """AUTO-09 D5: True when a line of `text` (CRLF read as LF) equals the BEGIN or END marker exactly.
+    No limit or encoding check: this only marks a precheck candidate, it does not validate the block."""
+    begin = profile.begin.decode("ascii")
+    end = profile.end.decode("ascii")
+    return any(line in (begin, end) for line in text.replace("\r\n", "\n").split("\n"))
+
+
 def values(body: bytes) -> dict[str, object]:
     """D9 (g)."""
     return {"sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body), "lf": body.count(b"\n")}
