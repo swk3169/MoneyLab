@@ -55,7 +55,8 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
 - 명령 ask 규칙 (`ASK_RULES`): `git-commit`, `git-push`, `git-history`, `git-config`, `github`, `deps`, `schedule`,
   `recursive-delete`
 - 경로 규칙: `locked`, `protected-path`, `protected-word` (deny), `inline-code`, `untracked-script` (ask)
-- MoneyLab CLI (ask): `research-final`, `research-build` (`--dry-run` 제외), `record-live` (`--source fixture` 제외)
+- MoneyLab CLI (ask): `research-final`, `research-build` (`--dry-run` 제외), `record-live` (`--source fixture` 제외),
+  `controlled-read` (정확한 형태만. 그 밖의 형태는 `controlled-read-form` deny)
 - 파일 도구: `locked`, `env`, `frozen`, `raw-or-git`, `claude-settings` (deny), `protected-edit` (ask),
   `task-contract`, `prereg-protected`, `worktree-detect` (deny 또는 ask)
 - 입력 오류: `malformed` (deny)
@@ -81,6 +82,43 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
   deny다. `cat`, `grep`, `sha256sum`, `git show`, `git diff`, `git add -- <경로>`, pytest 실행은 pass다.
 - `git commit --amend`는 `git` deny다. `git checkout <ref> -- <경로>`, `git worktree remove|move|prune`, `git branch -f`,
   `git update-ref`, `git symbolic-ref`는 `git-history` ask다. ask 승인은 Work Order의 금지를 해제하지 않는다.
+
+제한 읽기 CLI `moneylab.controlled_read` (AUTO-08-CONTROLLED-READ D3, D13, ERRATA-001 E3·E5·E6):
+
+- 검사 대상: 정규화된 명령에 모듈 실행 표기(`(?<![\w./-])-[a-z]*m\s*moneylab\.controlled_read(?!\w)`: 분리형 `-m`, 붙임형
+  `-mmoneylab.controlled_read`, 결합 옵션 `-Bm`, 하위 모듈 `moneylab.controlled_read.__main__`)가 있거나, 인라인 코드
+  (`python -c`, `python -`)이면서 `moneylab.controlled_read`를 포함하는 명령. `DENY_RULES` 다음, `protected-path` 검사 앞에서
+  판정한다.
+- Bash 도구 호출이고 정규화 전 원문 명령 전체가 아래 두 형태 중 하나와 정확히(fullmatch) 같으면 `controlled-read` ask다.
+  토큰 구분자는 ASCII 공백 1개다. 따옴표, 탭, `=` 형태, 축약, 순서 변경, 중복, 추가 토큰, `;`·`&&`·`|`·redirect, 다른 실행 파일
+  경로, 등록되지 않은 PROFILE은 모두 `controlled-read-form` deny다. PowerShell 도구 호출은 형태와 관계없이 deny다.
+  - `.venv/Scripts/python.exe -B -m moneylab.controlled_read run --task <TASK_ID> --project-key <PROJECT_KEY> --session <SESSION> --selector <SELECTOR> --profile <PROFILE> --attempt <ATTEMPT>`
+  - `.venv/Scripts/python.exe -B -m moneylab.controlled_read status --task <TASK_ID> --attempt <ATTEMPT>`
+  - 값 문법(ASCII fullmatch): TASK_ID `[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*`(64자 이하), PROJECT_KEY `[A-Za-z0-9-]{1,200}`,
+    SESSION 소문자 UUID, SELECTOR `assistant:<SESSION>` 또는 `tool_result:[A-Za-z0-9_]{1,128}`에 선택적 `:text:<1-99>`,
+    PROFILE `ECON-FWD-M20-WO/1` 또는 `ECON-FWD-M20-PREREG/1`, ATTEMPT `001`-`999`.
+- 검사 대상이 아닌 명령은 기존 판정 그대로다(`git diff -- src/moneylab/controlled_read/`, 파일 경로를 언급하는 grep, pytest 등).
+- 붙임형 `-m`, 결합 옵션, 하위 모듈, 다른 인터프리터와 실행 파일 경로, 옵션 추가·누락은 `controlled-read-form` deny다.
+- 한계: 이 규칙은 알려진 실행 표기를 식별하는 문자열 규칙이다. 모든 Python 실행, 동적 import, 간접 호출(변수, 스크립트 파일,
+  다른 모듈 경유)을 막는 보안 격리를 보장하지 않는다. 이를 보완하려고 범용 Python 허용이나 광범위한 명령 차단을 추가하지 않는다.
+- 알려진 오탐(안전 쪽): 실행 프로그램과 관계없이 `-<영문자들>m moneylab.controlled_read` 토큰 열이 있으면 deny다.
+- guard는 호출 형태만 판정한다. 승인 존재, 대상 실재, 경로 안전, 형식 유효성은 도구 내부 검증이 맡는다. guard도 도구도 채팅
+  승인을 인증하지 않는다.
+- 승인은 채팅 메시지 한 줄이고, 메시지 1건이 시도 1회를 승인한다:
+  `CONTROLLED_READ_AUTHORIZATION: AUTO-08-CONTROLLED-READ TASK=<TASK_ID> PROJECT_KEY=<PROJECT_KEY> SESSION=<SESSION> SELECTOR=<SELECTOR> PROFILE=<PROFILE> ATTEMPT=<ATTEMPT> EXPIRES_UTC=<YYYY-MM-DDTHH:MM:SSZ>`
+  - 호출 전에 에이전트는 현재 세션에 사용자가 보낸 그 원문이 있는지 확인한다. 고정 토큰 `AUTO-08-CONTROLLED-READ`를 확인하고,
+    승인 필드 6개를 run 인자와 1:1 문자열 완전 일치로 대조한다(TASK와 `--task`, PROJECT_KEY와 `--project-key`, SESSION과
+    `--session`, SELECTOR와 `--selector`, PROFILE과 `--profile`, ATTEMPT와 `--attempt`). EXPIRES_UTC는 호출 직전 UTC와 비교한다.
+    원문을 확인할 수 없으면 멈춘다.
+  - `status`는 이 승인을 소비하지 않는다. 사용자의 명시적 요청이 있고 guard ask 승인 창을 거친 경우에만 실행한다.
+  - 한계: 프로그램은 승인을 보지 못하고 인증하지도 못한다. 정규식에 맞는 입력은 승인 증거가 아니다. 그래서 기록에는
+    `approval: "NOT_VERIFIED_BY_PROGRAM"`이 고정 값으로 들어간다. 실패하거나 결과 불명이면 다음 ATTEMPT 번호로 새 승인을 받는다.
+  - 감사 기록(`data/processed/controlled_read/<TASK_ID>/<NNN>/`)은 비권위 기록이다. 실행 진위, 작성자, 승인, 재실행 권한을
+    증명하지 않는다. `status`의 `OUTCOME_UNKNOWN`을 성공이나 미실행으로, `NOT_FOUND`를 미실행으로 바꾸지 않는다.
+  - `RESULT_FOUND`는 두 기록 파일이 형식과 식별값 면에서 유효하다는 뜻일 뿐이다. 그 호출의 stdout, 호출 전체의 성공, 임시 파일
+    정리를 증명하지 않는다. result.json 생성 시도가 파일을 완성한 뒤 실패하면 stdout은 `STORE_FAILED`이고 result.json에는 처리
+    결과 문서가 남는다. 저장 실패는 `final_created`와 관계없이 성공이 아니며, 프로그램은 남은 파일을 지우거나 고치지 않는다.
+  - 최초 실사용 전에 실제 세션 형식과의 호환성 확인, 실제 세션의 활성 hook 경로와 적용 guard 코드 확인, 별도 승인이 필요하다.
 
 GitHub CLI:
 

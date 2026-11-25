@@ -376,6 +376,39 @@ def _moneylab(c: str) -> Decision:
     return Decision(PASS)
 
 
+# AUTO-08-CONTROLLED-READ D13: moneylab.controlled_read runs only in the exact D2 form from the Bash tool.
+# The guard judges the call form only; approval, target, path safety and format are checked by the tool,
+# and neither authenticates the chat approval.
+_CR_TASK = r"(?P<task>[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)"
+_CR_SESSION = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_CR_ATTEMPT = r"(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2})"
+_CR_EXE = r"\.venv/Scripts/python\.exe -B -m moneylab\.controlled_read "
+CONTROLLED_READ_FORMS = (
+    re.compile(_CR_EXE + r"run --task " + _CR_TASK + r" --project-key [A-Za-z0-9-]{1,200} --session " + _CR_SESSION
+               + r" --selector (?:assistant:" + _CR_SESSION + r"|tool_result:[A-Za-z0-9_]{1,128})"
+               + r"(?::text:[1-9][0-9]?)? --profile (?:ECON-FWD-M20-WO/1|ECON-FWD-M20-PREREG/1)"
+               + r" --attempt " + _CR_ATTEMPT, re.ASCII),
+    re.compile(_CR_EXE + r"status --task " + _CR_TASK + r" --attempt " + _CR_ATTEMPT, re.ASCII),
+)
+# ERRATA-001 E5 (a): a module execution spelling on the normalized text: -m, -mmoneylab..., -bm, .__main__.
+# A string rule for known spellings only; it is not isolation against every way to run or import Python.
+_CR_MODULE = r"(?<![\w./-])-[a-z]*m\s*moneylab\.controlled_read(?!\w)"
+
+
+def _controlled_read(raw: str, c: str, bash: bool) -> Decision | None:
+    """D13 on the raw command and the normalized one (c). None when it is not a controlled_read call."""
+    if not re.search(_CR_MODULE, c) and not (re.search(INLINE_CODE, c) and "moneylab.controlled_read" in c):
+        return None
+    if bash:
+        for form in CONTROLLED_READ_FORMS:
+            m = form.fullmatch(raw)
+            if m is not None and len(m.group("task")) <= 64:
+                return Decision(ASK, "controlled-read",
+                                "controlled read call; confirm the CONTROLLED_READ_AUTHORIZATION message first")
+    return Decision(DENY, "controlled-read-form",
+                    "moneylab.controlled_read runs only in the exact documented form from the Bash tool")
+
+
 def _tracked_files(root: Path) -> set[str] | None:
     try:
         r = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, timeout=5)
@@ -402,6 +435,7 @@ def _untracked_scripts(c: str, root: Path, cwd: str | None) -> list[str]:
 
 
 def check_command(cmd: str, root: Path = ROOT, cwd: str | None = None, bash: bool = True) -> Decision:
+    raw = cmd
     split = gh_published_body(cmd) if bash else None  # heredocs are bash syntax
     if split is not None:
         cmd, body = split
@@ -416,6 +450,9 @@ def check_command(cmd: str, root: Path = ROOT, cwd: str | None = None, bash: boo
         for rule, pattern in DENY_RULES:
             if rule in ("env", "trading") and re.search(pattern, b):
                 return Decision(DENY, rule, f"blocked by guard rule '{rule}' (published body)")
+    controlled = _controlled_read(raw, c, bash)
+    if controlled is not None:
+        return controlled
     if re.search(PROTECTED, c):
         # locked/: hashing or listing is allowed, any other access is not
         if re.search(r"/locked\b|locked/", c) and not re.fullmatch(
