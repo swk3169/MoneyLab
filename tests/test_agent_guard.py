@@ -1100,3 +1100,111 @@ def test_gp_empty_worktree_list_is_a_lookup_failure(monkeypatch, tmp_path):
                         lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout=b"", stderr=b""))
     d = guard.decide(file_call("Write", tmp_path / "notes.txt"), REPO)
     assert (d.action, d.rule) == DETECT_ASK
+
+
+# ------------------------------------------------------------- AUTO-08 controlled read (D13)
+
+CR = ".venv/Scripts/python.exe -B -m moneylab.controlled_read"
+CR_SID = "0a1b2c3d-0000-4000-8000-00000000abcd"
+CR_TAIL = (f" --project-key C--MoneyLab-auto-08 --session {CR_SID} --selector assistant:{CR_SID}:text:2"
+           " --profile ECON-FWD-M20-WO/1 --attempt 001")
+CR_RUN = f"{CR} run --task ECON-FWD-M20" + CR_TAIL
+CR_RUN_PREREG = (f"{CR} run --task ECON-FWD-M20 --project-key C--MoneyLab-auto-08 --session {CR_SID}"
+                 " --selector tool_result:toolu_01AbC --profile ECON-FWD-M20-PREREG/1 --attempt 999")
+CR_STATUS = f"{CR} status --task ECON-FWD-M20 --attempt 001"
+CR_ASK = ("ask", "controlled-read")
+CR_DENY = ("deny", "controlled-read-form")
+
+
+def _cr(cmd, tool="Bash"):
+    d = guard.decide({"tool_name": tool, "tool_input": {"command": cmd}}, REPO)
+    return d.action, d.rule
+
+
+@pytest.mark.parametrize("cmd", [CR_RUN, CR_RUN_PREREG, CR_STATUS,
+                                 CR_RUN.replace(":text:2", ""), f"{CR} status --task A --attempt 100"])
+def test_cr_exact_forms_ask(cmd):
+    assert _cr(cmd) == CR_ASK
+
+
+@pytest.mark.parametrize("cmd", [
+    f"{CR} run --project-key C--MoneyLab-auto-08 --task ECON-FWD-M20 --session {CR_SID} --selector "
+    f"assistant:{CR_SID} --profile ECON-FWD-M20-WO/1 --attempt 001",  # option order
+    f"{CR} status --attempt 001 --task ECON-FWD-M20",
+    CR_STATUS.replace("--task ", "--task="),
+    CR_STATUS.replace("ECON-FWD-M20", "\"ECON-FWD-M20\""),
+    CR_STATUS.replace("ECON-FWD-M20", "'ECON-FWD-M20'"),
+    CR_STATUS.replace(" --attempt", "\t--attempt"),
+    CR_STATUS.replace(" --attempt", "  --attempt"),
+    CR_STATUS + " ; ls", CR_STATUS + " && ls", CR_STATUS + " | cat", CR_STATUS + " > out.json",
+    CR_STATUS + " 2>&1", CR_STATUS + " extra", CR_STATUS + " --attempt 002", CR_STATUS + "\n", " " + CR_STATUS,
+    "ls && " + CR_STATUS,
+    CR_STATUS.replace(".venv/Scripts/python.exe", "./.venv/Scripts/python.exe"),
+    CR_STATUS.replace(".venv/Scripts/python.exe", ".venv\\Scripts\\python.exe"),
+    CR_STATUS.replace(".venv/Scripts/python.exe", "python"),
+    CR_STATUS.replace(".venv/Scripts/python.exe", "C:/MoneyLab-auto-08/.venv/Scripts/python.exe"),
+    CR_STATUS.replace(" -B", ""),
+    CR_STATUS.replace("-B -m", "-B -I -m"),
+    CR_RUN.replace("ECON-FWD-M20-WO/1", "ECON-FWD-M20-WO/2"),
+    CR_RUN.replace("ECON-FWD-M20-WO/1", "OTHER-DOC/1"),
+    CR_RUN.replace("--attempt 001", "--attempt 000"),
+    CR_RUN.replace(":text:2", ":text:100"),
+    CR_RUN.replace("C--MoneyLab-auto-08", "../x"),
+    CR_STATUS.replace("ECON-FWD-M20", "A" * 65),
+    CR_STATUS.replace("status", "STATUS"),
+    "python -c \"import moneylab.controlled_read\"",
+    ".venv/Scripts/python.exe -c \"from moneylab.controlled_read import store; print(store)\"",
+    "python - <<'EOF'\nimport moneylab.controlled_read.__main__\nEOF",
+    ".venv/Scripts/python.exe -m moneylab.controlled_read.__main__ status --task A --attempt 001",
+    # ERRATA-001 E5: attached and combined -m spellings, other interpreters and option variants
+    CR_STATUS.replace("-B -m moneylab", "-B -mmoneylab"),
+    CR_STATUS.replace("-B -m moneylab", "-Bmmoneylab"),
+    CR_STATUS.replace("-B -m moneylab", "-Bm moneylab"),
+    CR_STATUS.replace("-B -m moneylab", "-mmoneylab"),
+    CR_STATUS.replace(".venv/Scripts/python.exe", "py"),
+    CR_STATUS.replace(".venv/Scripts/python.exe", "python3.14"),
+    CR_STATUS.replace(".venv/Scripts/python.exe", "env python"),
+    CR_STATUS.replace(".venv/Scripts/python.exe", "uv run python"),
+    CR_STATUS.replace("-B -m", "-I -B -m"),
+    CR_STATUS.replace("-B -m", "-X utf8 -B -m"),
+    CR_STATUS.replace("-B -m moneylab", "-B -m \"moneylab"),
+    "python -mmoneylab.controlled_read.__main__ status --task A --attempt 001",
+])
+def test_cr_other_forms_deny(cmd):
+    assert _cr(cmd) == CR_DENY
+
+
+@pytest.mark.parametrize("cmd", [CR_RUN, CR_STATUS])
+def test_cr_powershell_is_denied(cmd):
+    assert _cr(cmd, "PowerShell") == CR_DENY
+
+
+@pytest.mark.parametrize("cmd", [
+    "git diff -- src/moneylab/controlled_read/", "grep -rn controlled_read src/",
+    "grep -n moneylab.controlled_read tests/test_controlled_read_cli.py",
+    ".venv/Scripts/python.exe -m pytest tests/test_controlled_read_cli.py -q",
+    ".venv/Scripts/python.exe -m mypy --cache-dir .venv/.mypy_cache src/moneylab/controlled_read",
+    ".venv/Scripts/python.exe -m ruff check src/moneylab/controlled_read",
+    "git show HEAD:src/moneylab/controlled_read/store.py", "cat src/moneylab/controlled_read/store.py",
+    "grep -rn moneylab.controlled_read src/",
+])
+def test_cr_rule_does_not_catch_other_commands(cmd):
+    action_rule = _cr(cmd)
+    assert action_rule[1] not in ("controlled-read", "controlled-read-form")
+    assert action_rule == ("pass", "")
+
+
+def test_cr_deny_rules_still_come_first():
+    assert _cr(CR_STATUS.replace("ECON-FWD-M20", "A") + " ; w32tm /resync") == ("deny", "clock")
+
+
+def test_cr_process_ask_outputs_json():
+    r = run_hook(json.dumps({"tool_name": "Bash", "tool_input": {"command": CR_STATUS}}).encode())
+    assert r.returncode == 0
+    out = json.loads(r.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "ask" and "controlled-read" in out["permissionDecisionReason"]
+
+
+def test_cr_process_deny_exit_code_2():
+    r = run_hook(json.dumps({"tool_name": "Bash", "tool_input": {"command": CR_STATUS + " extra"}}).encode())
+    assert r.returncode == 2 and b"controlled-read-form" in r.stderr and r.stdout == b""
