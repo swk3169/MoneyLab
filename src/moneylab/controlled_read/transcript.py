@@ -16,12 +16,13 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
 
 from moneylab.controlled_read import ControlledReadError
-from moneylab.controlled_read.selector import ASSISTANT, Selector
+from moneylab.controlled_read.selector import ASSISTANT, TOOL_RESULT, Selector
 from moneylab.workstate import collect
 from moneylab.workstate.collect import WorkstateError
 
@@ -272,6 +273,11 @@ def _tool_result_texts(block: dict[str, Any]) -> list[str]:
             raise ControlledReadError("FORMAT_UNSUPPORTED")
         if block["is_error"]:
             raise ControlledReadError("TOOL_RESULT_ERROR")
+    return _tool_result_content_texts(block)
+
+
+def _tool_result_content_texts(block: dict[str, Any]) -> list[str]:
+    """The text items of a tool_result block's content (AUTO-09 D5: split out of _tool_result_texts)."""
     content = block.get("content")
     if isinstance(content, str):
         return [content]
@@ -298,3 +304,48 @@ def select_text(prefix: bytes, selector: Selector, deadline: Deadline) -> str:
     if selector.text_index > len(texts):
         raise ControlledReadError("TEXT_BLOCK_NOT_FOUND")
     return texts[selector.text_index - 1]
+
+
+# ---------------------------------------------------------------------------------------- precheck
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """AUTO-09 D6: where a candidate text block is. Its text is never kept."""
+
+    kind: str  # ASSISTANT or TOOL_RESULT
+    ident: object  # the entry uuid or tool_use_id as found (may be None or not fit the selector grammar)
+    text_index: int  # 1-based
+    is_error: bool  # a tool_result block with is_error true
+
+
+def scan_candidates(prefix: bytes, kinds: Collection[str], is_candidate: Callable[[str], bool],
+                    deadline: Deadline) -> list[Candidate]:
+    """AUTO-09 D6: every text block of the profile's kinds for which `is_candidate` holds, in prefix order.
+    The whole prefix is scanned before anything is returned. Line parsing, the uuid type, _user_blocks and
+    the tool_use_id type are the checks run also needs; reading every assistant entry and tool_result
+    content of the profile's kinds is an extra check that run does not need."""
+    found: list[Candidate] = []
+    for line in _lines(prefix, deadline):
+        deadline.check()
+        entry = parse_line(line)
+        if "uuid" in entry and not isinstance(entry["uuid"], str):
+            raise ControlledReadError("FORMAT_UNSUPPORTED")
+        blocks = _user_blocks(entry)
+        if ASSISTANT in kinds and entry.get("type") == "assistant":
+            for k, text in enumerate(_assistant_texts(entry), start=1):
+                if is_candidate(text):
+                    found.append(Candidate(ASSISTANT, entry.get("uuid"), k, False))
+        if TOOL_RESULT in kinds:
+            for block in blocks:
+                if block["type"] != "tool_result":
+                    continue
+                ident = block.get("tool_use_id")
+                if not isinstance(ident, str):
+                    raise ControlledReadError("FORMAT_UNSUPPORTED")
+                if "is_error" in block and not isinstance(block["is_error"], bool):
+                    raise ControlledReadError("FORMAT_UNSUPPORTED")
+                for k, text in enumerate(_tool_result_content_texts(block), start=1):
+                    if is_candidate(text):
+                        found.append(Candidate(TOOL_RESULT, ident, k, block.get("is_error") is True))
+    return found

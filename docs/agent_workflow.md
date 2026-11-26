@@ -89,11 +89,13 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
   `-mmoneylab.controlled_read`, 결합 옵션 `-Bm`, 하위 모듈 `moneylab.controlled_read.__main__`)가 있거나, 인라인 코드
   (`python -c`, `python -`)이면서 `moneylab.controlled_read`를 포함하는 명령. `DENY_RULES` 다음, `protected-path` 검사 앞에서
   판정한다.
-- Bash 도구 호출이고 정규화 전 원문 명령 전체가 아래 두 형태 중 하나와 정확히(fullmatch) 같으면 `controlled-read` ask다.
+- Bash 도구 호출이고 정규화 전 원문 명령 전체가 아래 세 형태 중 하나와 정확히(fullmatch) 같으면 `controlled-read` ask다.
   토큰 구분자는 ASCII 공백 1개다. 따옴표, 탭, `=` 형태, 축약, 순서 변경, 중복, 추가 토큰, `;`·`&&`·`|`·redirect, 다른 실행 파일
   경로, 등록되지 않은 PROFILE은 모두 `controlled-read-form` deny다. PowerShell 도구 호출은 형태와 관계없이 deny다.
   - `.venv/Scripts/python.exe -B -m moneylab.controlled_read run --task <TASK_ID> --project-key <PROJECT_KEY> --session <SESSION> --selector <SELECTOR> --profile <PROFILE> --attempt <ATTEMPT>`
   - `.venv/Scripts/python.exe -B -m moneylab.controlled_read status --task <TASK_ID> --attempt <ATTEMPT>`
+  - `.venv/Scripts/python.exe -B -m moneylab.controlled_read precheck --task <TASK_ID> --project-key <PROJECT_KEY> --session <SESSION> --profile <PROFILE>`
+    (AUTO-09-CONTROLLED-READ-PRECHECK D1, D11)
   - 값 문법(ASCII fullmatch): TASK_ID `[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*`(64자 이하), PROJECT_KEY `[A-Za-z0-9-]{1,200}`,
     SESSION 소문자 UUID, SELECTOR `assistant:<SESSION>` 또는 `tool_result:[A-Za-z0-9_]{1,128}`에 선택적 `:text:<1-99>`,
     PROFILE `ECON-FWD-M20-WO/1` 또는 `ECON-FWD-M20-PREREG/1`, ATTEMPT `001`-`999`.
@@ -119,6 +121,18 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
     정리를 증명하지 않는다. result.json 생성 시도가 파일을 완성한 뒤 실패하면 stdout은 `STORE_FAILED`이고 result.json에는 처리
     결과 문서가 남는다. 저장 실패는 `final_created`와 관계없이 성공이 아니며, 프로그램은 남은 파일을 지우거나 고치지 않는다.
   - 최초 실사용 전에 실제 세션 형식과의 호환성 확인, 실제 세션의 활성 hook 경로와 적용 guard 코드 확인, 별도 승인이 필요하다.
+- `precheck` (AUTO-09-CONTROLLED-READ-PRECHECK D1–D12): 지정 세션 하나의 prefix 전체에서 PROFILE의 BEGIN 또는 END 표식 줄을
+  가진 text block을 후보로 찾고, 후보가 정확히 하나이고 run의 선택 경로를 통과할 때만 그 후보를 run SELECTOR 문법으로
+  돌려준다. 본문·텍스트는 출력하거나 저장하지 않는다.
+  - `precheck`는 기록을 만들지 않으며(`data/processed/controlled_read/`에 쓰지 않는다) `status` 대상이 아니다.
+  - 의미 한계: `checks.scan`은 run이 요구하지 않는 추가 탐색 검사를 포함한다. `PRECHECK_OK`는 이후 RUN의 성공, prefix 동일성,
+    정본 여부를 보장하지 않는다. `prefix_sha256`은 관측값이고 run 인자가 아니다. precheck 결과는 정본 수락이나 RUN 승인을
+    대신하지 않는다.
+  - 승인은 채팅 메시지 한 줄이고, 메시지 1건이 호출 1회를 승인한다:
+    `CONTROLLED_READ_PRECHECK_AUTHORIZATION: AUTO-09-CONTROLLED-READ-PRECHECK TASK=<TASK_ID> PROJECT_KEY=<PROJECT_KEY> SESSION=<SESSION> PROFILE=<PROFILE> EXPIRES_UTC=<YYYY-MM-DDTHH:MM:SSZ>`
+    에이전트는 현재 세션에 사용자가 보낸 그 원문이 있는지, 필드 4개(TASK, PROJECT_KEY, SESSION, PROFILE)가 precheck 인자와
+    문자열로 완전히 같은지, 만료되지 않았는지 확인하고, 하나라도 확인하지 못하면 멈춘다. 이 승인은
+    `CONTROLLED_READ_AUTHORIZATION`을 대신하지 않는다.
 
 GitHub CLI:
 

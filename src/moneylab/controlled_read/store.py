@@ -131,6 +131,43 @@ def status_error_document(status: str, *, task_id: str | None = None,
             "authority": AUTHORITY, "boundary": BOUNDARY}
 
 
+# ------------------------------------------------------------------------- precheck/1 (AUTO-09 D8, D9)
+
+PRECHECK_SCHEMA = "moneylab.controlled_read.precheck/1"
+PRECHECK_OK = "PRECHECK_OK"
+# D8: precheck-only codes. They never become a ControlledReadError and never overlap DETAILS.
+PRECHECK_DETAILS: dict[str, str] = {
+    "PRECHECK_NO_CANDIDATE": "no text block of the profile's kinds holds a BEGIN or END marker line",
+    "PRECHECK_MULTIPLE_CANDIDATES": "more than one text block holds a BEGIN or END marker line",
+    "PRECHECK_SELECTOR_UNREPRESENTABLE": "the single candidate cannot be written in the run selector grammar",
+}
+PRECHECK_KEYS = frozenset({"schema", "command", "status", "exit_code", "task_id", "target", "profile", "checks",
+                           "candidate_count", "selector", "values", "error", "authority", "approval", "boundary"})
+_PRECHECK_NEVER = frozenset({"STORE_PATH_INVALID", "STORE_FAILED", "ATTEMPT_EXISTS"})
+
+
+def precheck_document(status: str, *, task_id: str | None = None, target: dict[str, Any] | None = None,
+                      profile: dict[str, Any] | None = None, checks: dict[str, str] | None = None,
+                      candidate_count: int | None = None, selector: str | None = None,
+                      values: dict[str, Any] | None = None) -> dict[str, Any]:
+    """D9 precheck/1. Nothing is written: this document only goes to stdout. `target` and `checks` are
+    copied so a later change of the caller's dicts cannot alter this document."""
+    ok = status == PRECHECK_OK
+    if ok != (values is not None) or ok != (selector is not None):
+        raise ValueError("selector and values must be given exactly when the precheck passed")
+    if ok and (target is None or target["prefix_check"] != "MATCHED" or candidate_count != 1):
+        raise ValueError("a passed precheck needs one candidate and a matched prefix")
+    if status in _PRECHECK_NEVER or not (ok or status in PRECHECK_DETAILS or status in DETAILS):
+        raise ValueError("not a precheck status")
+    detail = PRECHECK_DETAILS[status] if status in PRECHECK_DETAILS else DETAILS.get(status)
+    return {"schema": PRECHECK_SCHEMA, "command": "precheck", "status": status, "exit_code": 0 if ok else 2,
+            "task_id": task_id, "target": None if target is None else dict(target), "profile": profile,
+            "checks": None if checks is None else dict(checks), "candidate_count": candidate_count,
+            "selector": selector, "values": values,
+            "error": None if ok else {"code": status, "detail": detail},
+            "authority": AUTHORITY, "approval": APPROVAL, "boundary": BOUNDARY}
+
+
 def intent_document(args: grammar.RunArgs, started_utc: str) -> dict[str, Any]:
     return {"schema": INTENT_SCHEMA, "task_id": args.task_id, "attempt": args.attempt,
             "project_key": args.project_key, "session_id": args.session_id, "selector": args.selector,

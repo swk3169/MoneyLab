@@ -1208,3 +1208,55 @@ def test_cr_process_ask_outputs_json():
 def test_cr_process_deny_exit_code_2():
     r = run_hook(json.dumps({"tool_name": "Bash", "tool_input": {"command": CR_STATUS + " extra"}}).encode())
     assert r.returncode == 2 and b"controlled-read-form" in r.stderr and r.stdout == b""
+
+
+# ------------------------------------------------------- AUTO-09 controlled read precheck (D11)
+
+CR_PRECHECK = f"{CR} precheck --task ECON-FWD-M20 --project-key C--MoneyLab-auto-08 --session {CR_SID} --profile ECON-FWD-M20-WO/1"
+CR_PRECHECK_REASON = "controlled read precheck; confirm the CONTROLLED_READ_PRECHECK_AUTHORIZATION message first"
+
+
+@pytest.mark.parametrize("cmd", [CR_PRECHECK, CR_PRECHECK.replace("ECON-FWD-M20-WO/1", "ECON-FWD-M20-PREREG/1"),
+                                 CR_PRECHECK.replace("ECON-FWD-M20 ", "A" * 64 + " ", 1)])
+def test_cr_precheck_exact_form_asks(cmd):
+    d = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}}, REPO)
+    assert (d.action, d.rule, d.reason) == ("ask", "controlled-read", CR_PRECHECK_REASON)
+
+
+@pytest.mark.parametrize("cmd", [
+    CR_PRECHECK.replace(" -B", ""),
+    CR_PRECHECK.replace("-B -m moneylab", "-B -mmoneylab"),
+    CR_PRECHECK.replace(" --profile", f" --selector assistant:{CR_SID}:text:1 --profile"),
+    CR_PRECHECK + " --attempt 001",
+    f"{CR} precheck --project-key C--MoneyLab-auto-08 --task ECON-FWD-M20 --session {CR_SID} --profile ECON-FWD-M20-WO/1",
+    CR_PRECHECK + " extra",
+    CR_PRECHECK.replace("ECON-FWD-M20-WO/1", "OTHER-DOC/1"),
+    CR_PRECHECK + " ; ls",
+    CR_PRECHECK.replace("ECON-FWD-M20 ", "A" * 65 + " ", 1),
+])
+def test_cr_precheck_other_forms_deny(cmd):
+    assert _cr(cmd) == CR_DENY
+
+
+def test_cr_precheck_powershell_is_denied():
+    assert _cr(CR_PRECHECK, "PowerShell") == CR_DENY
+
+
+def test_cr_precheck_existing_forms_keep_their_reason():
+    for cmd in (CR_RUN, CR_STATUS):
+        d = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}}, REPO)
+        assert (d.action, d.rule) == CR_ASK and "CONTROLLED_READ_AUTHORIZATION message" in d.reason
+        assert "PRECHECK" not in d.reason
+
+
+def test_cr_precheck_process_ask_outputs_json():
+    r = run_hook(json.dumps({"tool_name": "Bash", "tool_input": {"command": CR_PRECHECK}}).encode())
+    assert r.returncode == 0
+    out = json.loads(r.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "ask" and "controlled-read" in out["permissionDecisionReason"]
+    assert "CONTROLLED_READ_PRECHECK_AUTHORIZATION" in out["permissionDecisionReason"]
+
+
+def test_cr_precheck_process_deny_exit_code_2():
+    r = run_hook(json.dumps({"tool_name": "Bash", "tool_input": {"command": CR_PRECHECK + " extra"}}).encode())
+    assert r.returncode == 2 and b"controlled-read-form" in r.stderr and r.stdout == b""
