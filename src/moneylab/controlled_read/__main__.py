@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from moneylab.controlled_read import SUCCEEDED, ControlledReadError, profiles, store, transcript
+from moneylab.controlled_read import SUCCEEDED, ControlledReadError, diagnose, profiles, store, transcript
 from moneylab.controlled_read import selector as grammar
 from moneylab.workstate import collect
 from moneylab.workstate.collect import WorkstateError
@@ -215,12 +215,68 @@ def _precheck(argv: list[str], root: Path | None, home: Path | None) -> dict[str
     return store.precheck_document(outcome, candidate_count=count, selector=found, values=measured, **known)
 
 
+def _diagnose(argv: list[str], root: Path | None, home: Path | None) -> dict[str, Any]:
+    """AUTO-10 D7: fix the prefix [0, N), run the scan checks with a judge that is always False, then re-hash
+    after a violation, a defined scan failure or no violation. Nothing is recorded (D8)."""
+    try:
+        args = diagnose.parse_diagnose(argv)
+    except ControlledReadError as exc:  # G1: nothing is echoed
+        return diagnose.diagnose_document(exc.code)
+    target: dict[str, Any] = {"project_key": args.project_key, "session_id": args.session_id,
+                              "expected_prefix_bytes": args.prefix_bytes,
+                              "expected_prefix_sha256": args.prefix_sha256, "observed_size_at_open": None,
+                              "trailing_bytes_excluded": None, "line_count": None, "prefix_check": None}
+    checks = {"prefix": NOT_REACHED, "scan": NOT_REACHED}
+    known: dict[str, Any] = {"task_id": args.task_id, "target": target, "profile": store.profile_ref(args.profile),
+                             "checks": checks}
+    try:
+        confirmed_root(root)
+        home_dir = confirmed_home(home)
+    except ControlledReadError as exc:  # G2
+        return diagnose.diagnose_document(exc.code, **known)
+    profile = profiles.PROFILES[args.profile]
+    deadline = transcript.Deadline()
+    try:
+        session = diagnose.open_fixed_prefix(home_dir, args.project_key, args.session_id, args.prefix_bytes,
+                                             args.prefix_sha256, target, deadline)
+    except (ControlledReadError, diagnose.DiagnoseError) as exc:  # G3a, G3b
+        checks["prefix"] = FAILED
+        return diagnose.diagnose_document(exc.code, **known)
+    checks["prefix"] = PASSED
+    violation: dict[str, Any] | None = None
+    try:
+        try:
+            transcript.scan_candidates(session.prefix, profile.kinds, lambda _text: False, deadline)
+        except transcript.FormatViolation as found:  # G4a
+            checks["scan"] = FAILED
+            outcome = diagnose.DIAGNOSE_VIOLATION_FOUND
+            violation = diagnose.violation_object(found)
+        except ControlledReadError as exc:
+            checks["scan"] = FAILED
+            if exc.code == "TIME_LIMIT_EXCEEDED":  # G4c: no re-hash
+                target["prefix_check"] = transcript.INCOMPLETE
+                return diagnose.diagnose_document(exc.code, **known)
+            outcome = exc.code  # G4b
+        else:
+            checks["scan"] = PASSED
+            outcome = diagnose.DIAGNOSE_NO_VIOLATION  # G4d
+        replaced, check = session.rehash(deadline)  # G5
+        target["prefix_check"] = check
+    finally:
+        session.handle.close()
+    if replaced is not None:
+        return diagnose.diagnose_document(replaced, **known)
+    return diagnose.diagnose_document(outcome, violation=violation, **known)
+
+
 def run(argv: list[str], *, root: Path | None = None, home: Path | None = None) -> dict[str, Any]:
     """The one output document of a call. `root` and `home` are test seams."""
     if argv[:1] == ["status"]:
         return _status(argv, root)
     if argv[:1] == ["precheck"]:
         return _precheck(argv, root, home)
+    if argv[:1] == ["diagnose"]:
+        return _diagnose(argv, root, home)
     return _run(argv, root, home)
 
 

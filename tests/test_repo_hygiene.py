@@ -59,6 +59,14 @@ SECRET_PATTERNS = [
     ("user home path", r"(?i)\b[a-z]:[\\/]+users[\\/]+[^\\/\s'\"]+"),
 ]
 SCAN_EXCLUDE = {"tests/test_repo_hygiene.py"}  # holds the patterns themselves
+# AUTO-10-CONTROLLED-READ-DIAGNOSE ERRATA-002 F1: these two immutable contract files name the approval folder,
+# a user home path, by design. Only that one label is accepted, and only for exactly these LF-normalized bytes.
+HOME_PATH_ACCEPTED = {
+    "docs/tasks/AUTO-10-CONTROLLED-READ-DIAGNOSE/WORK_ORDER.md":
+        "a147275224462d7cd3493cb2231b16468a1a0f0e5a64f215c00838a52d47abaf",
+    "docs/tasks/AUTO-10-CONTROLLED-READ-DIAGNOSE/ERRATA-001.md":
+        "1e9f312749807a370077d11ad9e7b64cb4e820a1335c2283af77a5a25996e4b2",
+}
 
 
 # ------------------------------------------------------------------------------------------ helpers
@@ -99,6 +107,15 @@ def forbidden_reason(path: str) -> str | None:
 
 def secret_hits(text: str) -> list[str]:
     return [label for label, pattern in SECRET_PATTERNS if re.search(pattern, text)]
+
+
+def accepted_hits(path: str, data: bytes, found: list[str]) -> list[str]:
+    """`found` without "user home path" when `path` is a HOME_PATH_ACCEPTED key and the CRLF->LF bytes have
+    exactly its sha256; otherwise `found` unchanged. Every other label is always kept."""
+    expected = HOME_PATH_ACCEPTED.get(path)
+    if expected is None or sha256_bytes(data.replace(b"\r\n", b"\n")) != expected:
+        return found
+    return [label for label in found if label != "user home path"]
 
 
 def hidden_change_flags(repo: Path, paths) -> dict[str, str]:
@@ -319,7 +336,7 @@ def test_no_secrets_or_personal_data_in_addable_files():
         data = f.read_bytes()
         if b"\0" in data:
             continue
-        found = secret_hits(data.decode("utf-8", errors="ignore"))
+        found = accepted_hits(p, data, secret_hits(data.decode("utf-8", errors="ignore")))
         if found:
             hits[p] = found
     assert not hits, f"possible secrets or personal data: {hits}"

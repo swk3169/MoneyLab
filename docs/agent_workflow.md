@@ -89,16 +89,19 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
   `-mmoneylab.controlled_read`, 결합 옵션 `-Bm`, 하위 모듈 `moneylab.controlled_read.__main__`)가 있거나, 인라인 코드
   (`python -c`, `python -`)이면서 `moneylab.controlled_read`를 포함하는 명령. `DENY_RULES` 다음, `protected-path` 검사 앞에서
   판정한다.
-- Bash 도구 호출이고 정규화 전 원문 명령 전체가 아래 세 형태 중 하나와 정확히(fullmatch) 같으면 `controlled-read` ask다.
+- Bash 도구 호출이고 정규화 전 원문 명령 전체가 아래 네 형태 중 하나와 정확히(fullmatch) 같으면 `controlled-read` ask다.
   토큰 구분자는 ASCII 공백 1개다. 따옴표, 탭, `=` 형태, 축약, 순서 변경, 중복, 추가 토큰, `;`·`&&`·`|`·redirect, 다른 실행 파일
   경로, 등록되지 않은 PROFILE은 모두 `controlled-read-form` deny다. PowerShell 도구 호출은 형태와 관계없이 deny다.
   - `.venv/Scripts/python.exe -B -m moneylab.controlled_read run --task <TASK_ID> --project-key <PROJECT_KEY> --session <SESSION> --selector <SELECTOR> --profile <PROFILE> --attempt <ATTEMPT>`
   - `.venv/Scripts/python.exe -B -m moneylab.controlled_read status --task <TASK_ID> --attempt <ATTEMPT>`
   - `.venv/Scripts/python.exe -B -m moneylab.controlled_read precheck --task <TASK_ID> --project-key <PROJECT_KEY> --session <SESSION> --profile <PROFILE>`
     (AUTO-09-CONTROLLED-READ-PRECHECK D1, D11)
+  - `.venv/Scripts/python.exe -B -m moneylab.controlled_read diagnose --task <TASK_ID> --project-key <PROJECT_KEY> --session <SESSION> --profile <PROFILE> --expect-prefix-bytes <N> --expect-prefix-sha256 <SHA>`
+    (AUTO-10-CONTROLLED-READ-DIAGNOSE D1, D11)
   - 값 문법(ASCII fullmatch): TASK_ID `[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*`(64자 이하), PROJECT_KEY `[A-Za-z0-9-]{1,200}`,
     SESSION 소문자 UUID, SELECTOR `assistant:<SESSION>` 또는 `tool_result:[A-Za-z0-9_]{1,128}`에 선택적 `:text:<1-99>`,
-    PROFILE `ECON-FWD-M20-WO/1` 또는 `ECON-FWD-M20-PREREG/1`, ATTEMPT `001`-`999`.
+    PROFILE `ECON-FWD-M20-WO/1` 또는 `ECON-FWD-M20-PREREG/1`, ATTEMPT `001`-`999`, N `[1-9][0-9]{0,7}`(정수 67108864 이하),
+    SHA 소문자 hex 64자.
 - 검사 대상이 아닌 명령은 기존 판정 그대로다(`git diff -- src/moneylab/controlled_read/`, 파일 경로를 언급하는 grep, pytest 등).
 - 붙임형 `-m`, 결합 옵션, 하위 모듈, 다른 인터프리터와 실행 파일 경로, 옵션 추가·누락은 `controlled-read-form` deny다.
 - 한계: 이 규칙은 알려진 실행 표기를 식별하는 문자열 규칙이다. 모든 Python 실행, 동적 import, 간접 호출(변수, 스크립트 파일,
@@ -133,6 +136,18 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
     에이전트는 현재 세션에 사용자가 보낸 그 원문이 있는지, 필드 4개(TASK, PROJECT_KEY, SESSION, PROFILE)가 precheck 인자와
     문자열로 완전히 같은지, 만료되지 않았는지 확인하고, 하나라도 확인하지 못하면 멈춘다. 이 승인은
     `CONTROLLED_READ_AUTHORIZATION`을 대신하지 않는다.
+- `diagnose` (AUTO-10-CONTROLLED-READ-DIAGNOSE D1–D12): 승인 입력으로 고정한 prefix `[0, N)`의 길이·SHA-256·LF 정렬을
+  확인한 뒤 precheck scan과 같은 검사를 같은 순서로 적용하고, 최초 FORMAT_UNSUPPORTED 위반의 줄·검사 ID·적용 등급·고정 필드
+  경로·기대 타입·실제 JSON 타입·block/item 위치만 보고한다. 문자열 값, 키 이름, uuid·tool_use_id, 본문은 출력하지 않는다.
+  - `diagnose`는 기록을 만들지 않으며(`data/processed/controlled_read/`에 쓰지 않는다) `status` 대상이 아니다.
+  - 의미 한계: `DIAGNOSE_NO_VIOLATION`은 고정 prefix에서 scan 검사가 위반을 찾지 못했다는 뜻일 뿐이며, `PRECHECK_OK`,
+    selector 존재, RUN 성공을 뜻하지 않는다. 재해시 결과가 처리 결과를 대체하면 violation은 버린다.
+  - 승인은 채팅 메시지 한 줄이고, 메시지 1건이 호출 1회를 승인한다:
+    `CONTROLLED_READ_DIAGNOSE_AUTHORIZATION: AUTO-10-CONTROLLED-READ-DIAGNOSE TASK=<TASK_ID> PROJECT_KEY=<PROJECT_KEY> SESSION=<SESSION> PROFILE=<PROFILE> EXPECT_PREFIX_BYTES=<N> EXPECT_PREFIX_SHA256=<SHA> EXPIRES_UTC=<YYYY-MM-DDTHH:MM:SSZ>`
+    에이전트는 현재 세션에 사용자가 보낸 그 원문이 있는지, 필드 6개(TASK, PROJECT_KEY, SESSION, PROFILE,
+    EXPECT_PREFIX_BYTES, EXPECT_PREFIX_SHA256)가 diagnose 인자와 문자열로 완전히 같은지, 만료되지 않았는지 확인하고, 하나라도
+    확인하지 못하면 멈춘다. 이 승인은 다른 controlled_read 승인(`CONTROLLED_READ_AUTHORIZATION`,
+    `CONTROLLED_READ_PRECHECK_AUTHORIZATION`)을 대신하지 않는다.
 
 GitHub CLI:
 
