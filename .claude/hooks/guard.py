@@ -392,6 +392,7 @@ CONTROLLED_READ_FORMS = (
 )
 # AUTO-09-CONTROLLED-READ-PRECHECK D11 (a): the one precheck form (no record, its own approval message).
 CONTROLLED_READ_PRECHECK_FORM = re.compile(_CR_EXE + r"precheck --task " + _CR_TASK + r" --project-key [A-Za-z0-9-]{1,200} --session " + _CR_SESSION + r" --profile (?:ECON-FWD-M20-WO/1|ECON-FWD-M20-PREREG/1)", re.ASCII)
+CONTROLLED_READ_DIAGNOSE_FORM = re.compile(_CR_EXE + r"diagnose --task " + _CR_TASK + r" --project-key [A-Za-z0-9-]{1,200} --session " + _CR_SESSION + r" --profile (?:ECON-FWD-M20-WO/1|ECON-FWD-M20-PREREG/1) --expect-prefix-bytes (?P<bytes>[1-9][0-9]{0,7}) --expect-prefix-sha256 [0-9a-f]{64}", re.ASCII)
 # ERRATA-001 E5 (a): a module execution spelling on the normalized text: -m, -mmoneylab..., -bm, .__main__.
 # A string rule for known spellings only; it is not isolation against every way to run or import Python.
 _CR_MODULE = r"(?<![\w./-])-[a-z]*m\s*moneylab\.controlled_read(?!\w)"
@@ -411,6 +412,10 @@ def _controlled_read(raw: str, c: str, bash: bool) -> Decision | None:
         if m is not None and len(m.group("task")) <= 64:
             return Decision(ASK, "controlled-read",
                             "controlled read precheck; confirm the CONTROLLED_READ_PRECHECK_AUTHORIZATION message first")
+        m = CONTROLLED_READ_DIAGNOSE_FORM.fullmatch(raw)
+        if m is not None and len(m.group("task")) <= 64 and int(m.group("bytes")) <= 67108864:
+            return Decision(ASK, "controlled-read",
+                            "controlled read diagnose; confirm the CONTROLLED_READ_DIAGNOSE_AUTHORIZATION message first")
     return Decision(DENY, "controlled-read-form",
                     "moneylab.controlled_read runs only in the exact documented form from the Bash tool")
 

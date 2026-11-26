@@ -19,6 +19,7 @@ STDLIB_ALLOWED = {"__future__", "collections.abc", "dataclasses", "datetime", "h
                   "re", "sys", "time", "typing"}
 OWN_ALLOWED = {"moneylab.controlled_read", "moneylab.controlled_read.profiles", "moneylab.controlled_read.selector",
                "moneylab.controlled_read.store", "moneylab.controlled_read.transcript",
+               "moneylab.controlled_read.diagnose",
                "moneylab.storage.atomic", "moneylab.workstate", "moneylab.workstate.collect"}
 FORBIDDEN_LOADED = ("moneylab.automation", "moneylab.runlog", "moneylab.providers", "requests", "websockets",
                     "urllib.request", "http.client", "socket")
@@ -30,7 +31,7 @@ def _modules() -> dict[str, ast.Module]:
 
 def test_package_has_exactly_the_planned_modules():
     assert set(_modules()) == {"__init__.py", "__main__.py", "profiles.py", "selector.py", "transcript.py",
-                               "store.py"}
+                               "store.py", "diagnose.py"}
 
 
 def test_imports_are_the_allowlist_only():
