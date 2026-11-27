@@ -190,5 +190,4 @@ def test_body_limit(monkeypatch):
 
 
 def test_only_two_profiles_exist():
-    assert set(profiles.PROFILES) == {"ECON-FWD-M20-WO/1", "ECON-FWD-M20-PREREG/1"}
-    assert all(p.version == 1 for p in profiles.PROFILES.values())
+    assert {p.id: p.version for p in profiles.PROFILES.values()} == {"ECON-FWD-M20-WO/1": 1, "ECON-FWD-M20-PREREG/1": 1, "ECON-FWD-M20-WO/2": 2}

@@ -1145,7 +1145,7 @@ def test_cr_exact_forms_ask(cmd):
     CR_STATUS.replace(".venv/Scripts/python.exe", "C:/MoneyLab-auto-08/.venv/Scripts/python.exe"),
     CR_STATUS.replace(" -B", ""),
     CR_STATUS.replace("-B -m", "-B -I -m"),
-    CR_RUN.replace("ECON-FWD-M20-WO/1", "ECON-FWD-M20-WO/2"),
+    CR_RUN.replace("ECON-FWD-M20-WO/1", "ECON-FWD-M20-WO/3"),
     CR_RUN.replace("ECON-FWD-M20-WO/1", "OTHER-DOC/1"),
     CR_RUN.replace("--attempt 001", "--attempt 000"),
     CR_RUN.replace(":text:2", ":text:100"),

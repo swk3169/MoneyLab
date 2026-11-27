@@ -100,7 +100,7 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
     (AUTO-10-CONTROLLED-READ-DIAGNOSE D1, D11)
   - 값 문법(ASCII fullmatch): TASK_ID `[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*`(64자 이하), PROJECT_KEY `[A-Za-z0-9-]{1,200}`,
     SESSION 소문자 UUID, SELECTOR `assistant:<SESSION>` 또는 `tool_result:[A-Za-z0-9_]{1,128}`에 선택적 `:text:<1-99>`,
-    PROFILE `ECON-FWD-M20-WO/1` 또는 `ECON-FWD-M20-PREREG/1`, ATTEMPT `001`-`999`, N `[1-9][0-9]{0,7}`(정수 67108864 이하),
+    PROFILE `ECON-FWD-M20-WO/1`, `ECON-FWD-M20-PREREG/1` 또는 `ECON-FWD-M20-WO/2`, ATTEMPT `001`-`999`, N `[1-9][0-9]{0,7}`(정수 67108864 이하),
     SHA 소문자 hex 64자.
 - 검사 대상이 아닌 명령은 기존 판정 그대로다(`git diff -- src/moneylab/controlled_read/`, 파일 경로를 언급하는 grep, pytest 등).
 - 붙임형 `-m`, 결합 옵션, 하위 모듈, 다른 인터프리터와 실행 파일 경로, 옵션 추가·누락은 `controlled-read-form` deny다.
@@ -148,6 +148,18 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
     EXPECT_PREFIX_BYTES, EXPECT_PREFIX_SHA256)가 diagnose 인자와 문자열로 완전히 같은지, 만료되지 않았는지 확인하고, 하나라도
     확인하지 못하면 멈춘다. 이 승인은 다른 controlled_read 승인(`CONTROLLED_READ_AUTHORIZATION`,
     `CONTROLLED_READ_PRECHECK_AUTHORIZATION`)을 대신하지 않는다.
+- PROFILE `ECON-FWD-M20-WO/2` (AUTO-12-CONTROLLED-READ-NONTEXT, version 2): tool_result content 배열에서 type이 `text`가
+  아닌 문자열인 객체 항목(비텍스트 항목)은 S4d 대신 제한된 탐색을 거친다. 그 아래 객체 키나 문자열 값에 BEGIN 또는 END 표식
+  문자열 전체가 들어 있으면 S4e, 탐색 한도(깊이 64, 항목당 노드 100000, 호출당 노드 합 2000000)를 넘으면 S4f(run·precheck에서는
+  `FORMAT_UNSUPPORTED`), 그 밖에는 텍스트 목록에서 뺀다. `ECON-FWD-M20-WO/1`과 `ECON-FWD-M20-PREREG/1`의 동작은 바뀌지 않는다.
+  - (가) 후보는 지원되는 개별 text 문자열(assistant text block, tool_result 문자열 content, content 배열의 `type == "text"`
+    항목)에 기존 규칙(줄 단위 완전 일치)으로 BEGIN 또는 END 표식 줄이 있는 것뿐이다.
+  - (나) 항목 결합, 첨부 해석, 추가 디코딩은 없다.
+  - (다) /2의 유일성은 (가)의 범위 안에서만 의미가 있으며 비텍스트 내용 전체의 유일성을 뜻하지 않는다.
+  - (라) 비텍스트 검사는 건너뛰기를 거부할 조건의 확인이며, 비텍스트의 지원이나 검증이 아니다.
+  - 한계: 문자열은 JSON 파싱 뒤의 값으로만 검사한다. 추가 인코딩(base64, 퍼센트 인코딩, 이중 이스케이프 등), 외부 참조, 여러
+    문자열로 나뉜 표식은 감지하지 못한다.
+  - /2의 PRECHECK_OK는 /1과 의미가 다르다. 표식 없는 비텍스트 항목을 건너뛴 결과이며, 그 항목의 내용을 확인했다는 뜻이 아니다.
 
 GitHub CLI:
 

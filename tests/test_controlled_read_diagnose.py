@@ -335,8 +335,8 @@ def test_t1_each_violation_is_reported_at_its_place(diag, tmp_path, root, bad, c
 
 
 def test_t1_every_d5_pair_is_covered():
-    assert {(c[2], c[4], c[5]) for c in CASES} == set(diagnose.FIELDS)
-    assert {c[2]: c[3] for c in CASES} == diagnose.APPLICABILITY
+    assert {(c[2], c[4], c[5]) for c in CASES} | {("S4e", "tool_result.content[]", "marker_free_nontext"), ("S4f", "tool_result.content[]", "within_nontext_scan_limits")} == set(diagnose.FIELDS)
+    assert {**{c[2]: c[3] for c in CASES}, "S4e": E, "S4f": E} == diagnose.APPLICABILITY
 
 
 @pytest.mark.parametrize("lines, v", [
@@ -931,7 +931,7 @@ def test_diagnose_codes_and_constants():
     assert diagnose.DIAGNOSE_OPTIONS == ("--task", "--project-key", "--session", "--profile",
                                          "--expect-prefix-bytes", "--expect-prefix-sha256")
     assert diagnose.APPLICABILITY == {"S1": G, "S2": G, "S3a": E, "S3b": E, "S3c": E, "S4a": K, "S4b": E,
-                                      "S4c": E, "S4d": E}
+                                      "S4c": E, "S4d": E, "S4e": E, "S4f": E}
 
 
 def test_parse_diagnose():

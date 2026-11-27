@@ -326,17 +326,98 @@ def _assistant_texts(entry: dict[str, Any]) -> list[str]:
     return texts
 
 
-def _tool_result_texts(block: dict[str, Any]) -> list[str]:
+# AUTO-12 N4: limits of the non-text scan, looked up at call time (tests shrink them with monkeypatch).
+NONTEXT_DEPTH_LIMIT = 64  # the root object is depth 1; a deeper container is S4f
+NONTEXT_ITEM_NODE_LIMIT = 100_000  # visited nodes of one non-text item
+NONTEXT_CALL_NODE_LIMIT = 2_000_000  # visited non-text nodes of one policy object (one call)
+NONTEXT_CHECK_INTERVAL = 1024  # deadline.check() before the root and at most this many nodes apart
+_END: Any = object()  # end of a child iterator
+
+
+class NontextPolicy:
+    """AUTO-12 N3 and N4 (profile ECON-FWD-M20-WO/2): decide whether a tool_result content item whose type is
+    a string other than "text" may be left out of the text list. The item is skipped only when a bounded,
+    non-recursive scan of every object key and string value under it finds neither the whole BEGIN nor the
+    whole END marker as a substring (S4e otherwise) and stays within the limits (S4f otherwise).
+
+    Strings are checked after json.loads only: further encodings (base64, percent encoding, double escapes),
+    external references, a marker split over several strings and non-string forms are not interpreted and are
+    not detected. This is a check of the conditions that refuse a skip, not support or validation of non-text
+    content. The type name, key names and values are never compared to anything but the markers and never
+    kept or reported. One object serves one scan_candidates or select_text call (its counters are not reset):
+    the caller makes a new one for every call and shares its own Deadline with it."""
+
+    def __init__(self, begin: bytes, end: bytes, deadline: Deadline) -> None:
+        self._markers = (begin.decode("ascii"), end.decode("ascii"))
+        self._deadline = deadline
+        self.call_nodes = 0
+        self.item_nodes = 0
+        self._since_check = 0
+
+    def _limit(self, item_index: int) -> FormatViolation:
+        return FormatViolation("S4f", "tool_result.content[]", "within_nontext_scan_limits", "object",
+                               item_index=item_index)
+
+    def _visit(self, item_index: int) -> None:
+        """Count one node: the deadline first (at most NONTEXT_CHECK_INTERVAL nodes apart), then the limits."""
+        if self._since_check >= NONTEXT_CHECK_INTERVAL:
+            self._deadline.check()
+            self._since_check = 0
+        self._since_check += 1
+        self.item_nodes += 1
+        self.call_nodes += 1
+        if self.item_nodes > NONTEXT_ITEM_NODE_LIMIT or self.call_nodes > NONTEXT_CALL_NODE_LIMIT:
+            raise self._limit(item_index)
+
+    def _marker(self, text: str, item_index: int) -> None:
+        if any(marker in text for marker in self._markers):
+            raise FormatViolation("S4e", "tool_result.content[]", "marker_free_nontext", "object",
+                                  item_index=item_index)
+
+    def check(self, item: dict[str, Any], item_index: int) -> None:
+        """Return when `item` may be skipped; raise S4e, S4f or TIME_LIMIT_EXCEEDED otherwise. Depth first in
+        key insertion and array order over an explicit stack of (iterator, depth, is_object): each child is
+        taken from its iterator one at a time and checked before the next one is taken."""
+        self._deadline.check()
+        self._since_check = 0
+        self.item_nodes = 0
+        self._visit(item_index)  # the root object, depth 1
+        stack: list[tuple[Any, int, bool]] = [(iter(item.items()), 1, True)]
+        while stack:
+            children, depth, is_object = stack[-1]
+            child = next(children, _END)
+            if child is _END:
+                stack.pop()
+                continue
+            if is_object:
+                key, value = child
+                self._visit(item_index)  # the key
+                self._marker(key, item_index)
+            else:
+                value = child
+            self._visit(item_index)  # the value or element
+            if isinstance(value, str):
+                self._marker(value, item_index)
+            elif isinstance(value, (dict, list)):
+                if depth + 1 > NONTEXT_DEPTH_LIMIT:
+                    raise self._limit(item_index)
+                stack.append((iter(value.items()) if isinstance(value, dict) else iter(value), depth + 1,
+                              isinstance(value, dict)))
+
+
+def _tool_result_texts(block: dict[str, Any], *, nontext=None) -> list[str]:  # nontext: NontextPolicy | None
     if "is_error" in block:
         if not isinstance(block["is_error"], bool):
             raise ControlledReadError("FORMAT_UNSUPPORTED")
         if block["is_error"]:
             raise ControlledReadError("TOOL_RESULT_ERROR")
-    return _tool_result_content_texts(block)
+    return _tool_result_content_texts(block, nontext=nontext)
 
 
-def _tool_result_content_texts(block: dict[str, Any]) -> list[str]:
-    """The text items of a tool_result block's content (AUTO-09 D5: split out of _tool_result_texts)."""
+def _tool_result_content_texts(block: dict[str, Any], *, nontext=None) -> list[str]:  # nontext: NontextPolicy | None
+    """The text items of a tool_result block's content (AUTO-09 D5: split out of _tool_result_texts). With a
+    NontextPolicy (AUTO-12 N3), an object item whose type is a string other than "text" is checked by the
+    policy and, when it returns, left out of the list; without one such an item is S4d as before."""
     content = block.get("content")
     if isinstance(content, str):
         return [content]
@@ -344,6 +425,10 @@ def _tool_result_content_texts(block: dict[str, Any]) -> list[str]:
         raise FormatViolation("S4c", "tool_result.content", "string_or_array", _json_type(block, "content"))
     texts: list[str] = []
     for item_index, item in enumerate(content, start=1):
+        if (nontext is not None and isinstance(item, dict) and isinstance(item.get("type"), str)
+                and item["type"] != "text"):
+            nontext.check(item, item_index)
+            continue
         if not isinstance(item, dict) or item.get("type") != "text" or not isinstance(item.get("text"), str):
             raise FormatViolation(
                 "S4d",
@@ -358,10 +443,12 @@ def _tool_result_content_texts(block: dict[str, Any]) -> list[str]:
     return texts
 
 
-def select_text(prefix: bytes, selector: Selector, deadline: Deadline) -> str:
-    """D6-D8: the selected text exactly as stored (blocks are never joined, nothing is stripped)."""
+def select_text(prefix: bytes, selector: Selector, deadline: Deadline, *, nontext=None) -> str:
+    """D6-D8: the selected text exactly as stored (blocks are never joined, nothing is stripped). `nontext`
+    (AUTO-12 N5) applies to the selected tool_result block only."""
     target = _find(_lines(prefix, deadline), selector, deadline)
-    texts = _assistant_texts(target) if selector.kind == ASSISTANT else _tool_result_texts(target)
+    texts = (_assistant_texts(target) if selector.kind == ASSISTANT
+             else _tool_result_texts(target, nontext=nontext))
     if selector.text_index is None:
         if not texts:
             raise ControlledReadError("TEXT_BLOCK_NOT_FOUND")
@@ -386,12 +473,12 @@ class Candidate:
     is_error: bool  # a tool_result block with is_error true
 
 
-def scan_candidates(prefix: bytes, kinds: Collection[str], is_candidate: Callable[[str], bool],
-                    deadline: Deadline) -> list[Candidate]:
+def scan_candidates(prefix: bytes, kinds: Collection[str], is_candidate: Callable[[str], bool], deadline: Deadline, *, nontext=None) -> list[Candidate]:
     """AUTO-09 D6: every text block of the profile's kinds for which `is_candidate` holds, in prefix order.
     The whole prefix is scanned before anything is returned. Line parsing, the uuid type, _user_blocks and
     the tool_use_id type are the checks run also needs; reading every assistant entry and tool_result
-    content of the profile's kinds is an extra check that run does not need."""
+    content of the profile's kinds is an extra check that run does not need. `nontext` (AUTO-12 N5) applies
+    to every tool_result block of the scan; text_index counts the same text list run uses."""
     found: list[Candidate] = []
     for line_no, line in enumerate(_lines(prefix, deadline), start=1):
         try:
@@ -416,7 +503,7 @@ def scan_candidates(prefix: bytes, kinds: Collection[str], is_candidate: Callabl
                         raise FormatViolation("S4b", "tool_result.is_error", "bool", _json_type(block, "is_error"),
                                               block_index)
                     try:
-                        texts = _tool_result_content_texts(block)
+                        texts = _tool_result_content_texts(block, nontext=nontext)
                     except FormatViolation as exc:
                         exc._at(block_index=block_index)
                         raise

@@ -61,6 +61,15 @@ def confirmed_home(home: Path | None = None) -> Path:
     return base
 
 
+def _nontext(profile: profiles.Profile, deadline: transcript.Deadline) -> dict[str, Any]:
+    """AUTO-12 N5: the keyword arguments of one scan_candidates or select_text call. Only for a profile with
+    skip_marker_free_nontext they hold a new policy object, which shares the caller's Deadline; otherwise
+    they are empty and the call is made exactly as before."""
+    if not profile.skip_marker_free_nontext:
+        return {}
+    return {"nontext": transcript.NontextPolicy(profile.begin, profile.end, deadline)}
+
+
 def _process(args: grammar.RunArgs, home: Path, known: dict[str, Any]) -> dict[str, Any]:
     """ERRATA-001 E2: open and measure, process, then re-hash after a success or a defined processing
     failure. A time-out ends at once without re-hashing. The re-hash result can replace the processing one."""
@@ -77,7 +86,7 @@ def _process(args: grammar.RunArgs, home: Path, known: dict[str, Any]) -> dict[s
         outcome: str = SUCCEEDED
         body = b""
         try:
-            text = transcript.select_text(session.prefix, selected, deadline)
+            text = transcript.select_text(session.prefix, selected, deadline, **_nontext(profile, deadline))
             body = profiles.extract(profile, text)
         except ControlledReadError as exc:
             if exc.code == "TIME_LIMIT_EXCEEDED":
@@ -169,7 +178,8 @@ def _precheck(argv: list[str], root: Path | None, home: Path | None) -> dict[str
     try:
         try:
             candidates = transcript.scan_candidates(
-                session.prefix, profile.kinds, lambda text: profiles.marker_line_present(profile, text), deadline)
+                session.prefix, profile.kinds, lambda text: profiles.marker_line_present(profile, text), deadline,
+                **_nontext(profile, deadline))
         except ControlledReadError as exc:
             checks["scan"] = FAILED
             if exc.code == "TIME_LIMIT_EXCEEDED":  # P5: no re-hash
@@ -192,7 +202,8 @@ def _precheck(argv: list[str], root: Path | None, home: Path | None) -> dict[str
                     try:
                         selected = grammar.parse_selector(written)
                         profiles.check_kind(profile, selected.kind)
-                        text = transcript.select_text(session.prefix, selected, deadline)
+                        text = transcript.select_text(session.prefix, selected, deadline,
+                                                      **_nontext(profile, deadline))
                         measured = profiles.values(profiles.extract(profile, text))
                     except ControlledReadError as exc:
                         checks["selected"] = FAILED
@@ -246,7 +257,8 @@ def _diagnose(argv: list[str], root: Path | None, home: Path | None) -> dict[str
     violation: dict[str, Any] | None = None
     try:
         try:
-            transcript.scan_candidates(session.prefix, profile.kinds, lambda _text: False, deadline)
+            transcript.scan_candidates(session.prefix, profile.kinds, lambda _text: False, deadline,
+                                       **_nontext(profile, deadline))
         except transcript.FormatViolation as found:  # G4a
             checks["scan"] = FAILED
             outcome = diagnose.DIAGNOSE_VIOLATION_FOUND
