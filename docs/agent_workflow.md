@@ -89,7 +89,7 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
   `-mmoneylab.controlled_read`, 결합 옵션 `-Bm`, 하위 모듈 `moneylab.controlled_read.__main__`)가 있거나, 인라인 코드
   (`python -c`, `python -`)이면서 `moneylab.controlled_read`를 포함하는 명령. `DENY_RULES` 다음, `protected-path` 검사 앞에서
   판정한다.
-- Bash 도구 호출이고 정규화 전 원문 명령 전체가 아래 네 형태 중 하나와 정확히(fullmatch) 같으면 `controlled-read` ask다.
+- Bash 도구 호출이고 정규화 전 원문 명령 전체가 아래 다섯 형태 중 하나와 정확히(fullmatch) 같으면 `controlled-read` ask다.
   토큰 구분자는 ASCII 공백 1개다. 따옴표, 탭, `=` 형태, 축약, 순서 변경, 중복, 추가 토큰, `;`·`&&`·`|`·redirect, 다른 실행 파일
   경로, 등록되지 않은 PROFILE은 모두 `controlled-read-form` deny다. PowerShell 도구 호출은 형태와 관계없이 deny다.
   - `.venv/Scripts/python.exe -B -m moneylab.controlled_read run --task <TASK_ID> --project-key <PROJECT_KEY> --session <SESSION> --selector <SELECTOR> --profile <PROFILE> --attempt <ATTEMPT>`
@@ -98,6 +98,8 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
     (AUTO-09-CONTROLLED-READ-PRECHECK D1, D11)
   - `.venv/Scripts/python.exe -B -m moneylab.controlled_read diagnose --task <TASK_ID> --project-key <PROJECT_KEY> --session <SESSION> --profile <PROFILE> --expect-prefix-bytes <N> --expect-prefix-sha256 <SHA>`
     (AUTO-10-CONTROLLED-READ-DIAGNOSE D1, D11)
+  - `.venv/Scripts/python.exe -B -m moneylab.controlled_read candidates --task <TASK_ID> --project-key <PROJECT_KEY> --session <SESSION> --profile <PROFILE> --expect-prefix-bytes <N> --expect-prefix-sha256 <SHA>`
+    (AUTO-15-CONTROLLED-READ-CANDIDATES)
   - 값 문법(ASCII fullmatch): TASK_ID `[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*`(64자 이하), PROJECT_KEY `[A-Za-z0-9-]{1,200}`,
     SESSION 소문자 UUID, SELECTOR `assistant:<SESSION>` 또는 `tool_result:[A-Za-z0-9_]{1,128}`에 선택적 `:text:<1-99>`,
     PROFILE `ECON-FWD-M20-WO/1`, `ECON-FWD-M20-PREREG/1` 또는 `ECON-FWD-M20-WO/2`, ATTEMPT `001`-`999`, N `[1-9][0-9]{0,7}`(정수 67108864 이하),
@@ -148,6 +150,23 @@ C 등급은 태그가 없다. Skill 코드 블록에 deny 명령이 하나라도
     EXPECT_PREFIX_BYTES, EXPECT_PREFIX_SHA256)가 diagnose 인자와 문자열로 완전히 같은지, 만료되지 않았는지 확인하고, 하나라도
     확인하지 못하면 멈춘다. 이 승인은 다른 controlled_read 승인(`CONTROLLED_READ_AUTHORIZATION`,
     `CONTROLLED_READ_PRECHECK_AUTHORIZATION`)을 대신하지 않는다.
+- `candidates` (AUTO-15-CONTROLLED-READ-CANDIDATES N1–N7): 승인 입력으로 고정한 prefix `[0, N)`의 길이·SHA-256·LF 정렬을
+  diagnose와 같은 방법으로 확인한 뒤, PROFILE의 후보 text 문자열을 prefix 순서로 최대 8개까지 열거한다. 후보마다 위치(줄,
+  block 위치, text 순번), run selector 표현 가능 여부, 기존 run 선택·추출 경로의 판정, 본문의 SHA-256·바이트 수·LF 수만
+  출력한다. 본문, 주변 문맥, 표식 줄, 키 이름, type 이름, 표현할 수 없는 식별자는 출력하지 않는다.
+  - `candidates`는 기록을 만들지 않으며(`data/processed/controlled_read/`에 쓰지 않는다) `status` 대상이 아니다.
+  - 상한: 아홉 번째 후보를 적재하기 전에 탐색을 멈추고 `CANDIDATES_LIMIT_EXCEEDED`와 하한 `candidate_count_at_least: 9`를
+    보고한다. 이 값은 관측한 하한이며 정확한 전체 수가 아니다. 부분 목록은 출력하지 않는다.
+  - 전체 실패나 재해시 불일치가 나면 후보 목록과 계산값을 모두 버린다(`candidates`, `candidate_count`,
+    `candidate_count_at_least`가 null).
+  - 의미 한계: 표식이 있다는 것이나 `OK` 판정은 유효한 지시문이라는 판단이 아니다. 프로그램은 후보를 자동으로 고르지 않고
+    추천·최신·정본 표시를 하지 않는다. values가 같아도 정본 확정이 아니며, 내용 digest 일치는 위치 동일성의 증거가 아니다.
+    유일성은 지원되는 개별 text 문자열 범위로 한정된다. 후보 0개의 `CANDIDATES_LISTED`는 후보 발견이나 추출 성공이 아니다.
+  - 승인은 채팅 메시지 한 줄이고, 메시지 1건이 호출 1회를 승인한다:
+    `CONTROLLED_READ_CANDIDATES_AUTHORIZATION: AUTO-15-CONTROLLED-READ-CANDIDATES TASK=<TASK_ID> PROJECT_KEY=<PROJECT_KEY> SESSION=<SESSION> PROFILE=<PROFILE> EXPECT_PREFIX_BYTES=<N> EXPECT_PREFIX_SHA256=<SHA> EXPIRES_UTC=<YYYY-MM-DDTHH:MM:SSZ>`
+    에이전트는 현재 세션에 사용자가 보낸 그 원문이 있는지, 필드 6개(TASK, PROJECT_KEY, SESSION, PROFILE,
+    EXPECT_PREFIX_BYTES, EXPECT_PREFIX_SHA256)가 candidates 인자와 문자열로 완전히 같은지, 만료되지 않았는지 확인하고, 하나라도
+    확인하지 못하면 멈춘다. 이 승인은 다른 controlled_read 승인을 대신하지 않는다.
 - PROFILE `ECON-FWD-M20-WO/2` (AUTO-12-CONTROLLED-READ-NONTEXT, version 2): tool_result content 배열에서 type이 `text`가
   아닌 문자열인 객체 항목(비텍스트 항목)은 S4d 대신 제한된 탐색을 거친다. 그 아래 객체 키나 문자열 값에 BEGIN 또는 END 표식
   문자열 전체가 들어 있으면 S4e, 탐색 한도(깊이 64, 항목당 노드 100000, 호출당 노드 합 2000000)를 넘으면 S4f(run·precheck에서는

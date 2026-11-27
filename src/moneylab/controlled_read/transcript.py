@@ -473,7 +473,14 @@ class Candidate:
     is_error: bool  # a tool_result block with is_error true
 
 
-def scan_candidates(prefix: bytes, kinds: Collection[str], is_candidate: Callable[[str], bool], deadline: Deadline, *, nontext=None) -> list[Candidate]:
+class CandidateLimitReached(Exception):
+    """AUTO-15 N2: scan_candidates found one more candidate than `limit` and stopped before keeping it. Not a
+    ControlledReadError; it carries no session value."""
+
+
+def scan_candidates(prefix: bytes, kinds: Collection[str], is_candidate: Callable[[str], bool], deadline: Deadline, *, nontext=None,
+                    positions: list[tuple[int, int | None, bytes]] | None = None,
+                    limit: int | None = None) -> list[Candidate]:
     """AUTO-09 D6: every text block of the profile's kinds for which `is_candidate` holds, in prefix order.
     The whole prefix is scanned before anything is returned. Line parsing, the uuid type, _user_blocks and
     the tool_use_id type are the checks run also needs; reading every assistant entry and tool_result
@@ -490,7 +497,12 @@ def scan_candidates(prefix: bytes, kinds: Collection[str], is_candidate: Callabl
             if ASSISTANT in kinds and entry.get("type") == "assistant":
                 for k, text in enumerate(_assistant_texts(entry), start=1):
                     if is_candidate(text):
+                        if isinstance(limit, int) and len(found) == limit:
+                            raise CandidateLimitReached()
                         found.append(Candidate(ASSISTANT, entry.get("uuid"), k, False))
+                        if isinstance(positions, list):
+                            positions.append(
+                                (line_no, None, hashlib.sha256(text.encode("utf-8", "surrogatepass")).digest()))
             if TOOL_RESULT in kinds:
                 for block_index, block in enumerate(blocks, start=1):
                     if block["type"] != "tool_result":
@@ -509,7 +521,12 @@ def scan_candidates(prefix: bytes, kinds: Collection[str], is_candidate: Callabl
                         raise
                     for k, text in enumerate(texts, start=1):
                         if is_candidate(text):
+                            if isinstance(limit, int) and len(found) == limit:
+                                raise CandidateLimitReached()
                             found.append(Candidate(TOOL_RESULT, ident, k, block.get("is_error") is True))
+                            if isinstance(positions, list):
+                                positions.append((line_no, block_index,
+                                                  hashlib.sha256(text.encode("utf-8", "surrogatepass")).digest()))
         except FormatViolation as exc:
             exc._at(line=line_no)
             raise
