@@ -51,7 +51,7 @@ def test_valid_run_and_status_parse():
     (8, f"assistant:{UUID}:text:0"), (8, f"assistant:{UUID}:text:100"), (8, f"assistant:{UUID}:text:01"),
     (8, "tool_result:a/b"), (8, "tool_result:" + "a" * 129), (8, "tool_result:"), (8, f"user:{UUID}"),
     (8, f"assistant:{UUID}:text:"), (8, "tool_result:a-b"),
-    (10, "ECON-FWD-M20-WO/2"), (10, "econ-fwd-m20-wo/1"), (10, "ECON-FWD-M20-WO"), (10, "OTHER/1"),
+    (10, "ECON-FWD-M20-WO/3"), (10, "econ-fwd-m20-wo/1"), (10, "ECON-FWD-M20-WO"), (10, "OTHER/1"),
     (12, "000"), (12, "1"), (12, "01"), (12, "1000"), (12, "00a"),
 ])
 def test_value_grammar_violations(index, value):

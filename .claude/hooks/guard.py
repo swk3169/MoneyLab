@@ -386,13 +386,13 @@ _CR_EXE = r"\.venv/Scripts/python\.exe -B -m moneylab\.controlled_read "
 CONTROLLED_READ_FORMS = (
     re.compile(_CR_EXE + r"run --task " + _CR_TASK + r" --project-key [A-Za-z0-9-]{1,200} --session " + _CR_SESSION
                + r" --selector (?:assistant:" + _CR_SESSION + r"|tool_result:[A-Za-z0-9_]{1,128})"
-               + r"(?::text:[1-9][0-9]?)? --profile (?:ECON-FWD-M20-WO/1|ECON-FWD-M20-PREREG/1)"
+               + r"(?::text:[1-9][0-9]?)? --profile (?:ECON-FWD-M20-WO/1|ECON-FWD-M20-PREREG/1|ECON-FWD-M20-WO/2)"
                + r" --attempt " + _CR_ATTEMPT, re.ASCII),
     re.compile(_CR_EXE + r"status --task " + _CR_TASK + r" --attempt " + _CR_ATTEMPT, re.ASCII),
 )
 # AUTO-09-CONTROLLED-READ-PRECHECK D11 (a): the one precheck form (no record, its own approval message).
-CONTROLLED_READ_PRECHECK_FORM = re.compile(_CR_EXE + r"precheck --task " + _CR_TASK + r" --project-key [A-Za-z0-9-]{1,200} --session " + _CR_SESSION + r" --profile (?:ECON-FWD-M20-WO/1|ECON-FWD-M20-PREREG/1)", re.ASCII)
-CONTROLLED_READ_DIAGNOSE_FORM = re.compile(_CR_EXE + r"diagnose --task " + _CR_TASK + r" --project-key [A-Za-z0-9-]{1,200} --session " + _CR_SESSION + r" --profile (?:ECON-FWD-M20-WO/1|ECON-FWD-M20-PREREG/1) --expect-prefix-bytes (?P<bytes>[1-9][0-9]{0,7}) --expect-prefix-sha256 [0-9a-f]{64}", re.ASCII)
+CONTROLLED_READ_PRECHECK_FORM = re.compile(_CR_EXE + r"precheck --task " + _CR_TASK + r" --project-key [A-Za-z0-9-]{1,200} --session " + _CR_SESSION + r" --profile (?:ECON-FWD-M20-WO/1|ECON-FWD-M20-PREREG/1|ECON-FWD-M20-WO/2)", re.ASCII)
+CONTROLLED_READ_DIAGNOSE_FORM = re.compile(_CR_EXE + r"diagnose --task " + _CR_TASK + r" --project-key [A-Za-z0-9-]{1,200} --session " + _CR_SESSION + r" --profile (?:ECON-FWD-M20-WO/1|ECON-FWD-M20-PREREG/1|ECON-FWD-M20-WO/2) --expect-prefix-bytes (?P<bytes>[1-9][0-9]{0,7}) --expect-prefix-sha256 [0-9a-f]{64}", re.ASCII)
 # ERRATA-001 E5 (a): a module execution spelling on the normalized text: -m, -mmoneylab..., -bm, .__main__.
 # A string rule for known spellings only; it is not isolation against every way to run or import Python.
 _CR_MODULE = r"(?<![\w./-])-[a-z]*m\s*moneylab\.controlled_read(?!\w)"

@@ -51,7 +51,7 @@ SELECTED_ENTRY_ONLY = "SELECTED_ENTRY_ONLY"
 APPLICABILITY: dict[str, str] = {
     "S1": GLOBAL, "S2": GLOBAL, "S3a": SELECTED_ENTRY_ONLY, "S3b": SELECTED_ENTRY_ONLY, "S3c": SELECTED_ENTRY_ONLY,
     "S4a": SELECTOR_KIND_DEPENDENT, "S4b": SELECTED_ENTRY_ONLY, "S4c": SELECTED_ENTRY_ONLY,
-    "S4d": SELECTED_ENTRY_ONLY,
+    "S4d": SELECTED_ENTRY_ONLY, "S4e": SELECTED_ENTRY_ONLY, "S4f": SELECTED_ENTRY_ONLY,  # AUTO-12 N6
 }
 # D5: the only (check_id, field_path, expected) triples that are ever printed.
 FIELDS = frozenset({
@@ -65,11 +65,13 @@ FIELDS = frozenset({
     ("S4c", "tool_result.content", "string_or_array"),
     ("S4d", "tool_result.content[]", "object"), ("S4d", "tool_result.content[].type", "text_literal"),
     ("S4d", "tool_result.content[].text", "string"),
+    ("S4e", "tool_result.content[]", "marker_free_nontext"),  # AUTO-12 N6: a whole marker in a non-text item
+    ("S4f", "tool_result.content[]", "within_nontext_scan_limits"),  # AUTO-12 N6: a non-text scan limit
 })
 JSON_TYPES = frozenset({"missing", "null", "bool", "number", "string", "array", "object"})
 UNLISTED_FIELDS = frozenset({"assistant.content[].type", "tool_result.content[].type"})  # string_unlisted
-BLOCK_INDEX_CHECKS = frozenset({"S2", "S3b", "S3c", "S4a", "S4b", "S4c", "S4d"})
-ITEM_INDEX_CHECKS = frozenset({"S4d"})
+BLOCK_INDEX_CHECKS = frozenset({"S2", "S3b", "S3c", "S4a", "S4b", "S4c", "S4d", "S4e", "S4f"})
+ITEM_INDEX_CHECKS = frozenset({"S4d", "S4e", "S4f"})
 _NEVER = frozenset({"STORE_PATH_INVALID", "STORE_FAILED", "ATTEMPT_EXISTS"})
 
 

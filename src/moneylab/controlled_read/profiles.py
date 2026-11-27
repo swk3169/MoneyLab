@@ -1,6 +1,6 @@
-"""D9-D11: the two fixed ECON-FWD-M20 profiles and the shared normalization.
+"""D9-D11 and AUTO-12 N2: the fixed ECON-FWD-M20 profiles and the shared normalization.
 
-Only two profiles exist. Another document needs a new Work Order or ERRATA: no profile or marker is added
+Only the profiles in PROFILES exist. Another document needs a new Work Order or ERRATA: no profile or marker is added
 or guessed at run time. A marker line is a line that equals the marker constant byte for byte; anything
 else (indentation, trailing space, quotes, other case) is body text."""
 
@@ -23,6 +23,9 @@ class Profile:
     end: bytes
     kinds: frozenset[str]  # selector kinds this profile accepts
     trim_empty_edges: bool  # D10 drops the outer zero-length lines; D11 keeps every line
+    # AUTO-12 N2: skip a tool_result content item whose type is a string other than "text" when the bounded
+    # scan of transcript.NontextPolicy finds no marker in it. False keeps the S4d rule for such an item.
+    skip_marker_free_nontext: bool = False
 
 
 WORK_ORDER = Profile(
@@ -35,7 +38,23 @@ PREREGISTRATION = Profile(
     begin=b"===== FINAL BODY BEGIN =====",
     end=b"===== FINAL BODY END =====",
     kinds=frozenset({"tool_result"}), trim_empty_edges=False)
-PROFILES: dict[str, Profile] = {p.id: p for p in (WORK_ORDER, PREREGISTRATION)}
+# AUTO-12-CONTROLLED-READ-NONTEXT N2: ECON-FWD-M20-WO/2 (version 2). Its begin, end, kinds and
+# trim_empty_edges values are those written below; it differs from ECON-FWD-M20-WO/1 in
+# skip_marker_free_nontext=True, so its candidates, its uniqueness and its PRECHECK_OK mean less:
+# (a) A candidate is only a supported single text string (an assistant text block, a tool_result string
+#     content, or a content array item with type == "text") that has a BEGIN or END marker line under the
+#     existing rule (marker_line_present: a whole line equal to the marker).
+# (b) Items are never joined, attachments are never interpreted and nothing is decoded further.
+# (c) Uniqueness under /2 holds only within the scope of (a); it does not mean the marker is unique in the
+#     whole non-text content.
+# (d) The non-text scan only checks the conditions that refuse a skip (a whole marker in a key or string
+#     value: S4e; a scan limit: S4f). It neither supports nor validates non-text content.
+WORK_ORDER_V2 = Profile(
+    id="ECON-FWD-M20-WO/2", version=2,
+    begin=b"-----BEGIN ECON-FWD-M20 WORK ORDER CANDIDATE-----",
+    end=b"-----END ECON-FWD-M20 WORK ORDER CANDIDATE-----",
+    kinds=frozenset({"assistant", "tool_result"}), trim_empty_edges=True, skip_marker_free_nontext=True)
+PROFILES: dict[str, Profile] = {p.id: p for p in (WORK_ORDER, PREREGISTRATION, WORK_ORDER_V2)}
 
 
 def check_kind(profile: Profile, kind: str) -> None:
