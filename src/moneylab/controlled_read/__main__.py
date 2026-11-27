@@ -281,6 +281,75 @@ def _diagnose(argv: list[str], root: Path | None, home: Path | None) -> dict[str
     return diagnose.diagnose_document(outcome, violation=violation, **known)
 
 
+def _candidates(argv: list[str], root: Path | None, home: Path | None) -> dict[str, Any]:
+    """AUTO-15 N3: fix the prefix [0, N), scan it for at most CANDIDATE_LIMIT candidates, run each one with a
+    unique selector through the run selection and extraction path, then re-hash. A failure of the whole
+    selection or a re-hash that replaces the result drops every item and value. Nothing is recorded."""
+    try:
+        args = diagnose.parse_candidates(argv)
+    except ControlledReadError as exc:  # N3 1: nothing is echoed
+        return diagnose.candidates_document(exc.code)
+    target: dict[str, Any] = {"project_key": args.project_key, "session_id": args.session_id,
+                              "expected_prefix_bytes": args.prefix_bytes,
+                              "expected_prefix_sha256": args.prefix_sha256, "observed_size_at_open": None,
+                              "trailing_bytes_excluded": None, "line_count": None, "prefix_check": None}
+    checks = {"prefix": NOT_REACHED, "scan": NOT_REACHED, "selected": NOT_REACHED}
+    known: dict[str, Any] = {"task_id": args.task_id, "target": target, "profile": store.profile_ref(args.profile),
+                             "checks": checks}
+    try:
+        confirmed_root(root)
+        home_dir = confirmed_home(home)
+    except ControlledReadError as exc:  # N3 2
+        return diagnose.candidates_document(exc.code, **known)
+    profile = profiles.PROFILES[args.profile]
+    deadline = transcript.Deadline()
+    try:
+        session = diagnose.open_fixed_prefix(home_dir, args.project_key, args.session_id, args.prefix_bytes,
+                                             args.prefix_sha256, target, deadline)
+    except (ControlledReadError, diagnose.DiagnoseError) as exc:  # N3 4
+        checks["prefix"] = FAILED
+        return diagnose.candidates_document(exc.code, **known)
+    checks["prefix"] = PASSED
+    items: list[dict[str, Any]] | None = None
+    try:
+        positions: list[tuple[int, int | None, bytes]] = []
+        try:
+            found = transcript.scan_candidates(
+                session.prefix, profile.kinds, lambda text: profiles.marker_line_present(profile, text), deadline,
+                **_nontext(profile, deadline), positions=positions, limit=diagnose.CANDIDATE_LIMIT)
+        except transcript.CandidateLimitReached:  # N3 5: no candidate is processed
+            checks["scan"] = diagnose.LIMIT_STOPPED
+            outcome = diagnose.CANDIDATES_LIMIT_EXCEEDED
+        except ControlledReadError as exc:  # FormatViolation included
+            checks["scan"] = FAILED
+            if exc.code == "TIME_LIMIT_EXCEEDED":  # no re-hash
+                target["prefix_check"] = transcript.INCOMPLETE
+                return diagnose.candidates_document(exc.code, **known)
+            outcome = exc.code
+        else:
+            checks["scan"] = PASSED
+            items, failed = diagnose.select_candidates(session.prefix, profile, found, positions, deadline,
+                                                       lambda: _nontext(profile, deadline))
+            if failed is not None:  # N3 6 d: the whole selection fails, every item is dropped
+                checks["selected"] = FAILED
+                if failed == "TIME_LIMIT_EXCEEDED":  # no re-hash
+                    target["prefix_check"] = transcript.INCOMPLETE
+                    return diagnose.candidates_document(failed, **known)
+                outcome = failed
+            else:
+                checks["selected"] = PASSED
+                outcome = diagnose.CANDIDATES_LISTED
+        replaced, check = session.rehash(deadline)  # N3 7
+        target["prefix_check"] = check
+    finally:
+        session.handle.close()
+    if replaced is not None:  # every item and value is dropped
+        return diagnose.candidates_document(replaced, **known)
+    if outcome == diagnose.CANDIDATES_LISTED:
+        return diagnose.candidates_document(outcome, candidates=items, **known)
+    return diagnose.candidates_document(outcome, **known)
+
+
 def run(argv: list[str], *, root: Path | None = None, home: Path | None = None) -> dict[str, Any]:
     """The one output document of a call. `root` and `home` are test seams."""
     if argv[:1] == ["status"]:
@@ -289,6 +358,8 @@ def run(argv: list[str], *, root: Path | None = None, home: Path | None = None) 
         return _precheck(argv, root, home)
     if argv[:1] == ["diagnose"]:
         return _diagnose(argv, root, home)
+    if argv[:1] == ["candidates"]:
+        return _candidates(argv, root, home)
     return _run(argv, root, home)
 
 
